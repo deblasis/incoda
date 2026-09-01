@@ -1,12 +1,11 @@
 #!/bin/sh
-# Installs the incoda binary on macOS or Linux from a private GitHub release.
+# Installs the incoda binary on macOS or Linux from a GitHub release.
 #
-# The repository is private, so release assets cannot be fetched with a plain
-# curl: they need an authenticated API call. This script uses the gh CLI for
-# that, verifies the download against SHA256SUMS, and refuses to install
-# anything it could not verify.
+# Downloads the prebuilt binary for this platform, verifies it against the
+# release's SHA256SUMS, and installs it. Nothing unverifiable is installed.
 #
-# usage: ./install.sh [VERSION]     (VERSION defaults to the latest release)
+# usage: [VERSION=v0.1.1] sh install.sh
+#        sh install.sh v0.1.1
 #
 # environment:
 #   INCODA_INSTALL_DIR   where to put the binary (default: ~/.local/bin)
@@ -16,22 +15,13 @@ set -eu
 
 REPO="${INCODA_REPO:-deblasis/incoda}"
 INSTALL_DIR="${INCODA_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${1:-}"
+VERSION="${1:-${INCODA_VERSION:-}}"
 
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 # --- preconditions -------------------------------------------------------
 
-command -v gh >/dev/null 2>&1 || fail 'gh (the GitHub CLI) is not on PATH.
-
-incoda is distributed from a PRIVATE repository, so its release assets cannot be
-downloaded without authentication. Install gh from https://cli.github.com/ and
-run `gh auth login`, then re-run this script.'
-
-gh auth status >/dev/null 2>&1 || fail 'gh is installed but not authenticated. Run `gh auth login` and try again.
-
-Downloading assets from a PRIVATE repository needs a token with `repo` scope.
-Check yours with `gh auth status`.'
+command -v curl >/dev/null 2>&1 || fail 'curl is required to download the release.'
 
 # --- pick the asset ------------------------------------------------------
 
@@ -49,22 +39,22 @@ esac
 
 ASSET="incoda_${os}_${arch}"
 
-if [ -z "$VERSION" ]; then
-  VERSION="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
-  [ -n "$VERSION" ] || fail "could not determine the latest release of $REPO. Is the tag pushed and the release published?"
+if [ -n "$VERSION" ]; then
+  BASE="https://github.com/$REPO/releases/download/$VERSION"
+else
+  BASE="https://github.com/$REPO/releases/latest/download"
 fi
 
-printf 'incoda: installing %s (%s) from %s\n' "$VERSION" "$ASSET" "$REPO"
+printf 'incoda: installing %s (%s) from %s\n' "${VERSION:-latest}" "$ASSET" "$REPO"
 
 WORK="$(mktemp -d)"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
-gh release download "$VERSION" --repo "$REPO" --pattern "$ASSET" --pattern SHA256SUMS --dir "$WORK" \
-  || fail "gh release download failed for $VERSION"
+fetch() { curl -fsSL "$BASE/$1" -o "$WORK/$1" || fail "could not download $1 from $BASE (does the release exist?)"; }
 
-[ -f "$WORK/$ASSET" ]      || fail "the release does not contain $ASSET"
-[ -f "$WORK/SHA256SUMS" ]  || fail 'the release does not contain SHA256SUMS; refusing to install an unverified binary'
+fetch "$ASSET"
+fetch SHA256SUMS
 
 # --- verify --------------------------------------------------------------
 

@@ -21,13 +21,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: extractions/setup-just@v2
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.0"
           check-latest: true
 
-      - name: Test
-        run: go test ./...
+      - name: Gates
+        run: just ci
 
       - name: Resolve tag
         id: tag
@@ -38,38 +40,12 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cross-compile
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -eu
-          mkdir -p dist
-          COMMIT="$(git rev-parse --short HEAD)"
-          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LD="-s -w \
-            -X github.com/deblasis/incoda/internal/cli.Version=${TAG} \
-            -X github.com/deblasis/incoda/internal/cli.Commit=${COMMIT} \
-            -X github.com/deblasis/incoda/internal/cli.Date=${DATE}"
-          for target in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
-            os="${target%/*}"; arch="${target#*/}"
-            out="dist/incoda_${os}_${arch}"
-            [ "$os" = "windows" ] && out="${out}.exe"
-            echo "building $out"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LD" -o "$out" .
-          done
-          cd dist && sha256sum incoda_* > SHA256SUMS && cat SHA256SUMS
+      # dist + publish: the same recipes a human runs for a manual release,
+      # so CI can be bypassed entirely with `just dist TAG && just publish TAG`.
+      - name: Build artifacts
+        run: just dist "${{ steps.tag.outputs.tag }}"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
-              --title "incoda $TAG" \
-              --notes "Cross-compiled binaries for windows/amd64, windows/arm64, darwin/arm64, darwin/amd64, linux/amd64 and linux/arm64, plus SHA256SUMS.
-
-This repository is private, so release assets need an authenticated download. Use \`install.ps1\` (Windows) or \`install.sh\` (macOS/Linux), which pull via the \`gh\` CLI and verify the SHA-256 before installing. A \`gh\` token with \`repo\` scope is required."
-          fi
+        run: just publish "${{ steps.tag.outputs.tag }}"

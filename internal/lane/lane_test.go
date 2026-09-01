@@ -10,7 +10,7 @@ import (
 )
 
 func TestValidateKey(t *testing.T) {
-	good := []string{"wintty", "wintty-release", "a", "gui_tests", "v1.2", strings.Repeat("k", 64)}
+	good := []string{"heavy-builds", "gui-tests", "a", "gui_tests", "v1.2", strings.Repeat("k", 64)}
 	for _, k := range good {
 		if err := ValidateKey(k); err != nil {
 			t.Errorf("ValidateKey(%q) = %v, want nil", k, err)
