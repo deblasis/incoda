@@ -3,7 +3,7 @@
 Copy everything below the line into the machine's `~/.claude/CLAUDE.md` (or a
 repository's `AGENTS.md`, or any equivalent agent instruction file) and replace
 `<KEY>` with the queue key for that machine or project. Adjust the "must run
-under the lane" list to that machine's temperament — the thresholds below are a
+under the lane" list to that machine's temperament; the thresholds below are a
 starting point, not a law.
 
 If a repository always uses one key, set `INCODA_QUEUE=<KEY>` once in the
@@ -28,7 +28,7 @@ it:
 - any `zig build` / `zig test` with `-Denable-llvm`
 - any node job with `--max-old-space-size` of 4096 or more
 - any large Rust or C++ debug build
-- **any GUI or UI test run** — anything that drives a real window, needs the
+- **any GUI or UI test run**; anything that drives a real window, needs the
   desktop to itself, or synthesizes input. Two of these at once fail in ways
   that look like product bugs.
 - any test suite that is timing-sensitive enough to fail on a loaded machine
