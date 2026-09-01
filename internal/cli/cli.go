@@ -20,7 +20,7 @@ import (
 // interface: scripts may rely on them.
 const (
 	ExitOK        = 0
-	ExitUsage     = 120 // bad arguments, missing queue key, invalid key
+	ExitUsage     = 120 // bad arguments, bad key, or a refused force-release
 	ExitTimeout   = 121 // --wait elapsed without a free slot
 	ExitState     = 122 // state directory or OS lock unusable
 	ExitSpawn     = 123 // the lane was acquired but the command could not start
@@ -66,7 +66,7 @@ $XDG_STATE_HOME/incoda or ~/.local/state/incoda (Linux).
 
 exit codes:
   <child>  run passes the command's own exit status through unchanged
-  120      usage error (bad flags, missing or invalid queue key)
+  120      usage error (bad flags, missing/invalid queue key, refused force-release)
   121      --wait elapsed while still queued
   122      state directory or OS file locking unusable
   123      lane acquired but the command could not be started

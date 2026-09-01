@@ -201,7 +201,7 @@ scripts may rely on them.
 | Code | Meaning |
 |---|---|
 | *child's* | `run` succeeded in acquiring; this is the command's own status |
-| `120` | usage error — bad flags, missing or invalid queue key |
+| `120` | usage error — bad flags, missing or invalid queue key, or a `force-release` refused because the queue has live participants |
 | `121` | `--wait` elapsed while still queued |
 | `122` | state directory or OS file locking unusable |
 | `123` | the lane was acquired but the command could not be started |
