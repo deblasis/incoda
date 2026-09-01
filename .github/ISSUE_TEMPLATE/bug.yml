@@ -1,0 +1,36 @@
+name: Bug report
+description: Something did not queue, or queued when it should not have
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect instead? Two jobs running at once is the bug that matters most here.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: incoda version
+      description: Output of `incoda version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+        - Windows
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands and output, including `incoda doctor` and `incoda status --json` if relevant.
+    validations:
+      required: true
