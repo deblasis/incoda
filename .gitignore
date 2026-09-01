@@ -1,0 +1,9 @@
+# build output
+/dist/
+/bin/
+incoda
+incoda.exe
+
+# go test scratch
+*.test
+*.exe~
