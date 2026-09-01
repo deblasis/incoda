@@ -93,6 +93,11 @@ Linux) and nothing is ever resolved from the working directory.
 use a separate band, documented and stable: `120` usage, `121` wait elapsed,
 `122` state unusable, `123` spawn failure, `130` interrupted while queueing.
 
+Output is colored on a terminal and plain everywhere else. The standard
+opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and
+color never reaches `--json` or a pipe. `CLICOLOR_FORCE=1` turns it back on
+for `| less -R` and its cousins.
+
 Signals are forwarded to the child. On Windows the child runs inside a Job
 Object with kill-on-close, so a `SIGKILL` of `incoda` still takes the whole
 build tree with it. On Unix the child gets its own process group; a hard kill

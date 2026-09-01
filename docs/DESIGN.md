@@ -174,6 +174,26 @@ renderer says "unavailable" rather than printing a confident zero.
   available physical memory: that needs a mach `host_statistics64` call and
   therefore cgo, and this binary stays pure Go.
 
+## Color
+
+Human output is painted with a small hand-rolled ANSI palette
+(`internal/colorize`), so the dependency count stays at one. The codes are the
+classic 8-color set plus bold and dim, which adapt to the terminal's theme
+instead of fighting it.
+
+The decision follows the conventions people already know, in priority order:
+`NO_COLOR` (https://no-color.org, any non-empty value) always wins; then
+`CLICOLOR_FORCE` (anything but `0`) forces color on, even for a pipe; then
+color requires a terminal and a `TERM` that is not `dumb`. `--no-color` is
+the per-invocation switch and beats everything except `NO_COLOR`. On Windows
+the palette only turns on after `SetConsoleMode` accepts
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING`, so a console that cannot draw the
+sequences gets plain text instead of escape soup.
+
+With color off, the renderers are byte-for-byte what the uncolored ones
+always produced; scripts that scrape the plain text keep working, and
+`status --json` is never painted.
+
 ## Dependencies
 
 The Go standard library, plus `golang.org/x/sys` for `LockFileEx`, `flock`,

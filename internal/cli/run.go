@@ -20,6 +20,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	reason := fs.String("reason", "", "free-text note shown in status")
 	poll := fs.Duration("poll", 500*time.Millisecond, "how often to re-check position while queued")
 	quiet := fs.Bool("quiet", false, "suppress lane chatter on stderr")
+	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: 30 * time.Minute}
 	fs.Var(wait, "wait", "max time to queue: a Go duration (30m) or bare seconds (1800); 0 fails immediately, negative waits forever")
 	fs.Usage = func() {
@@ -36,6 +37,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	if *slots < 1 {
 		return usagef("--slots must be at least 1, got %d", *slots)
 	}
+	p := paletteFor(stderr, *noColor)
 	key, err := resolveKey(*queue)
 	if err != nil {
 		return err
@@ -92,13 +94,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			if ahead < 0 {
 				ahead = len(live)
 			}
-			fmt.Fprintf(stderr, "incoda: queue %q busy (%d slot(s), %d ahead of you), waited %s%s\n",
-				key, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+				p.Yellow(fmt.Sprintf("queue %q busy (%d slot(s), %d ahead of you), waited %s%s",
+					key, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))))
 			for i, e := range live {
 				if i >= effSlots {
 					break
 				}
-				fmt.Fprintf(stderr, "incoda:   holder pid %d in %s: %s\n", e.Ticket.PID, e.Ticket.Dir, e.Ticket.CommandString())
+				fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
+					p.Dim(fmt.Sprintf("holder pid %d in %s: %s", e.Ticket.PID, e.Ticket.Dir, e.Ticket.CommandString())))
 			}
 		},
 	})
@@ -119,11 +123,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}
 
 	if _, _, live, err := en.Position(); err == nil && lane.SlotsDisagree(live) {
-		fmt.Fprintf(stderr, "incoda: warning: participants on queue %q disagree about --slots; the smallest value is in force\n", key)
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+			p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; the smallest value is in force", key)))
 	}
 
 	if !*quiet {
-		fmt.Fprintf(stderr, "incoda: acquired queue %q (pid %d)\n", key, os.Getpid())
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+			p.Green(fmt.Sprintf("acquired queue %q (pid %d)", key, os.Getpid())))
 	}
 
 	stop() // hand interrupt handling to the child supervisor
