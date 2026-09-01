@@ -1,0 +1,4 @@
+# LF everywhere: gofmt writes LF, so a CRLF checkout makes the fmt gate fail.
+* text=auto eol=lf
+*.png binary
+*.gif binary
