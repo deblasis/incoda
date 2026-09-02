@@ -27,13 +27,6 @@ const (
 	ExitInterrupt = 130 // incoda itself was interrupted while queueing
 )
 
-// Version information, stamped at build time with -ldflags -X.
-var (
-	Version = "dev"
-	Commit  = "none"
-	Date    = "unknown"
-)
-
 type usageError struct{ msg string }
 
 func (e *usageError) Error() string { return e.msg }
@@ -98,7 +91,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		err = cmdDoctor(rest, stdout, stderr)
 	case "version", "--version", "-V":
-		fmt.Fprintf(stdout, "incoda %s\ncommit: %s\nbuilt:  %s\n", Version, Commit, Date)
+		v, c, d := versionInfo()
+		fmt.Fprintf(stdout, "incoda %s\ncommit: %s\nbuilt:  %s\n", v, c, d)
 		return ExitOK
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, rootUsage)
