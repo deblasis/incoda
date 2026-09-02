@@ -138,7 +138,8 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	p := paletteFor(stdout, *noColor)
 
-	fmt.Fprintf(stdout, "incoda %s (commit %s, built %s)\n", p.Bold(Version), Commit, Date)
+	v, c, d := versionInfo()
+	fmt.Fprintf(stdout, "incoda %s (commit %s, built %s)\n", p.Bold(v), c, d)
 	fmt.Fprintf(stdout, "%s %s  %s/%s\n", p.Dim("go:       "), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	host, _ := os.Hostname()
 	fmt.Fprintf(stdout, "%s %s\n", p.Dim("host:     "), host)
