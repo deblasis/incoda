@@ -59,6 +59,10 @@ func TestFromBuildInfo(t *testing.T) {
 			settings:   settings("vcs.revision", "abc", "vcs.modified", "true"),
 			wantCommit: "abc+dirty",
 		},
+		{
+			name:     "dirty flag without a revision has nothing to mark",
+			settings: settings("vcs.modified", "true"),
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -68,9 +72,6 @@ func TestFromBuildInfo(t *testing.T) {
 					c.mainVersion, v, commit, date, c.wantVersion, c.wantCommit, c.wantDate)
 			}
 		})
-	}
-	if _, commit, _ := fromBuildInfo("", settings("vcs.modified", "true")); commit != "" {
-		t.Errorf("dirty flag without a revision produced commit %q, want empty", commit)
 	}
 }
 
