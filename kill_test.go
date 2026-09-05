@@ -14,9 +14,11 @@ import (
 
 // startHolder launches a run that holds key for holdMS and returns the
 // command plus a buffer collecting its stderr, where the kill notice lands.
-func startHolder(t *testing.T, incoda, stamp, state, key, label string, holdMS int) (*exec.Cmd, *bytes.Buffer) {
+// poll is the holder's --poll, which is also how often it looks for a kill
+// request.
+func startHolder(t *testing.T, incoda, stamp, state, key, label string, holdMS int, poll string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
-	cmd := exec.Command(incoda, "run", "--queue", key, "--wait", "60s", "--poll", "50ms",
+	cmd := exec.Command(incoda, "run", "--queue", key, "--wait", "60s", "--poll", poll,
 		"--", stamp, filepath.Join(t.TempDir(), label+".txt"), label, strconv.Itoa(holdMS))
 	cmd.Env = laneEnv(state)
 	var errBuf bytes.Buffer
@@ -35,7 +37,7 @@ func TestKillHolderCooperatively(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 
-	holder, holderErr := startHolder(t, incoda, stamp, state, "kill", "victim", 30000)
+	holder, holderErr := startHolder(t, incoda, stamp, state, "kill", "victim", 30000, "50ms")
 	waitFor(t, incoda, state, "kill", func(q queueReport) bool { return len(q.Holders) == 1 })
 
 	start := time.Now()
@@ -71,10 +73,10 @@ func TestKillWaiterCancelsIt(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 
-	holder, _ := startHolder(t, incoda, stamp, state, "kw", "h", 4000)
+	holder, _ := startHolder(t, incoda, stamp, state, "kw", "h", 4000, "50ms")
 	defer func() { _ = holder.Wait() }()
 	waitFor(t, incoda, state, "kw", func(q queueReport) bool { return len(q.Holders) == 1 })
-	waiter, waiterErr := startHolder(t, incoda, stamp, state, "kw", "w", 10)
+	waiter, waiterErr := startHolder(t, incoda, stamp, state, "kw", "w", 10, "50ms")
 	waitFor(t, incoda, state, "kw", func(q queueReport) bool { return len(q.Waiting) == 1 })
 
 	out, code := runIncoda(t, incoda, state, "kill", "--queue", "kw", "--pid", strconv.Itoa(waiter.Process.Pid),
@@ -113,7 +115,10 @@ func TestKillForceTerminates(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 
-	holder, _ := startHolder(t, incoda, stamp, state, "kf", "victim", 30000)
+	// A holder polling every 10 s stands in for one that never answers: it
+	// cannot notice the request before the killer gives up on it, so the
+	// forced path is the one that runs, on a fast runner as on a slow one.
+	holder, _ := startHolder(t, incoda, stamp, state, "kf", "victim", 30000, "10s")
 	waitFor(t, incoda, state, "kf", func(q queueReport) bool { return len(q.Holders) == 1 })
 
 	// --wait 0 skips the cooperative grace so the force path is what runs.

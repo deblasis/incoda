@@ -89,9 +89,18 @@ func TestAcquireStopsOnKillRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer waiter.Release(0)
+	// The killer is another process in real life, so it gets its own
+	// Queue handle here: a Queue's registry lock is not safe for two
+	// goroutines, and sharing q with the waiter's poll would be a data
+	// race that exists only in the test.
+	killer, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer killer.Close()
 	go func() {
 		time.Sleep(150 * time.Millisecond)
-		_ = q.requestKillFile(waiter.name, KillRequest{By: "alex@box", Reason: "not needed any more"})
+		_ = killer.requestKillFile(waiter.name, KillRequest{By: "alex@box", Reason: "not needed any more"})
 	}()
 	err = waiter.Acquire(context.Background(), AcquireOptions{Wait: 5 * time.Second, Poll: 50 * time.Millisecond})
 	var killed *KilledError
