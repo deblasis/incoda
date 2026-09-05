@@ -38,7 +38,7 @@ func usagef(format string, args ...any) error {
 const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI test runs)
 
 usage:
-  incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] [--] <cmd...>
+  incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once]
   incoda queues
@@ -48,7 +48,9 @@ usage:
 
 The queue key comes from --queue or the INCODA_QUEUE environment variable.
 There is no default key: an unkeyed run is refused rather than silently
-sharing a lane with unrelated work.
+sharing a lane with unrelated work. A run exports INCODA_HELD to its child;
+a nested run on a key listed there passes through instead of queueing behind
+its own parent. INCODA_OWNER is the default for --owner.
 
 State is machine-local and per-user, and is NEVER derived from the working
 directory. Every caller of a key contends for the same lane no matter which

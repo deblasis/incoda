@@ -82,7 +82,7 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] -- <cmd...>` | Acquire a slot, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`. |
+| `incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once]` | Repaint `status` on an interval. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
@@ -102,6 +102,20 @@ Signals are forwarded to the child. On Windows the child runs inside a Job
 Object with kill-on-close, so a `SIGKILL` of `incoda` still takes the whole
 build tree with it. On Unix the child gets its own process group; a hard kill
 of `incoda` can orphan it (see [limits](#known-limits)).
+
+**Nested runs on a held key pass through.** `run` exports `INCODA_HELD` to
+its child, listing the keys it holds. A nested `incoda run` on one of those
+keys runs at once inside the parent's lane instead of queueing behind it,
+which is what lets a build recipe take its own lane while an agent wraps the
+whole recipe in `run` from outside. A nested run on a *different* key queues
+as usual.
+
+**Every job leaves its cost in `lane.log`.** The release line records the
+peak memory and CPU time of the job tree (`peak_mem=3.2 GB cpu=4m12s`), from
+the Job Object on Windows and from `rusage` on Unix, and a dead holder's
+ticket is logged as `reaped` when the next scan deletes it. The point is to
+size a queue from evidence: whether `--slots 2` fits is a question this log
+can answer.
 
 ## Install
 

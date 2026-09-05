@@ -143,7 +143,12 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 			free = false
 		}
 		if free {
+			// The only record of how a hard-killed holder ended. Without
+			// this line the log shows an enqueue with no ending, and a
+			// history that cannot say how a job finished cannot be used to
+			// size a queue.
 			_ = os.Remove(path)
+			q.Logf("queue=%s event=reaped pid=%d", q.Key, ord.pid)
 			continue
 		}
 		e := Entry{File: de.Name(), order: ord}
@@ -264,6 +269,9 @@ type Enrollment struct {
 	path   string
 	lock   *lockfile.File
 	ticket Ticket
+	// Stats is set by the caller once the command has finished and is
+	// written on the release line. Zero means "nothing measured".
+	Stats Stats
 }
 
 // Ticket returns a copy of the enrolled ticket payload.
@@ -317,7 +325,11 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 	if err != nil {
 		return nil, err
 	}
-	q.Logf("queue=%s event=enqueue pid=%d slots=%d cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, en.ticket.CommandString())
+	owner := ""
+	if en.ticket.Owner != "" {
+		owner = " owner=" + en.ticket.Owner
+	}
+	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, owner, en.ticket.CommandString())
 	return en, nil
 }
 
@@ -334,7 +346,7 @@ func (e *Enrollment) Release(rc int) {
 		return nil
 	})
 	e.lock = nil
-	e.q.Logf("queue=%s event=release pid=%d rc=%d", e.q.Key, e.ticket.PID, rc)
+	e.q.Logf("queue=%s event=release pid=%d rc=%d%s", e.q.Key, e.ticket.PID, rc, e.Stats.logFields())
 }
 
 // Position reports this enrollment's 0-based place in the live queue plus the

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -99,6 +100,45 @@ func resumeProcess(pid uint32) error {
 		return fmt.Errorf("no threads found for pid %d", pid)
 	}
 	return nil
+}
+
+// jobBasicAccounting mirrors JOBOBJECT_BASIC_ACCOUNTING_INFORMATION from
+// winnt.h. x/sys/windows has the information-class constant and the query
+// call but not this struct, so it is laid out here; the times are in 100 ns
+// units like every FILETIME-shaped counter.
+type jobBasicAccounting struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+// usage reads what the whole job tree cost. The Job Object is the reason
+// this is trustworthy on Windows: every descendant of the child was inside
+// it from its first instruction, so PeakJobMemoryUsed and the accounting
+// times cover the compiler processes a build spawns, not just the shell
+// that started them. Each half is independent so a failed query drops one
+// number rather than both.
+func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.Duration, haveCPU bool) {
+	if s.job == 0 {
+		return 0, false, 0, false
+	}
+	var ext windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	if err := windows.QueryInformationJobObject(s.job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&ext)), uint32(unsafe.Sizeof(ext)), nil); err == nil {
+		peak, havePeak = uint64(ext.PeakJobMemoryUsed), true
+	}
+	var acct jobBasicAccounting
+	if err := windows.QueryInformationJobObject(s.job, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&acct)), uint32(unsafe.Sizeof(acct)), nil); err == nil {
+		cpu = time.Duration(acct.TotalUserTime+acct.TotalKernelTime) * 100
+		haveCPU = true
+	}
+	return peak, havePeak, cpu, haveCPU
 }
 
 func (s *supervisor) killTree() {

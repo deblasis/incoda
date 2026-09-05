@@ -127,6 +127,45 @@ caller wins), and `run` warns when it observes a disagreement. It is not a full
 guarantee: a participant already running is never revoked, so a late arrival
 with a smaller `--slots` can briefly observe more holders than its own number.
 
+## Re-entrancy
+
+A queue is most useful when the recipe that needs it takes it itself: `just
+fuzz` runs `incoda run --queue gui -- ...` inside, so nobody can run the
+harness outside the lane by forgetting. The trap is an agent that then wraps
+the whole recipe in `incoda run --queue gui` from outside. The inner run would
+queue behind its own parent, wait out `--wait`, and exit 121 for a job that
+never ran.
+
+So `run` exports `INCODA_HELD`, a comma-separated list of the keys it holds,
+into the child's environment. A nested `run` whose key is in that list does
+not enroll: it logs `event=reenter` on the queue and runs the command inside
+the parent's ticket. A key that is *not* in the list queues normally, so a
+nested run on another queue still serialises.
+
+This is inheritance, not a global: only descendants of the holding `incoda`
+see the variable, so an unrelated session cannot claim a lane it does not
+hold by setting it. Setting `INCODA_HELD` by hand is the same bypass as not
+using the tool.
+
+## Job accounting
+
+Deciding how many slots a queue should have is a measurement, not a policy.
+The claim behind `--slots 2` on a build queue is "two of these fit in memory
+at once", and until the release line said what one of them peaked at, that
+claim was a feeling.
+
+On release `run` writes `peak_mem=` and `cpu=` on the queue's log line. On
+Windows they come from the Job Object the child runs in
+(`PeakJobMemoryUsed`, and the basic accounting user plus kernel time), so
+they cover every process the job spawned, not just the shell that started it.
+On Unix they come from the child's `rusage`, which the kernel only rolls
+grandchildren into when the child waited for them; that is documented as an
+approximation rather than hidden. A platform with neither writes nothing.
+
+The scanner also logs `event=reaped` when it deletes a dead ticket. Before
+that, a holder killed from Task Manager left an enqueue with no ending, and a
+history that cannot say how a job finished cannot be used to size a queue.
+
 ## Signals and process trees
 
 `SIGINT`/`SIGTERM`/Ctrl+C are forwarded to the child, and the ticket is

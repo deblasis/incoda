@@ -49,6 +49,10 @@ incoda watch  --queue <KEY>          # live view
 - Use `--reason` every time. When six sessions share a lane, "which worktree is
   that build in and why" is the first question anyone asks, and `status` can
   only answer it if you said.
+- Set `INCODA_OWNER` once per session (your session id or worktree name) so
+  `status` and `watch` can say whose job is whose without reading the cwd.
+- A recipe that takes its own lane is safe to wrap in `run` on the same key:
+  the nested run passes through instead of queueing behind you.
 
 ### The rules that matter
 
