@@ -220,6 +220,47 @@ func TestUnacknowledgedKillOffersForce(t *testing.T) {
 	}
 }
 
+func TestStaleRepliesFromACancelledKillAreIgnored(t *testing.T) {
+	// k, reason, enter starts a wait; esc abandons it; k, reason, enter
+	// again on the same pid. When the first wait's reply arrives late it
+	// must not touch the second attempt.
+	k := &fakeKiller{gone: false}
+	m := press(newTestModel(k), "enter", "k")
+	m = typeText(m, "first")
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	mm, cmd = m.Update(cmd()) // request done, wait issued
+	m = mm.(Model)
+	stale := cmd // the first attempt's wait, not yet delivered
+	m = press(m, "esc", "k")
+	m = typeText(m, "second")
+	mm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	mm, _ = m.Update(cmd())
+	m = mm.(Model)
+	mm, _ = m.Update(stale())
+	m = mm.(Model)
+	if m.pending == nil || m.pending.unacked {
+		t.Fatal("a reply from the cancelled attempt must not mark the new one unacknowledged")
+	}
+}
+
+func TestForceReportsATicketThatStayed(t *testing.T) {
+	k := &fakeKiller{gone: false}
+	m := press(newTestModel(k), "enter", "K")
+	m = typeText(m, "wedged")
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	mm, _ = m.Update(cmd())
+	m = mm.(Model)
+	if len(k.forced) != 1 {
+		t.Fatalf("K should force after the short grace, forced=%v", k.forced)
+	}
+	if v := view(m); !strings.Contains(v, "still held") {
+		t.Fatalf("a forced kill whose ticket stayed must say so, not claim success:\n%s", v)
+	}
+}
+
 func TestKillRefusalIsShown(t *testing.T) {
 	k := &fakeKiller{reqErr: errors.New("no live participant with that pid")}
 	m := press(newTestModel(k), "enter", "k")

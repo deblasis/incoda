@@ -42,13 +42,18 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		// --queue, else INCODA_QUEUE, else the overview: the same rule as
+		// plain mode, so a session that set the variable opens its queue.
 		key := strings.TrimSpace(*queue)
+		if key == "" {
+			key = strings.TrimSpace(os.Getenv("INCODA_QUEUE"))
+		}
 		if key != "" {
 			if err := lane.ValidateKey(key); err != nil {
-				return usagef("invalid queue key from --queue: %v", err)
+				return usagef("invalid queue key: %v", err)
 			}
 		}
-		if err := tui.Run(tui.Options{Dir: dir, Version: Version, Key: key, Interval: *interval, Events: max(*events, 8)}); err != nil {
+		if err := tui.Run(tui.Options{Dir: dir, Version: Version, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor}); err != nil {
 			return exitWith(ExitState, "watch: %v", err)
 		}
 		return nil

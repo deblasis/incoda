@@ -16,6 +16,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
@@ -42,6 +43,7 @@ type Options struct {
 	Key      string // start inside this queue; "" means the overview
 	Interval time.Duration
 	Events   int
+	NoColor  bool // --no-color: paint nothing, whatever the terminal offers
 	Killer   Killer
 	Load     func() (*report.Report, error)
 	Now      func() time.Time
@@ -62,6 +64,10 @@ type pendingKill struct {
 	// there; the screen then offers to force.
 	unacked bool
 	forcing bool
+	// seq ties the asynchronous replies to this attempt. A wait started
+	// for an earlier attempt on the same pid, then cancelled with esc,
+	// would otherwise report into a fresh one.
+	seq int
 }
 
 type toast struct {
@@ -78,20 +84,24 @@ type (
 	}
 	tickMsg          time.Time
 	killRequestedMsg struct {
+		seq int
 		key string
 		pid int
 		err error
 	}
 	killGoneMsg struct {
+		seq  int
 		key  string
 		pid  int
 		gone bool
 		err  error
 	}
 	forceDoneMsg struct {
-		key string
-		pid int
-		err error
+		seq  int
+		key  string
+		pid  int
+		gone bool
+		err  error
 	}
 )
 
@@ -113,6 +123,7 @@ type Model struct {
 
 	input   textinput.Model
 	pending *pendingKill
+	killSeq int
 	toast   toast
 	help    bool
 }
@@ -159,12 +170,19 @@ func New(opt Options) Model {
 
 // Run drives the model in a real terminal.
 func Run(opt Options) error {
-	_, err := tea.NewProgram(New(opt)).Run()
+	var popts []tea.ProgramOption
+	if opt.NoColor {
+		popts = append(popts, tea.WithColorProfile(colorprofile.Ascii))
+	}
+	_, err := tea.NewProgram(New(opt), popts...).Run()
 	return err
 }
 
+// Init asks the terminal for its background and loads once; each report
+// schedules the next tick, so loads never overlap however slow the state
+// directory is (see the tickMsg case).
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, m.load(), m.tick())
+	return tea.Batch(tea.RequestBackgroundColor, m.load())
 }
 
 func (m Model) load() tea.Cmd {
@@ -204,7 +222,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.clamp()
-		return m, nil
+		// The next load is scheduled from here, not from the tick, so a
+		// slow scan (many queues, a busy disk) delays the next one instead
+		// of piling concurrent loads on top of it.
+		return m, m.tick()
 	case tickMsg:
 		if m.toast.text != "" && m.opt.Now().After(m.toast.until) {
 			m.toast = toast{}
@@ -213,9 +234,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.opt.Now().Sub(m.pending.since) > ackGrace {
 			m.pending.unacked = true
 		}
-		return m, tea.Batch(m.load(), m.tick())
+		return m, m.load()
 	case killRequestedMsg:
-		if m.pending == nil || m.pending.pid != msg.pid {
+		if m.pending == nil || m.pending.seq != msg.seq {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -224,9 +245,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenQueue
 			return m, m.load()
 		}
-		return m, m.waitGone(msg.key, msg.pid, ackGrace)
+		return m, m.waitGone(msg.seq, msg.key, msg.pid, ackGrace)
 	case killGoneMsg:
-		if m.pending == nil || m.pending.pid != msg.pid {
+		if m.pending == nil || m.pending.seq != msg.seq {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -244,12 +265,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending.unacked = true
 		return m, nil
 	case forceDoneMsg:
-		if m.pending == nil || m.pending.pid != msg.pid {
+		if m.pending == nil || m.pending.seq != msg.seq {
 			return m, nil
 		}
-		if msg.err != nil {
+		switch {
+		case msg.err != nil:
 			m.say(fmt.Sprintf("force: %v", msg.err), true)
-		} else {
+		case !msg.gone:
+			m.say(fmt.Sprintf("pid %d was terminated but its ticket is still held; check incoda status", msg.pid), true)
+		default:
 			m.say(fmt.Sprintf("pid %d terminated; the kernel released the lane", msg.pid), false)
 		}
 		m.pending = nil
@@ -313,7 +337,8 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.psel++
 		case "k", "K", "shift+k":
 			if p := m.participantAt(m.psel); p != nil {
-				m.pending = &pendingKill{key: m.key, pid: p.entry.Ticket.PID, forcing: k != "k"}
+				m.killSeq++
+				m.pending = &pendingKill{key: m.key, pid: p.entry.Ticket.PID, forcing: k != "k", seq: m.killSeq}
 				m.input.Reset()
 				m.screen = screenKillPrompt
 				return m, m.input.Focus()
@@ -343,9 +368,9 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pending.since = m.opt.Now()
 			m.screen = screenKillPending
 			if m.pending.forcing {
-				return m, m.force(m.pending.key, m.pending.pid, reason)
+				return m, m.force(m.pending.seq, m.pending.key, m.pending.pid, reason)
 			}
-			return m, m.request(m.pending.key, m.pending.pid, reason)
+			return m, m.request(m.pending.seq, m.pending.key, m.pending.pid, reason)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -361,7 +386,7 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "f", "F", "shift+f":
 			if m.pending != nil && m.pending.unacked && !m.pending.forcing {
 				m.pending.forcing = true
-				return m, m.force(m.pending.key, m.pending.pid, m.pending.reason)
+				return m, m.force(m.pending.seq, m.pending.key, m.pending.pid, m.pending.reason)
 			}
 		}
 		return m, nil
@@ -369,38 +394,38 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) request(key string, pid int, reason string) tea.Cmd {
+func (m Model) request(seq int, key string, pid int, reason string) tea.Cmd {
 	killer := m.opt.Killer
 	return func() tea.Msg {
-		return killRequestedMsg{key: key, pid: pid, err: killer.Request(key, pid, reason)}
+		return killRequestedMsg{seq: seq, key: key, pid: pid, err: killer.Request(key, pid, reason)}
 	}
 }
 
-func (m Model) waitGone(key string, pid int, wait time.Duration) tea.Cmd {
+func (m Model) waitGone(seq int, key string, pid int, wait time.Duration) tea.Cmd {
 	killer := m.opt.Killer
 	return func() tea.Msg {
 		gone, err := killer.Gone(key, pid, wait)
-		return killGoneMsg{key: key, pid: pid, gone: gone, err: err}
+		return killGoneMsg{seq: seq, key: key, pid: pid, gone: gone, err: err}
 	}
 }
 
 // force asks first and then terminates: even a forced kill leaves the reason
 // on the ticket, so a participant that does wake up in time still learns
 // why, and the log reads request then outcome either way.
-func (m Model) force(key string, pid int, reason string) tea.Cmd {
+func (m Model) force(seq int, key string, pid int, reason string) tea.Cmd {
 	killer := m.opt.Killer
 	return func() tea.Msg {
 		if err := killer.Request(key, pid, reason); err != nil {
-			return forceDoneMsg{key: key, pid: pid, err: err}
+			return forceDoneMsg{seq: seq, key: key, pid: pid, err: err}
 		}
 		if gone, _ := killer.Gone(key, pid, time.Second); gone {
-			return forceDoneMsg{key: key, pid: pid}
+			return forceDoneMsg{seq: seq, key: key, pid: pid, gone: true}
 		}
 		if err := killer.Force(key, pid, reason); err != nil {
-			return forceDoneMsg{key: key, pid: pid, err: err}
+			return forceDoneMsg{seq: seq, key: key, pid: pid, err: err}
 		}
-		_, _ = killer.Gone(key, pid, ackGrace)
-		return forceDoneMsg{key: key, pid: pid}
+		gone, err := killer.Gone(key, pid, ackGrace)
+		return forceDoneMsg{seq: seq, key: key, pid: pid, gone: gone, err: err}
 	}
 }
 
