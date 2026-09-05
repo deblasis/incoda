@@ -129,8 +129,10 @@ func (m Model) renderOverview(w int) string {
 			continue
 		}
 		// Paint the state word only on unselected rows; the selected row
-		// is one solid highlight so the eye finds it first.
-		painted := strings.Replace(row, plainState(q), m.badge(q, false), 1)
+		// is one solid highlight so the eye finds it first. The badge's
+		// padding is one space each side, so swapping it for the word
+		// plus its neighbouring spaces keeps the columns aligned.
+		painted := strings.Replace(row, " "+plainState(q)+" ", m.badge(q, false), 1)
 		lines = append(lines, painted)
 	}
 	if q := m.queueAt(m.qsel); q != nil {
@@ -256,7 +258,7 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	}
 	first = trunc(first, w)
 	if selected {
-		first = st.selected.Render(padRight("▸"+first[1:], w))
+		first = st.selected.Render(padRight("›"+first[1:], w))
 	} else {
 		if t.Exclusive {
 			first = strings.Replace(first, "EXCLUSIVE", st.badgeExcl.Render("EXCLUSIVE"), 1)
@@ -338,7 +340,7 @@ func (m Model) renderBottom(w int) string {
 	} else if m.loadErr != nil && m.rep != nil {
 		lines = append(lines, st.toastErr.Render(trunc("refresh failed: "+m.loadErr.Error(), w)))
 	}
-	lines = append(lines, st.help.Render(help))
+	lines = append(lines, st.help.Render(lipgloss.Wrap(help, w, "")))
 	return strings.Join(lines, "\n")
 }
 

@@ -10,6 +10,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -192,6 +193,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.loadErr = nil
 			m.rep = msg.rep
+			// Closed queues sink to the bottom: a retired key is worth
+			// seeing, not worth being the first row every time.
+			sort.SliceStable(m.rep.Queues, func(i, j int) bool {
+				ci, cj := m.rep.Queues[i].Config.Closed != "", m.rep.Queues[j].Config.Closed != ""
+				if ci != cj {
+					return !ci
+				}
+				return m.rep.Queues[i].Key < m.rep.Queues[j].Key
+			})
 		}
 		m.clamp()
 		return m, nil
