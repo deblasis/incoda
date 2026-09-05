@@ -38,19 +38,21 @@ func (m Memory) String() string {
 		if m.TotalBytes > 0 {
 			pct = 100 * float64(used) / float64(m.TotalBytes)
 		}
-		out += fmt.Sprintf("%s free of %s (%.0f%% used)", human(m.AvailableBytes), human(m.TotalBytes), pct)
+		out += fmt.Sprintf("%s free of %s (%.0f%% used)", Human(m.AvailableBytes), Human(m.TotalBytes), pct)
 	case m.HaveTotal:
-		out += fmt.Sprintf("%s total, free unavailable on %s", human(m.TotalBytes), m.Source)
+		out += fmt.Sprintf("%s total, free unavailable on %s", Human(m.TotalBytes), m.Source)
 	default:
 		out += "unavailable on " + m.Source
 	}
 	if m.HaveSwap {
-		out += fmt.Sprintf("; swap used %s", human(m.SwapUsedBytes))
+		out += fmt.Sprintf("; swap used %s", Human(m.SwapUsedBytes))
 	}
 	return out
 }
 
-func human(b uint64) string {
+// Human renders a byte count the way the memory line does ("3.2 GB"), so the
+// per-job peaks in lane.log read in the same units as the machine gauge.
+func Human(b uint64) string {
 	const unit = 1024
 	if b < unit {
 		return fmt.Sprintf("%d B", b)

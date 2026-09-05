@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"time"
 )
 
 // ExitError carries a non-zero child exit status.
@@ -20,12 +21,27 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return "child exited non-zero" }
 
-// Run starts argv, forwards interrupt signals to it, and returns its exit code.
-// Signals arriving while the child runs are forwarded; a second signal escalates
-// to tearing the whole process tree down.
-func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (int, error) {
+// Result is what Run reports about a finished command: its exit code and
+// what it cost, as far as the platform can tell.
+type Result struct {
+	Code int
+	// PeakBytes is the peak committed memory of the whole job tree on
+	// Windows, where the Job Object accounts for every descendant, and the
+	// direct child's maximum resident set on Unix, where rusage only sees
+	// what was waited for. HavePeak is false when neither is available.
+	PeakBytes uint64
+	HavePeak  bool
+	// CPU is user plus kernel time, with the same tree-versus-child caveat.
+	CPU     time.Duration
+	HaveCPU bool
+}
+
+// Run starts argv, forwards interrupt signals to it, and returns its exit code
+// and resource usage. Signals arriving while the child runs are forwarded; a
+// second signal escalates to tearing the whole process tree down.
+func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error) {
 	if len(argv) == 0 {
-		return 0, errors.New("no command given")
+		return Result{}, errors.New("no command given")
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = stdin
@@ -35,17 +51,17 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (int, error) {
 
 	sup, err := newSupervisor(cmd)
 	if err != nil {
-		return 0, err
+		return Result{}, err
 	}
 	defer sup.dispose()
 
 	if err := cmd.Start(); err != nil {
-		return 0, err
+		return Result{}, err
 	}
 	if err := sup.afterStart(cmd); err != nil {
 		sup.killTree()
 		_ = cmd.Wait()
-		return 0, err
+		return Result{}, err
 	}
 
 	sigc := make(chan os.Signal, 4)
@@ -73,6 +89,11 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (int, error) {
 	once.Do(func() { close(done) })
 	signal.Stop(sigc)
 
+	// Read the accounting before dispose closes the job handle; after that
+	// the numbers are gone with the job.
+	res := Result{}
+	res.PeakBytes, res.HavePeak, res.CPU, res.HaveCPU = sup.usage(cmd)
+
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {
@@ -82,9 +103,10 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (int, error) {
 				// shell convention so the caller still sees a failure.
 				code = 128
 			}
-			return code, nil
+			res.Code = code
+			return res, nil
 		}
-		return 0, waitErr
+		return Result{}, waitErr
 	}
-	return 0, nil
+	return res, nil
 }

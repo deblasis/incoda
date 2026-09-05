@@ -24,8 +24,13 @@ type Ticket struct {
 	Acquired    string   `json:"acquired,omitempty"`
 	Command     []string `json:"command"`
 	Reason      string   `json:"reason,omitempty"`
-	Hostname    string   `json:"hostname"`
-	Dir         string   `json:"cwd"`
+	// Owner names who queued the job: an agent session id, a worktree name,
+	// whatever the caller's world calls itself. The cwd already says where a
+	// job runs from; with a dozen sessions on one machine "whose is that" is
+	// the next question, and a kill request wants a name to address.
+	Owner    string `json:"owner,omitempty"`
+	Hostname string `json:"hostname"`
+	Dir      string `json:"cwd"`
 }
 
 // ticketName encodes the arrival order into the filename so that ordering can

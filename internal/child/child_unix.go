@@ -5,7 +5,9 @@ package child
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
+	"time"
 )
 
 type supervisor struct {
@@ -44,6 +46,29 @@ func (s *supervisor) forward(cmd *exec.Cmd, sig os.Signal) {
 	if cmd.Process != nil {
 		_ = cmd.Process.Signal(sig)
 	}
+}
+
+// usage reads the direct child's rusage. It is an honest approximation and
+// no more: the kernel rolls a grandchild into these numbers only if the
+// child waited for it, so a build that leaves compilers running detached is
+// under-counted. The Windows Job Object does not have that gap, which is why
+// the two platforms document different scopes for the same field.
+func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.Duration, haveCPU bool) {
+	ps := cmd.ProcessState
+	if ps == nil {
+		return 0, false, 0, false
+	}
+	cpu, haveCPU = ps.UserTime()+ps.SystemTime(), true
+	if ru, ok := ps.SysUsage().(*syscall.Rusage); ok && ru != nil && ru.Maxrss > 0 {
+		// ru_maxrss is kilobytes on Linux and bytes on macOS; the BSDs
+		// followed macOS. Linux is the odd one out, so it gets the scale.
+		unit := uint64(1)
+		if runtime.GOOS == "linux" {
+			unit = 1024
+		}
+		peak, havePeak = uint64(ru.Maxrss)*unit, true
+	}
+	return peak, havePeak, cpu, haveCPU
 }
 
 func (s *supervisor) killTree() {

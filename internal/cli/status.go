@@ -179,6 +179,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		fmt.Fprintf(w, "  %s  pid %s held %s %s\n",
 			p.BoldCyan("HOLDER"), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), e.Ticket.CommandString())
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+		if e.Ticket.Owner != "" {
+			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
+		}
 		if e.Ticket.Reason != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("reason:"), e.Ticket.Reason)
 		}
@@ -194,6 +197,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 			fmt.Fprintf(w, "    %s pid %s waited %s %s\n",
 				p.Dim(fmt.Sprintf("%2d.", n+1)), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), e.Ticket.CommandString())
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+			if e.Ticket.Owner != "" {
+				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
+			}
 			if e.Ticket.Reason != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("reason:"), e.Ticket.Reason)
 			}
@@ -231,9 +237,9 @@ func paintEvent(p colorize.Palette, line string) string {
 		verb = p.Green("event=" + name)
 	case "enqueue":
 		verb = p.Cyan("event=" + name)
-	case "release":
+	case "release", "reenter":
 		verb = p.Dim("event=" + name)
-	case "giveup", "force-release":
+	case "giveup", "force-release", "reaped":
 		verb = p.Red("event=" + name)
 	default:
 		verb = "event=" + name
