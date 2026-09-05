@@ -92,7 +92,14 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		if len(snap.Holders) > 0 {
 			state = p.BoldYellow(fmt.Sprintf("%d/%d held, %d waiting", len(snap.Holders), snap.EffectiveSlots, len(snap.Waiting)))
 		}
-		fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), state)
+		if snap.Config.Closed != "" {
+			state = p.BoldRed("closed") + " " + p.Dim(snap.Config.Closed)
+		}
+		desc := ""
+		if snap.Config.Description != "" {
+			desc = "  " + p.Dim(snap.Config.Description)
+		}
+		fmt.Fprintf(stdout, "  %s %s%s\n", fmt.Sprintf("%-24s", k), state, desc)
 	}
 	return nil
 }

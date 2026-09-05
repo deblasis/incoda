@@ -38,17 +38,19 @@ func usagef(format string, args ...any) error {
 const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI test runs)
 
 usage:
-  incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
+  incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once]
   incoda queues
+  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open]
   incoda force-release --queue KEY [--live]
   incoda doctor
   incoda version
 
 The queue key comes from --queue or the INCODA_QUEUE environment variable.
 There is no default key: an unkeyed run is refused rather than silently
-sharing a lane with unrelated work. A run exports INCODA_HELD to its child;
+sharing a lane with unrelated work. A comma-separated list holds every key
+named, taken in sorted order. A run exports INCODA_HELD to its child;
 a nested run on a key listed there passes through instead of queueing behind
 its own parent. INCODA_OWNER is the default for --owner.
 
@@ -88,6 +90,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdWatch(rest, stdout, stderr)
 	case "queues":
 		err = cmdQueues(rest, stdout, stderr)
+	case "config":
+		err = cmdConfig(rest, stdout, stderr)
 	case "force-release":
 		err = cmdForceRelease(rest, stdout, stderr)
 	case "doctor":

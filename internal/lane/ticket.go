@@ -15,9 +15,14 @@ const ticketExt = ".ticket"
 // that `incoda status` can describe who is in the queue; correctness never
 // depends on it, only on the OS lock the file carries.
 type Ticket struct {
-	PID         int      `json:"pid"`
-	Queue       string   `json:"queue"`
-	Slots       int      `json:"slots"`
+	PID   int    `json:"pid"`
+	Queue string `json:"queue"`
+	Slots int    `json:"slots"`
+	// Exclusive asks for the queue alone: while this ticket is live the
+	// effective slot count is 1, whatever the queue or anyone else asked
+	// for. It is for jobs whose result is a duration, which a neighbour
+	// would falsify without failing anything.
+	Exclusive   bool     `json:"exclusive,omitempty"`
 	ArrivalNano int64    `json:"arrival_nano"`
 	Arrival     string   `json:"arrival"`
 	AcquireNano int64    `json:"acquire_nano,omitempty"`

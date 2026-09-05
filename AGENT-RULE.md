@@ -31,7 +31,9 @@ it:
 - **any GUI or UI test run**; anything that drives a real window, needs the
   desktop to itself, or synthesizes input. Two of these at once fail in ways
   that look like product bugs.
-- any test suite that is timing-sensitive enough to fail on a loaded machine
+- any test suite that is timing-sensitive enough to fail on a loaded machine,
+  with `--exclusive`, so it holds the queue alone even where the queue allows
+  two
 
 Commands:
 
@@ -46,6 +48,11 @@ incoda watch  --queue <KEY>          # live view
   own.
 - `--wait` defaults to 30 minutes. `--wait 0` fails immediately instead of
   queueing, which is occasionally what you want in a script.
+- Do not pass `--slots`. The queue's own config carries the number
+  (`incoda config <KEY>` shows it); a stray `--slots 1` narrows the queue for
+  everyone.
+- A run that exits 120 saying the queue is closed is telling you which keys
+  replaced it. Use those; do not force the old one.
 - Use `--reason` every time. When six sessions share a lane, "which worktree is
   that build in and why" is the first question anyone asks, and `status` can
   only answer it if you said.
