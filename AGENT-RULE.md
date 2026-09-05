@@ -40,7 +40,7 @@ Commands:
 ```
 incoda run --queue <KEY> --reason "what this is" -- <cmd...>
 incoda status --queue <KEY>          # who holds it, from which folder, and who is waiting
-incoda watch  --queue <KEY>          # live view
+incoda watch                         # live overview of every queue; enter opens one
 ```
 
 - `run` blocks while the queue is busy and releases on exit, including on a

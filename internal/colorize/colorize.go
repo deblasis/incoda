@@ -32,6 +32,11 @@ type Palette struct {
 	enabled bool
 }
 
+// IsTerminal reports whether w is a terminal a person is looking at, by the
+// same test the palette uses. `watch` asks so it can fall back to plain
+// repainting on a pipe instead of drawing an interactive screen into a file.
+func IsTerminal(w io.Writer) bool { return isTerminal(w) }
+
 // For decides whether w should be painted and returns the palette for it.
 func For(w io.Writer) Palette {
 	tty := isTerminal(w)
