@@ -38,8 +38,10 @@ type Result struct {
 
 // Run starts argv, forwards interrupt signals to it, and returns its exit code
 // and resource usage. Signals arriving while the child runs are forwarded; a
-// second signal escalates to tearing the whole process tree down.
-func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error) {
+// second signal escalates to tearing the whole process tree down. Closing
+// abort tears the tree down too: it is how a kill request addressed to the
+// lane holder reaches the job it is running. A nil abort is never fired.
+func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan struct{}) (Result, error) {
 	if len(argv) == 0 {
 		return Result{}, errors.New("no command given")
 	}
@@ -79,6 +81,9 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error)
 				}
 				escalate = true
 				sup.forward(cmd, s)
+			case <-abort:
+				sup.killTree()
+				abort = nil // a closed channel would spin this loop
 			case <-done:
 				return
 			}

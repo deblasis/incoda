@@ -19,12 +19,14 @@ import (
 // documented here, in `incoda help`, and in the README, and they are part of the
 // interface: scripts may rely on them.
 const (
-	ExitOK        = 0
-	ExitUsage     = 120 // bad arguments, bad key, or a refused force-release
-	ExitTimeout   = 121 // --wait elapsed without a free slot
-	ExitState     = 122 // state directory or OS lock unusable
-	ExitSpawn     = 123 // the lane was acquired but the command could not start
-	ExitInterrupt = 130 // incoda itself was interrupted while queueing
+	ExitOK          = 0
+	ExitUsage       = 120 // bad arguments, bad key, or a refused force-release
+	ExitTimeout     = 121 // --wait elapsed without a free slot
+	ExitState       = 122 // state directory or OS lock unusable
+	ExitSpawn       = 123 // the lane was acquired but the command could not start
+	ExitKilled      = 124 // the run was killed through the lane (`incoda kill`)
+	ExitKillPending = 125 // kill: the participant did not acknowledge in time
+	ExitInterrupt   = 130 // incoda itself was interrupted while queueing
 )
 
 type usageError struct{ msg string }
@@ -43,6 +45,7 @@ usage:
   incoda watch [--queue KEY] [--interval 2s] [--once]
   incoda queues
   incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open]
+  incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
   incoda doctor
   incoda version
@@ -67,6 +70,8 @@ exit codes:
   121      --wait elapsed while still queued
   122      state directory or OS file locking unusable
   123      lane acquired but the command could not be started
+  124      the run was killed through the lane (incoda kill); stderr says by whom and why
+  125      kill: the participant did not acknowledge in time (rerun with --force)
   130      incoda was interrupted while queueing
 
 run 'incoda <command> -h' for per-command flags.
@@ -92,6 +97,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdQueues(rest, stdout, stderr)
 	case "config":
 		err = cmdConfig(rest, stdout, stderr)
+	case "kill":
+		err = cmdKill(rest, stdout, stderr)
 	case "force-release":
 		err = cmdForceRelease(rest, stdout, stderr)
 	case "doctor":

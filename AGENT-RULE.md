@@ -76,5 +76,10 @@ incoda watch  --queue <KEY>          # live view
   while a live holder exists for a reason: a blind force-release once caused a
   real collision. If you think you need it, you have found something worth
   telling the user about instead.
+- **`incoda kill` follows the same line.** Kill only tickets whose owner is
+  you (`status` shows the owner), always with `--reason`, and never with
+  `--force`. Another session's job, however stale it looks, is the user's
+  call. If your own run exits 124, read the last line of its stderr: it says
+  who stopped it and why, and that is the answer, not a bug to retry around.
 - The working directory does not matter. Every session in every worktree that
   uses key `<KEY>` shares one lane, which is the entire point.

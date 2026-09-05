@@ -252,7 +252,7 @@ func paintEvent(p colorize.Palette, line string) string {
 		verb = p.Cyan("event=" + name)
 	case "release", "reenter":
 		verb = p.Dim("event=" + name)
-	case "giveup", "force-release", "reaped":
+	case "giveup", "force-release", "reaped", "kill", "kill-request":
 		verb = p.Red("event=" + name)
 	case "config":
 		verb = p.Yellow("event=" + name)

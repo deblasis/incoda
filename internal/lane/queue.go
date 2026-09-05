@@ -148,6 +148,7 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 			// history that cannot say how a job finished cannot be used to
 			// size a queue.
 			_ = os.Remove(path)
+			_ = os.Remove(path + killExt)
 			q.Logf("queue=%s event=reaped pid=%d", q.Key, ord.pid)
 			continue
 		}
@@ -177,6 +178,7 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
 		live[i].fill(now)
 	}
+	q.reapKillFiles(names)
 	return live, nil
 }
 
@@ -385,6 +387,7 @@ func (e *Enrollment) Release(rc int) {
 		// delete to take effect promptly even with share-delete.
 		_ = e.lock.Close()
 		_ = os.Remove(e.path)
+		_ = os.Remove(e.path + killExt)
 		return nil
 	})
 	e.lock = nil

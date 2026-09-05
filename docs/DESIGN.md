@@ -246,6 +246,39 @@ That covers signalled exits but not a `SIGKILL` of `incoda` itself; a
 `PR_SET_PDEATHSIG` or cgroup-based approach could close this on Linux and is
 not implemented.
 
+## Killing through the lane
+
+Task Manager can end a holder, and the kernel frees the lane; what nobody
+gets is the reason. The owner of the killed job sees a build that stopped,
+and the lane log shows a `reaped` line. `incoda kill` exists so that a kill
+carries a name and a reason to the one place the killed job's owner is
+looking: its own stderr.
+
+The mechanism is a file, because a file is the only channel every
+participant already watches. `kill` writes `<ticket>.kill` beside the ticket
+under the registry lock, holding who asked, why and when. A waiter checks for
+it on every poll of its position; a holder's `run` polls it at the same
+interval from a goroutine while the command runs. On finding it the
+participant closes the child's abort channel (the Job Object or process group
+takes the tree down), releases its ticket with exit `124`, logs `event=kill`
+next to the killer's `event=kill-request`, and prints
+`incoda: killed by <who>: <reason>` on stderr as the last line, after the
+build's own output has stopped. No signal, pipe or port is involved, so the
+same code works on every platform and across the agent sessions that share
+the state directory.
+
+The killer waits for the ticket to vanish. If it does not, the participant is
+either an `incoda` from before `kill` existed or wedged, and `--force` is the
+answer: `TerminateProcess` with exit code `124` on Windows, where the closed
+job handle then takes the tree; `SIGKILL` on Unix, where the shell sees `137`
+instead. The reason is logged either way. Without `--force`, an unacknowledged
+kill exits `125` rather than pretending.
+
+Who may kill whom is a policy question the tool does not decide. The
+`AGENT-RULE.md` block draws the line where `force-release` already drew it:
+an agent kills only its own tickets; another session's job is a human's
+call.
+
 ## Exit codes
 
 `run` passes the child's own exit status through unchanged. Lane-level
@@ -259,6 +292,8 @@ interface; scripts may rely on them.
 | `121` | `--wait` elapsed while still queued |
 | `122` | state directory or OS file locking unusable |
 | `123` | the lane was acquired but the command could not be started |
+| `124` | the run was killed through the lane; stderr names who and why |
+| `125` | `kill`: the participant did not acknowledge within `--wait` and `--force` was not given |
 | `130` | `incoda` was interrupted while queueing |
 
 ## The memory readout

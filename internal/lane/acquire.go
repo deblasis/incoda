@@ -41,6 +41,12 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 	lastNotify := time.Time{}
 
 	for {
+		// A waiter is killed by the same file a holder is: checked before
+		// the position so a request that landed during the sleep cannot
+		// be overtaken by a slot that freed at the same moment.
+		if req, ok := e.KillRequested(); ok {
+			return &KilledError{Request: req}
+		}
 		idx, slots, live, err := e.Position()
 		if err != nil {
 			return err
