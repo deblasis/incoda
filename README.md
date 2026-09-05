@@ -95,7 +95,7 @@ Linux) and nothing is ever resolved from the working directory.
 | `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, and a closing message that refuses every run. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
-| `incoda watch [--queue KEY] [--interval 2s] [--once]` | Repaint `status` on an interval. |
+| `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
@@ -129,6 +129,21 @@ the Job Object on Windows and from `rusage` on Unix, and a dead holder's
 ticket is logged as `reaped` when the next scan deletes it. The point is to
 size a queue from evidence: whether `--slots 2` fits is a question this log
 can answer.
+
+## The watch screen
+
+`incoda watch` on a terminal is an overview of the machine: one row per
+queue with its state (`FREE`, `1/2 HELD`, `EXCLUSIVE`, `CLOSED`), who holds
+it, how many wait and for how long, and the description from its config;
+above it the memory gauge, below it the selected queue's holders. Enter
+opens a queue: holders and waiters with pid, owner, reason, command and
+directory, then the recent events. `k` on a row asks for a reason and kills
+the job through the lane, the same request `incoda kill` leaves; `K` forces
+a participant that does not answer. Every kill is logged with who and why,
+and the killed job's owner reads the reason on their own stderr.
+
+It is built on [Bubble Tea](https://github.com/charmbracelet/bubbletea),
+adapts to light and dark terminals, and honours `NO_COLOR`.
 
 ## Install
 

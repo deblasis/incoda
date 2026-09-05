@@ -42,7 +42,7 @@ const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI t
 usage:
   incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
-  incoda watch [--queue KEY] [--interval 2s] [--once]
+  incoda watch [--queue KEY] [--interval 2s] [--once | --plain]
   incoda queues
   incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]

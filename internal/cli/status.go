@@ -4,52 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
-	"github.com/deblasis/incoda/internal/sysinfo"
+	"github.com/deblasis/incoda/internal/report"
 )
 
-// Report is the stable machine-readable shape emitted by `status --json`.
-// Fields are only ever added, never renamed or removed.
-type Report struct {
-	Schema   int    `json:"schema"`
-	Version  string `json:"incoda_version"`
-	StateDir string `json:"state_dir"`
-	// StateDirSource records how the state directory was chosen, so a
-	// fragmented setup (one agent with INCODA_DIR set, others without) is
-	// visible in one command instead of looking like an empty queue.
-	StateDirSource string         `json:"state_dir_source"`
-	Host           string         `json:"hostname"`
-	Time           string         `json:"time"`
-	Memory         sysinfo.Memory `json:"memory"`
-	Queues         []QueueReport  `json:"queues"`
-}
+// Report and QueueReport are the shapes `status --json` emits. They live in
+// the report package so the terminal UI can build the same view; the names
+// are kept here so nothing in this package has to say "report.Report".
+type (
+	Report      = report.Report
+	QueueReport = report.Queue
+)
 
-// QueueReport is one queue inside a Report.
-type QueueReport struct {
-	Key            string       `json:"key"`
-	Dir            string       `json:"dir"`
-	Exists         bool         `json:"exists"`
-	EffectiveSlots int          `json:"effective_slots"`
-	Free           bool         `json:"free"`
-	Config         lane.Config  `json:"config"`
-	ConfigError    string       `json:"config_error,omitempty"`
-	Holders        []lane.Entry `json:"holders"`
-	Waiting        []lane.Entry `json:"waiting"`
-	RecentEvents   []string     `json:"recent_events"`
-}
-
-func stateDirSource() string {
-	if strings.TrimSpace(os.Getenv("INCODA_DIR")) != "" {
-		return "INCODA_DIR"
-	}
-	return "platform default"
-}
+func stateDirSource() string { return report.StateDirSource() }
 
 func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("status", stderr)
@@ -89,25 +60,12 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	host, _ := os.Hostname()
-	rep := &Report{
-		Schema:         1,
-		Version:        Version,
-		StateDir:       dir,
-		StateDirSource: stateDirSource(),
-		Host:           host,
-		Time:           time.Now().Format(time.RFC3339),
-		Memory:         sysinfo.ReadMemory(),
-		Queues:         []QueueReport{},
-	}
-
 	var keys []string
 	if all {
-		keys, err = lane.ListQueues(dir)
+		keys, err = report.Keys(dir)
 		if err != nil {
-			return nil, exitWith(ExitState, "cannot list queues: %v", err)
+			return nil, exitWith(ExitState, "%v", err)
 		}
-		sort.Strings(keys)
 	} else {
 		key, err := resolveKey(queueFlag)
 		if err != nil {
@@ -115,39 +73,9 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 		}
 		keys = []string{key}
 	}
-
-	for _, key := range keys {
-		qr := QueueReport{
-			Key:     key,
-			Dir:     lane.QueueDir(dir, key),
-			Exists:  lane.Exists(dir, key),
-			Holders: []lane.Entry{},
-			Waiting: []lane.Entry{},
-		}
-		if !qr.Exists {
-			// A never-used queue is not an error: it is simply free.
-			qr.EffectiveSlots = 1
-			qr.Free = true
-			rep.Queues = append(rep.Queues, qr)
-			continue
-		}
-		q, err := lane.Open(dir, key)
-		if err != nil {
-			return nil, exitWith(ExitState, "%v", err)
-		}
-		snap, err := q.Observe(events)
-		q.Close()
-		if err != nil {
-			return nil, exitWith(ExitState, "cannot read queue %q: %v", key, err)
-		}
-		qr.EffectiveSlots = snap.EffectiveSlots
-		qr.Config = snap.Config
-		qr.ConfigError = snap.ConfigError
-		qr.Holders = snap.Holders
-		qr.Waiting = snap.Waiting
-		qr.RecentEvents = snap.RecentEvents
-		qr.Free = len(snap.Holders) == 0
-		rep.Queues = append(rep.Queues, qr)
+	rep, err := report.Build(dir, Version, keys, events)
+	if err != nil {
+		return nil, exitWith(ExitState, "%v", err)
 	}
 	return rep, nil
 }

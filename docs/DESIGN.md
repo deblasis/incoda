@@ -288,6 +288,29 @@ Who may kill whom is a policy question the tool does not decide. The
 an agent kills only its own tickets; another session's job is a human's
 call.
 
+## The watch screen
+
+`watch` grew from a repaint loop into a screen because the questions people
+ask a busy machine are not "what is queue X doing" but "what is going on":
+which lanes are held, by whom, who has been waiting longest, and is that the
+job I think it is. The overview answers those in one row per queue, and the
+drill-down answers the next one, "is it stuck and may I stop it", with the
+kill prompt.
+
+The UI is a plain Bubble Tea model in `internal/tui`. The report it paints is
+the same one `status --json` emits, built by `internal/report`; the kill it
+performs is the same request file `incoda kill` leaves, through a `Killer`
+interface whose real implementation calls the lane code and whose fake lets
+the tests drive overview, drill-down, prompt, refusal, cooperative kill and
+forced kill without a terminal or a state directory. Nothing in the screen
+has a code path the command line lacks, which is what keeps the two honest
+with each other.
+
+The palette adapts to the terminal's background (Bubble Tea asks for it on
+start) and the accent is a warm amber rather than the purple every terminal
+dashboard reaches for. On a pipe, or with `--once` or `--plain`, `watch`
+repaints the old plain text, so nothing that scraped it breaks.
+
 ## Exit codes
 
 `run` passes the child's own exit status through unchanged. Lane-level
@@ -341,7 +364,9 @@ always produced; scripts that scrape the plain text keep working, and
 ## Dependencies
 
 The Go standard library, plus `golang.org/x/sys` for `LockFileEx`, `flock`,
-Job Objects and the sysctl reads. That is the only dependency. Building
+Job Objects and the sysctl reads, and the Charm libraries (Bubble Tea, Lip
+Gloss, Bubbles) for the `watch` screen only. Everything the lane does still
+compiles from `x/sys` alone; the screen is a leaf. Building
 requires Go 1.27.0 or newer; with `GOTOOLCHAIN=auto` (the default) the
 toolchain is fetched automatically.
 

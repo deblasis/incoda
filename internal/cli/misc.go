@@ -14,14 +14,21 @@ import (
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/sysinfo"
+	"github.com/deblasis/incoda/internal/tui"
 )
 
+// cmdWatch is the live view. On a terminal it is the interactive screen:
+// the overview of every queue when no key is given, or one queue's holders
+// and waiters with --queue, with kill behind a prompt. On a pipe, or with
+// --once or --plain, it repaints the plain status text the way it always
+// did, so scripts and logs keep working.
 func cmdWatch(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("watch", stderr)
-	queue := fs.String("queue", "", "queue key (defaults to $INCODA_QUEUE)")
-	all := fs.Bool("all", false, "watch every queue with state on this machine")
+	queue := fs.String("queue", "", "queue key to open; with no key the overview of every queue")
+	all := fs.Bool("all", false, "plain mode: watch every queue with state on this machine")
 	interval := fs.Duration("interval", 2*time.Second, "repaint interval")
-	once := fs.Bool("once", false, "paint once and exit")
+	once := fs.Bool("once", false, "paint the plain view once and exit")
+	plain := fs.Bool("plain", false, "repaint the plain status text instead of the interactive screen; implied by --once or a non-terminal stdout")
 	events := fs.Int("events", 5, "how many recent log events to show")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	if err := fs.Parse(args); err != nil {
@@ -29,6 +36,32 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 	}
 	if *interval <= 0 {
 		return usagef("--interval must be positive")
+	}
+	if !*once && !*plain && !*all && colorize.IsTerminal(stdout) {
+		dir, err := stateDir()
+		if err != nil {
+			return err
+		}
+		// --queue, else INCODA_QUEUE, else the overview: the same rule as
+		// plain mode, so a session that set the variable opens its queue.
+		key := strings.TrimSpace(*queue)
+		if key == "" {
+			key = strings.TrimSpace(os.Getenv("INCODA_QUEUE"))
+		}
+		if key != "" {
+			if err := lane.ValidateKey(key); err != nil {
+				return usagef("invalid queue key: %v", err)
+			}
+		}
+		if err := tui.Run(tui.Options{Dir: dir, Version: Version, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor}); err != nil {
+			return exitWith(ExitState, "watch: %v", err)
+		}
+		return nil
+	}
+	// Plain mode with no key at all is the overview too; INCODA_QUEUE still
+	// narrows it, because a script that set the variable meant one queue.
+	if strings.TrimSpace(*queue) == "" && strings.TrimSpace(os.Getenv("INCODA_QUEUE")) == "" {
+		*all = true
 	}
 	p := paletteFor(stdout, *noColor)
 	for {
