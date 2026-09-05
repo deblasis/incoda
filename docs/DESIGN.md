@@ -127,6 +127,59 @@ caller wins), and `run` warns when it observes a disagreement. It is not a full
 guarantee: a participant already running is never revoked, so a late arrival
 with a smaller `--slots` can briefly observe more holders than its own number.
 
+## Queue configuration
+
+`--slots` on every call was a trap. The effective count is the minimum any
+live participant asked for, so one scratch script that forgot the flag on a
+two-slot queue dragged it down to one, and `run` could only warn. The number
+belongs to the queue: `config.json` beside the tickets holds `slots`, and a
+ticket that does not ask for a count is stamped with it at enrollment; a
+ticket that asks for more is clamped to it, because a queue that says 2
+means 2. The minimum rule is untouched; it now just sees the same number
+from everyone who did not say otherwise, and an explicit smaller `--slots`
+still narrows the queue.
+
+The same file carries a description (for `status` and `watch`), a
+`require_reason` switch, and a `closed` message. A closed queue refuses every
+`run` with exit 120 and the message. This is how a key is retired: the old
+name keeps existing, and anything still using it is told where to go instead
+of quietly serialising against work that moved.
+
+The file is read under no lock and written under the registry lock through a
+temp-and-rename, so a reader sees either the old file or the new one. A
+malformed file is an error, not a silent reset: a queue that forgot it was
+closed would let the old key back in.
+
+## Exclusive tickets
+
+Some jobs' results are durations, and a neighbour falsifies them without
+failing anything. A timing test on a two-slot build queue does not need one
+slot; it needs the machine. `--exclusive` marks the ticket, and while any
+exclusive ticket is live the effective slot count is 1.
+
+This is the minimum rule used on purpose. It was already true that the most
+restrictive participant wins; an exclusive ticket is simply the most
+restrictive one, and because it is that ticket's own request rather than a
+mismatch, it is not counted as a slots disagreement. Everything else follows
+from the existing ordering: an exclusive arrival waits for the holders ahead
+of it to leave (a running participant is never revoked), holds alone, and the
+count goes back up when it releases.
+
+## Several keys in one run
+
+`--queue a,b` enrolls on every key named and runs the command once all are
+held. The keys are sorted first and taken one at a time in that order, and
+every multi-key caller sorts the same way, so no two of them can each hold
+what the other is waiting for. That is the classic lock-ordering argument and
+it is the only reason a list is allowed: without a total order, two
+`a,b` and `b,a` callers would deadlock on the first contended pair.
+
+One `--wait` budget covers the list. A job that has held `a` for ten minutes
+while queueing on `b` has spent ten minutes of its thirty, not none. The cost
+of the design is stated plainly in the README: the first keys stay held while
+the later ones are waited for. Lists are for jobs that need everything they
+name.
+
 ## Re-entrancy
 
 A queue is most useful when the recipe that needs it takes it itself: `just
@@ -146,6 +199,14 @@ This is inheritance, not a global: only descendants of the holding `incoda`
 see the variable, so an unrelated session cannot claim a lane it does not
 hold by setting it. Setting `INCODA_HELD` by hand is the same bypass as not
 using the tool.
+
+Re-entrancy has one cost against the lock-ordering argument above: a parent
+holding `b` whose recipe then takes `a` is acquiring out of sorted order, and
+two such parents (one holding `a` and wanting `b`, one the reverse) can wait
+on each other until `--wait` expires. `run` warns when a nested key sorts
+before a held one. The cure is the same as for any nested lock: a recipe
+that needs two lanes should name both in one `--queue a,b` at the top,
+rather than taking the second inside.
 
 ## Job accounting
 
@@ -194,7 +255,7 @@ interface; scripts may rely on them.
 | Code | Meaning |
 |---|---|
 | *child's* | `run` succeeded in acquiring; this is the command's own status |
-| `120` | usage error: bad flags, missing or invalid queue key, or a `force-release` refused because the queue has live participants |
+| `120` | usage error: bad flags, missing or invalid queue key, a run on a closed queue or without a required `--reason`, or a `force-release` refused because the queue has live participants |
 | `121` | `--wait` elapsed while still queued |
 | `122` | state directory or OS file locking unusable |
 | `123` | the lane was acquired but the command could not be started |

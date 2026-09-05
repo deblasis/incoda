@@ -57,7 +57,17 @@ two unrelated projects silently sharing one lane is exactly the failure this
 tool prevents.
 
 **Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
-`--slots 2` lets two holders run at once.
+`incoda config builds --slots 2` lets two holders run at once, and every
+`run` on that key inherits the number; `--slots` on a run can narrow it, not
+widen it. `--exclusive` asks for the queue alone: while that run is live the
+count is 1, whatever the queue says, which is what a timing-sensitive test
+needs. `--queue a,b` holds several queues for one command, taken in sorted
+order so two such runs can never deadlock each other.
+
+**Config, not convention.** A queue can carry a description, require a
+`--reason` on every run, or be closed with a message that names its
+replacements. A closed key refuses every run, which is how a retired lane
+stops silently serialising work nobody meant to put there.
 
 **FIFO, really.** Ticket filenames encode arrival order, every participant
 derives the order from the same directory listing, and a later arrival cannot
@@ -82,7 +92,8 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY [--slots N] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
+| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
+| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, and a closing message that refuses every run. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once]` | Repaint `status` on an interval. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
@@ -180,7 +191,16 @@ memory limits or cgroups, per-project state directories, distributed locks.
 - **Unix process trees survive a hard kill of `incoda`.** The process group
   covers signalled exits; only Windows gets the kill-on-close guarantee.
 - **`--slots` disagreement is resolved to the minimum, not prevented.** A
-  participant already running is never revoked.
+  participant already running is never revoked, and that includes the moment
+  an `--exclusive` run arrives: it waits for the holders to leave rather than
+  evicting them.
+- **A multi-key run holds its first keys while it waits for the rest.** That
+  is what makes it deadlock-free, and it also means a job on `a,b` can keep
+  `a` busy while it queues on `b`. Use lists for jobs that need everything
+  they name, not as a convenience.
+- **A nested run can acquire out of order.** A recipe under a held `b` that
+  takes `a` inside is the one shape the sorted-order argument does not cover;
+  `run` warns about it. Name both keys at the top instead.
 - **The memory readout is not uniform.** macOS reports total and swap but not
   available physical memory, because that needs cgo and this binary stays pure
   Go. It says "unavailable" instead of printing a confident zero.

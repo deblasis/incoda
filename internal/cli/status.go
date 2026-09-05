@@ -37,6 +37,8 @@ type QueueReport struct {
 	Exists         bool         `json:"exists"`
 	EffectiveSlots int          `json:"effective_slots"`
 	Free           bool         `json:"free"`
+	Config         lane.Config  `json:"config"`
+	ConfigError    string       `json:"config_error,omitempty"`
 	Holders        []lane.Entry `json:"holders"`
 	Waiting        []lane.Entry `json:"waiting"`
 	RecentEvents   []string     `json:"recent_events"`
@@ -139,6 +141,8 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 			return nil, exitWith(ExitState, "cannot read queue %q: %v", key, err)
 		}
 		qr.EffectiveSlots = snap.EffectiveSlots
+		qr.Config = snap.Config
+		qr.ConfigError = snap.ConfigError
 		qr.Holders = snap.Holders
 		qr.Waiting = snap.Waiting
 		qr.RecentEvents = snap.RecentEvents
@@ -175,9 +179,18 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	} else {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(fmt.Sprintf("%d/%d slot(s) held", len(qr.Holders), qr.EffectiveSlots)))
 	}
+	if qr.Config.Description != "" {
+		fmt.Fprintf(w, "  %s\n", p.Dim(qr.Config.Description))
+	}
+	if qr.Config.Closed != "" {
+		fmt.Fprintf(w, "  %s %s\n", p.BoldRed("CLOSED:"), qr.Config.Closed)
+	}
+	if qr.ConfigError != "" {
+		fmt.Fprintf(w, "  %s\n", p.Red("config unreadable: "+qr.ConfigError))
+	}
 	for _, e := range qr.Holders {
-		fmt.Fprintf(w, "  %s  pid %s held %s %s\n",
-			p.BoldCyan("HOLDER"), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), e.Ticket.CommandString())
+		fmt.Fprintf(w, "  %s  pid %s held %s %s%s\n",
+			p.BoldCyan("HOLDER"), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -194,8 +207,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	} else {
 		fmt.Fprintf(w, "  %s\n", p.BoldYellow("WAITING (arrival order):"))
 		for n, e := range qr.Waiting {
-			fmt.Fprintf(w, "    %s pid %s waited %s %s\n",
-				p.Dim(fmt.Sprintf("%2d.", n+1)), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), e.Ticket.CommandString())
+			fmt.Fprintf(w, "    %s pid %s waited %s %s%s\n",
+				p.Dim(fmt.Sprintf("%2d.", n+1)), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 			if e.Ticket.Owner != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -241,6 +254,8 @@ func paintEvent(p colorize.Palette, line string) string {
 		verb = p.Dim("event=" + name)
 	case "giveup", "force-release", "reaped":
 		verb = p.Red("event=" + name)
+	case "config":
+		verb = p.Yellow("event=" + name)
 	default:
 		verb = "event=" + name
 	}
@@ -251,6 +266,15 @@ func paintEvent(p colorize.Palette, line string) string {
 		out = p.Dim(line[:19]) + out[19:]
 	}
 	return out
+}
+
+// exclusiveTag marks a participant that asked for the queue alone, so a
+// reader can see why a two-slot queue is admitting nobody.
+func exclusiveTag(p colorize.Palette, e lane.Entry) string {
+	if !e.Ticket.Exclusive {
+		return ""
+	}
+	return p.BoldRed("EXCLUSIVE") + " "
 }
 
 func orNone(s string) string {

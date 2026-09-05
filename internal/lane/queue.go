@@ -170,23 +170,34 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 	sortTickets(live)
 	slots := effectiveSlots(live)
 	for i := range live {
-		live[i].Holding = i < slots
+		// A participant that already acquired is holding whatever the count
+		// says now: an exclusive arrival or a smaller --slots narrows the
+		// queue for newcomers but never revokes a running job, and status
+		// must not show that job as waiting.
+		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
 		live[i].fill(now)
 	}
 	return live, nil
 }
 
 // effectiveSlots resolves the slot count for the current ticket set as the
-// minimum requested by any live participant, floored at 1.
+// minimum requested by any live participant, floored at 1, and 1 outright
+// while an exclusive participant is live.
 //
 // Mixing --slots values on one queue is a configuration error; taking the
 // minimum makes the *most restrictive* caller win, which is the safe direction.
 // It is not a full guarantee: a participant already running is never revoked,
 // so a late arrival with a smaller --slots can observe more holders than its own
-// number. `incoda run` warns when it sees a disagreement.
+// number. `incoda run` warns when it sees a disagreement. An exclusive ticket
+// is the same rule used on purpose: it rides the minimum down to 1 and back
+// up when it leaves, and because it is the ticket's own request rather than a
+// mismatch, it is not a disagreement.
 func effectiveSlots(live []Entry) int {
 	slots := 0
 	for _, e := range live {
+		if e.Ticket.Exclusive {
+			return 1
+		}
 		s := e.Ticket.Slots
 		if s < 1 {
 			s = 1
@@ -206,6 +217,9 @@ func effectiveSlots(live []Entry) int {
 func SlotsDisagree(live []Entry) bool {
 	seen := 0
 	for _, e := range live {
+		if e.Ticket.Exclusive {
+			continue
+		}
 		s := e.Ticket.Slots
 		if s < 1 {
 			s = 1
@@ -225,6 +239,8 @@ type Snapshot struct {
 	Dir            string   `json:"dir"`
 	Exists         bool     `json:"exists"`
 	EffectiveSlots int      `json:"effective_slots"`
+	Config         Config   `json:"config"`
+	ConfigError    string   `json:"config_error,omitempty"`
 	Holders        []Entry  `json:"holders"`
 	Waiting        []Entry  `json:"waiting"`
 	Log            []Entry  `json:"-"`
@@ -242,14 +258,25 @@ func (q *Queue) Observe(logLines int) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg, cfgErr := q.LoadConfig()
+	slots := effectiveSlots(live)
+	if len(live) == 0 && cfg.Slots > 0 {
+		// Nobody is enrolled to carry the number, so the config is the
+		// only thing that can say how wide an empty queue is.
+		slots = cfg.Slots
+	}
 	s := &Snapshot{
 		Key:            q.Key,
 		Dir:            q.Dir,
 		Exists:         true,
-		EffectiveSlots: effectiveSlots(live),
+		EffectiveSlots: slots,
+		Config:         cfg,
 		Holders:        []Entry{},
 		Waiting:        []Entry{},
 		RecentEvents:   q.TailLog(logLines),
+	}
+	if cfgErr != nil {
+		s.ConfigError = cfgErr.Error()
 	}
 	for _, e := range live {
 		if e.Holding {
@@ -293,8 +320,20 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 		t.PID = os.Getpid()
 		t.ArrivalNano = now.UnixNano()
 		t.Arrival = now.Format(time.RFC3339Nano)
-		if t.Slots < 1 {
+		// The configured count is both the default for a ticket that did
+		// not ask and the ceiling for one that asked for more: a queue that
+		// says 2 means 2, and a caller passing --slots 4 is not allowed to
+		// widen it. Asking for fewer still narrows it through the minimum
+		// rule. A missing or broken config leaves an unset count at 1, the
+		// safe direction.
+		cfg, cfgErr := q.LoadConfig()
+		switch {
+		case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
+			t.Slots = cfg.Slots
+		case t.Slots < 1:
 			t.Slots = 1
+		case cfgErr == nil && cfg.Slots > 0 && t.Slots > cfg.Slots:
+			t.Slots = cfg.Slots
 		}
 		name := ticketName(t.ArrivalNano, t.PID)
 		path := ticketPath(q.Dir, name)
@@ -325,11 +364,14 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 	if err != nil {
 		return nil, err
 	}
-	owner := ""
-	if en.ticket.Owner != "" {
-		owner = " owner=" + en.ticket.Owner
+	extra := ""
+	if en.ticket.Exclusive {
+		extra += " exclusive=true"
 	}
-	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, owner, en.ticket.CommandString())
+	if en.ticket.Owner != "" {
+		extra += " owner=" + en.ticket.Owner
+	}
+	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.CommandString())
 	return en, nil
 }
 
