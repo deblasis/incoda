@@ -34,12 +34,18 @@ type Result struct {
 	// CPU is user plus kernel time, with the same tree-versus-child caveat.
 	CPU     time.Duration
 	HaveCPU bool
+	// Aborted reports that the abort channel fired while the command was
+	// still supervised, so the tree was torn down rather than finishing on
+	// its own. The caller uses it to tell a kill from a coincidence.
+	Aborted bool
 }
 
 // Run starts argv, forwards interrupt signals to it, and returns its exit code
 // and resource usage. Signals arriving while the child runs are forwarded; a
-// second signal escalates to tearing the whole process tree down.
-func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error) {
+// second signal escalates to tearing the whole process tree down. Closing
+// abort tears the tree down too: it is how a kill request addressed to the
+// lane holder reaches the job it is running. A nil abort is never fired.
+func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan struct{}) (Result, error) {
 	if len(argv) == 0 {
 		return Result{}, errors.New("no command given")
 	}
@@ -67,8 +73,11 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error)
 	sigc := make(chan os.Signal, 4)
 	signal.Notify(sigc, forwardedSignals()...)
 	done := make(chan struct{})
-	var once sync.Once
+	aborted := false
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		escalate := false
 		for {
 			select {
@@ -79,6 +88,10 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error)
 				}
 				escalate = true
 				sup.forward(cmd, s)
+			case <-abort:
+				aborted = true
+				sup.killTree()
+				abort = nil // a closed channel would spin this loop
 			case <-done:
 				return
 			}
@@ -86,12 +99,16 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File) (Result, error)
 	}()
 
 	waitErr := cmd.Wait()
-	once.Do(func() { close(done) })
+	close(done)
 	signal.Stop(sigc)
+	// Join the supervisor goroutine before touching the job: a killTree
+	// racing dispose would read a handle that is being closed, and aborted
+	// is only safe to read once the goroutine is gone.
+	wg.Wait()
 
 	// Read the accounting before dispose closes the job handle; after that
 	// the numbers are gone with the job.
-	res := Result{}
+	res := Result{Aborted: aborted}
 	res.PeakBytes, res.HavePeak, res.CPU, res.HaveCPU = sup.usage(cmd)
 
 	if waitErr != nil {

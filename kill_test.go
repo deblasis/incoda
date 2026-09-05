@@ -1,0 +1,183 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// startHolder launches a run that holds key for holdMS and returns the
+// command plus a buffer collecting its stderr, where the kill notice lands.
+// poll is the holder's --poll, which is also how often it looks for a kill
+// request.
+func startHolder(t *testing.T, incoda, stamp, state, key, label string, holdMS int, poll string) (*exec.Cmd, *bytes.Buffer) {
+	t.Helper()
+	cmd := exec.Command(incoda, "run", "--queue", key, "--wait", "60s", "--poll", poll,
+		"--", stamp, filepath.Join(t.TempDir(), label+".txt"), label, strconv.Itoa(holdMS))
+	cmd.Env = laneEnv(state)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd, &errBuf
+}
+
+// TestKillHolderCooperatively is the headline: `incoda kill` names a pid and
+// a reason, the holder's own incoda notices within a poll, prints who killed
+// it and why on its stderr, takes its job tree down, exits 124, and the lane
+// is free with the event on record.
+func TestKillHolderCooperatively(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+
+	holder, holderErr := startHolder(t, incoda, stamp, state, "kill", "victim", 30000, "50ms")
+	waitFor(t, incoda, state, "kill", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	start := time.Now()
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "kill", "--pid", strconv.Itoa(holder.Process.Pid),
+		"--reason", "stale build, the branch moved")
+	if code != 0 {
+		t.Fatalf("kill: exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "released") {
+		t.Fatalf("kill should report that the holder let go, got:\n%s", out)
+	}
+	err := holder.Wait()
+	if el := time.Since(start); el > 10*time.Second {
+		t.Fatalf("holder took %s to go; a cooperative kill should be a poll interval or so", el)
+	}
+	if got := exitCodeOf(err); got != 124 {
+		t.Fatalf("a killed run exits 124, got %d; stderr:\n%s", got, holderErr.String())
+	}
+	s := holderErr.String()
+	if !strings.Contains(s, "killed") || !strings.Contains(s, "stale build, the branch moved") {
+		t.Fatalf("the holder must be told who killed it and why on stderr, got:\n%s", s)
+	}
+	if n := countTickets(t, state, "kill"); n != 0 {
+		t.Fatalf("%d ticket(s) left after the kill", n)
+	}
+	log, _ := os.ReadFile(filepath.Join(state, "queues", "kill", "lane.log"))
+	if !strings.Contains(string(log), "event=kill ") || !strings.Contains(string(log), "reason=") {
+		t.Fatalf("lane.log should record the kill with its reason:\n%s", log)
+	}
+}
+
+func TestKillWaiterCancelsIt(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+
+	holder, _ := startHolder(t, incoda, stamp, state, "kw", "h", 4000, "50ms")
+	defer func() { _ = holder.Wait() }()
+	waitFor(t, incoda, state, "kw", func(q queueReport) bool { return len(q.Holders) == 1 })
+	waiter, waiterErr := startHolder(t, incoda, stamp, state, "kw", "w", 10, "50ms")
+	waitFor(t, incoda, state, "kw", func(q queueReport) bool { return len(q.Waiting) == 1 })
+
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "kw", "--pid", strconv.Itoa(waiter.Process.Pid),
+		"--reason", "queued by mistake")
+	if code != 0 {
+		t.Fatalf("kill waiter: exit %d\n%s", code, out)
+	}
+	if got := exitCodeOf(waiter.Wait()); got != 124 {
+		t.Fatalf("a cancelled waiter exits 124, got %d; stderr:\n%s", got, waiterErr.String())
+	}
+	if !strings.Contains(waiterErr.String(), "queued by mistake") {
+		t.Fatalf("the waiter must see the reason:\n%s", waiterErr.String())
+	}
+	// The holder was not touched.
+	rep := statusJSON(t, incoda, state, "kw")
+	if len(rep.Queues[0].Holders) != 1 || len(rep.Queues[0].Waiting) != 0 {
+		t.Fatalf("holder should still hold, waiter gone: %+v", rep.Queues[0])
+	}
+}
+
+func TestKillRefusals(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "kill", "--queue", "kr", "--pid", "1"); code != 120 || !strings.Contains(out, "--reason") {
+		t.Fatalf("kill without a reason is a usage error naming the flag, got %d:\n%s", code, out)
+	}
+	if out, code := runIncoda(t, incoda, state, "kill", "--queue", "kr", "--pid", "999999", "--reason", "x"); code != 120 || !strings.Contains(out, "999999") {
+		t.Fatalf("kill of a pid not in the queue is refused naming the pid, got %d:\n%s", code, out)
+	}
+}
+
+// TestKillDuringMultiKeyWait: a run holding key A while it queues on key B
+// is a holder on A as far as status is concerned, so that is where a kill
+// gets addressed. It must end the wait on B and release A, not sit unread
+// until every key is held.
+func TestKillDuringMultiKeyWait(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+
+	blocker, _ := startHolder(t, incoda, stamp, state, "mk2-b", "blocker", 30000, "50ms")
+	defer func() { _ = blocker.Process.Kill(); _ = blocker.Wait() }()
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	victim := exec.Command(incoda, "run", "--queue", "mk2-a,mk2-b", "--wait", "60s", "--poll", "50ms",
+		"--", stamp, filepath.Join(t.TempDir(), "v.txt"), "v", "10")
+	victim.Env = laneEnv(state)
+	var victimErr bytes.Buffer
+	victim.Stderr = &victimErr
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, incoda, state, "mk2-a", func(q queueReport) bool { return len(q.Holders) == 1 })
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Waiting) == 1 })
+
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "mk2-a", "--pid", strconv.Itoa(victim.Process.Pid),
+		"--reason", "needed the desktop for something else")
+	if code != 0 {
+		t.Fatalf("kill on the held key: exit %d\n%s", code, out)
+	}
+	if got := exitCodeOf(victim.Wait()); got != 124 {
+		t.Fatalf("a run killed while queueing on its second key exits 124, got %d; stderr:\n%s", got, victimErr.String())
+	}
+	if !strings.Contains(victimErr.String(), "needed the desktop") {
+		t.Fatalf("the reason must reach the run's stderr:\n%s", victimErr.String())
+	}
+	if n := countTickets(t, state, "mk2-a"); n != 0 {
+		t.Fatalf("the held key still has %d ticket(s)", n)
+	}
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Waiting) == 0 })
+}
+
+// TestKillForceTerminates covers the holder that never acknowledges: an
+// older incoda, or one wedged in a syscall. --force ends its process, the
+// kernel frees the lock, and the reason still lands in the log.
+func TestKillForceTerminates(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+
+	// A holder polling every 10 s stands in for one that never answers: it
+	// cannot notice the request before the killer gives up on it, so the
+	// forced path is the one that runs, on a fast runner as on a slow one.
+	holder, _ := startHolder(t, incoda, stamp, state, "kf", "victim", 30000, "10s")
+	waitFor(t, incoda, state, "kf", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	// --wait 0 skips the cooperative grace so the force path is what runs.
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "kf", "--pid", strconv.Itoa(holder.Process.Pid),
+		"--reason", "wedged", "--wait", "0", "--force")
+	if code != 0 {
+		t.Fatalf("kill --force: exit %d\n%s", code, out)
+	}
+	err := holder.Wait()
+	if runtime.GOOS == "windows" {
+		// TerminateProcess carries the exit code, so even a hard kill tells
+		// the caller's shell it was the lane. Unix can only SIGKILL.
+		if got := exitCodeOf(err); got != 124 {
+			t.Fatalf("forced kill on Windows should exit 124, got %d", got)
+		}
+	}
+	waitFor(t, incoda, state, "kf", func(q queueReport) bool { return len(q.Holders) == 0 })
+	log, _ := os.ReadFile(filepath.Join(state, "queues", "kf", "lane.log"))
+	if !strings.Contains(string(log), "forced=true") {
+		t.Fatalf("lane.log should record the forced kill:\n%s", log)
+	}
+}

@@ -97,12 +97,14 @@ Linux) and nothing is ever resolved from the working directory.
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once]` | Repaint `status` on an interval. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
+| `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
 | `incoda doctor` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. |
 
 `run` passes the child's own exit code through unchanged. Lane-level failures
 use a separate band, documented and stable: `120` usage, `121` wait elapsed,
-`122` state unusable, `123` spawn failure, `130` interrupted while queueing.
+`122` state unusable, `123` spawn failure, `124` killed through the lane,
+`125` a kill that was not acknowledged, `130` interrupted while queueing.
 
 Output is colored on a terminal and plain everywhere else. The standard
 opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and

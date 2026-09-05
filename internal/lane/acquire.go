@@ -18,6 +18,11 @@ type AcquireOptions struct {
 	OnWait func(pos int, slots int, live []Entry, waited time.Duration)
 	// Notify is how often OnWait repeats. Zero disables the repeats.
 	Notify time.Duration
+	// Killed, when set, is consulted on every poll in addition to this
+	// ticket's own kill file. A multi-key run passes a check over the keys
+	// it already holds: a kill addressed to one of those must end the wait
+	// on the next one, not sit unread until every key is held.
+	Killed func() (KillRequest, bool)
 }
 
 // Acquire blocks until this enrollment holds a slot, the wait budget runs out,
@@ -41,6 +46,17 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 	lastNotify := time.Time{}
 
 	for {
+		// A waiter is killed by the same file a holder is: checked before
+		// the position so a request that landed during the sleep cannot
+		// be overtaken by a slot that freed at the same moment.
+		if req, ok := e.KillRequested(); ok {
+			return &KilledError{Request: req}
+		}
+		if opt.Killed != nil {
+			if req, ok := opt.Killed(); ok {
+				return &KilledError{Request: req}
+			}
+		}
 		idx, slots, live, err := e.Position()
 		if err != nil {
 			return err

@@ -113,6 +113,18 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 		}
 	}
+	if len(toTake) == 0 {
+		// Every key is the parent's. Nothing to enroll, nothing to watch:
+		// a kill addressed to the parent takes this process with it.
+		res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil)
+		if runErr != nil {
+			return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
+		}
+		if res.Code != 0 {
+			return &exitCode{code: res.Code}
+		}
+		return nil
+	}
 
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
@@ -175,6 +187,20 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Wait:   budget,
 			Poll:   *poll,
 			Notify: 60 * time.Second,
+			// The keys already held are the ones status shows as held, so
+			// they are the ones a kill gets addressed to while this run
+			// still queues on the next key.
+			Killed: func() (lane.KillRequest, bool) {
+				for _, h := range toTake {
+					if h.en == nil {
+						continue
+					}
+					if req, ok := h.en.KillRequested(); ok {
+						return req, true
+					}
+				}
+				return lane.KillRequest{}, false
+			},
 			OnWait: func(pos, effSlots int, live []lane.Entry, waited time.Duration) {
 				if *quiet {
 					return
@@ -199,6 +225,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			if errors.Is(acqErr, context.Canceled) {
 				rc = ExitInterrupt
 				return exitWith(ExitInterrupt, "interrupted while queueing on %q", key)
+			}
+			var killed *lane.KilledError
+			if errors.As(acqErr, &killed) {
+				rc = ExitKilled
+				logKill(toTake, killed.Request)
+				return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
+					key, killed.Request.By, killed.Request.Reason)))
 			}
 			if errors.Is(acqErr, lane.ErrTimeout) {
 				rc = ExitTimeout
@@ -226,18 +259,68 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// reach a nested incoda. Set on the process rather than on the child's
 	// env slice because child.Run copies os.Environ() itself.
 	_ = os.Setenv("INCODA_HELD", joinHeld(held, keys))
-	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr)
+
+	// While the command runs, watch every held ticket for a kill request at
+	// the poll interval. A request closes abort, which takes the job tree
+	// down; the message is printed here, after the child is gone, so it is
+	// the last thing on stderr rather than buried under the build's tail.
+	abort := make(chan struct{})
+	killed := make(chan lane.KillRequest, 1)
+	stopWatch := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		t := time.NewTicker(*poll)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-t.C:
+				for _, pt := range toTake {
+					if req, ok := pt.en.KillRequested(); ok {
+						killed <- req
+						close(abort)
+						return
+					}
+				}
+			}
+		}
+	}()
+	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort)
+	close(stopWatch)
+	<-watchDone
 	if runErr != nil {
 		rc = ExitSpawn
 		return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
 	}
-	rc = res.Code
 	stats = lane.Stats{PeakBytes: res.PeakBytes, HavePeak: res.HavePeak, CPU: res.CPU, HaveCPU: res.HaveCPU}
+	// A request the watcher only found after the command had already
+	// finished on its own did not kill anything; the job's real exit code
+	// is the truth then, and the request goes away with the ticket.
+	if res.Aborted {
+		req := <-killed
+		rc = ExitKilled
+		logKill(toTake, req)
+		release()
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+			p.Red(fmt.Sprintf("killed by %s: %s", req.By, req.Reason)))
+		return &exitCode{code: ExitKilled}
+	}
+	rc = res.Code
 	release()
 	if res.Code != 0 {
 		return &exitCode{code: res.Code}
 	}
 	return nil
+}
+
+// logKill records the kill on every queue the run held, next to the
+// request the killer left, so the history reads request then outcome.
+func logKill(parts []*lanePart, req lane.KillRequest) {
+	for _, pt := range parts {
+		pt.q.Logf("queue=%s event=kill pid=%d by=%s reason=%q", pt.key, os.Getpid(), req.By, req.Reason)
+	}
 }
 
 func waitBudget(d time.Duration) string {
