@@ -98,11 +98,17 @@ func TestAcquireStopsOnKillRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer killer.Close()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		time.Sleep(150 * time.Millisecond)
 		_ = killer.requestKillFile(waiter.name, KillRequest{By: "alex@box", Reason: "not needed any more"})
 	}()
 	err = waiter.Acquire(context.Background(), AcquireOptions{Wait: 5 * time.Second, Poll: 50 * time.Millisecond})
+	// Acquire returns the moment the request file is visible, which can be
+	// before the killer has released its registry lock; join it so the
+	// deferred Close does not race that release.
+	<-done
 	var killed *KilledError
 	if !asKilled(err, &killed) {
 		t.Fatalf("Acquire should report the kill, got %v", err)
