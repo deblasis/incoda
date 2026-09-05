@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,7 +111,7 @@ func TestAcquireStopsOnKillRequest(t *testing.T) {
 	// deferred Close does not race that release.
 	<-done
 	var killed *KilledError
-	if !asKilled(err, &killed) {
+	if !errors.As(err, &killed) {
 		t.Fatalf("Acquire should report the kill, got %v", err)
 	}
 	if killed.Request.Reason != "not needed any more" {
@@ -153,12 +154,4 @@ func killFiles(t *testing.T, dir string) []string {
 		}
 	}
 	return out
-}
-
-func asKilled(err error, target **KilledError) bool {
-	if k, ok := err.(*KilledError); ok {
-		*target = k
-		return true
-	}
-	return false
 }

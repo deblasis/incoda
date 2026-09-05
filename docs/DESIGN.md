@@ -200,6 +200,12 @@ see the variable, so an unrelated session cannot claim a lane it does not
 hold by setting it. Setting `INCODA_HELD` by hand is the same bypass as not
 using the tool.
 
+On Unix the variable can outlive the parent: a child that detaches (a
+daemon, a watcher) keeps `INCODA_HELD` and every run it spawns later passes
+through, silently. Windows closes the job with the parent so the question
+does not arise. Nothing detaching from under a lane is expected, and a run
+that finds itself passing through with no parent in `status` is the tell.
+
 Re-entrancy has one cost against the lock-ordering argument above: a parent
 holding `b` whose recipe then takes `a` is acquiring out of sorted order, and
 two such parents (one holding `a` and wanting `b`, one the reverse) can wait
@@ -244,7 +250,10 @@ prevent. `TestChildProcessTreeDiesWithIncoda` asserts it.
 On **Unix** the child gets its own process group and signals go to the group.
 That covers signalled exits but not a `SIGKILL` of `incoda` itself; a
 `PR_SET_PDEATHSIG` or cgroup-based approach could close this on Linux and is
-not implemented.
+not implemented. A nested `incoda` (one started under `INCODA_HELD`) stays in
+its parent's group instead of opening its own, so a kill of the outer run
+takes the whole tree; the price is that the nested run can only end its
+direct child, not that child's descendants.
 
 ## Killing through the lane
 

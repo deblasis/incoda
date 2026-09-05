@@ -13,7 +13,6 @@ import "syscall"
 // here on purpose: a forced kill of an old incoda can orphan its tree, and
 // that is documented as a known limit rather than papered over with a guess
 // at the group id.
-func Terminate(pid int, code int) error {
-	_ = code
+func Terminate(pid int, _ int) error {
 	return syscall.Kill(pid, syscall.SIGKILL)
 }

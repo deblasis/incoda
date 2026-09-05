@@ -187,6 +187,20 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Wait:   budget,
 			Poll:   *poll,
 			Notify: 60 * time.Second,
+			// The keys already held are the ones status shows as held, so
+			// they are the ones a kill gets addressed to while this run
+			// still queues on the next key.
+			Killed: func() (lane.KillRequest, bool) {
+				for _, h := range toTake {
+					if h.en == nil {
+						continue
+					}
+					if req, ok := h.en.KillRequested(); ok {
+						return req, true
+					}
+				}
+				return lane.KillRequest{}, false
+			},
 			OnWait: func(pos, effSlots int, live []lane.Entry, waited time.Duration) {
 				if *quiet {
 					return
@@ -253,7 +267,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	abort := make(chan struct{})
 	killed := make(chan lane.KillRequest, 1)
 	stopWatch := make(chan struct{})
+	watchDone := make(chan struct{})
 	go func() {
+		defer close(watchDone)
 		t := time.NewTicker(*poll)
 		defer t.Stop()
 		for {
@@ -273,20 +289,23 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}()
 	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort)
 	close(stopWatch)
+	<-watchDone
 	if runErr != nil {
 		rc = ExitSpawn
 		return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
 	}
 	stats = lane.Stats{PeakBytes: res.PeakBytes, HavePeak: res.HavePeak, CPU: res.CPU, HaveCPU: res.HaveCPU}
-	select {
-	case req := <-killed:
+	// A request the watcher only found after the command had already
+	// finished on its own did not kill anything; the job's real exit code
+	// is the truth then, and the request goes away with the ticket.
+	if res.Aborted {
+		req := <-killed
 		rc = ExitKilled
 		logKill(toTake, req)
 		release()
 		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 			p.Red(fmt.Sprintf("killed by %s: %s", req.By, req.Reason)))
 		return &exitCode{code: ExitKilled}
-	default:
 	}
 	rc = res.Code
 	release()

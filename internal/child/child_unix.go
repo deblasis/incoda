@@ -12,18 +12,32 @@ import (
 
 type supervisor struct {
 	pgid int
+	pid  int
 }
 
 // newSupervisor puts the child in its own process group so that incoda can
 // signal the entire tree with one kill(-pgid). The trade is that a terminal
 // Ctrl+C no longer reaches the child on its own, which is why forward relays it
 // explicitly.
+//
+// A nested incoda (INCODA_HELD set) does not open a group of its own. If it
+// did, its child would sit outside the outer incoda's group, and a kill of
+// the outer run would end the nested incoda while its harness kept running
+// with the lane free, the exact collision the lane exists to stop. Staying
+// in the parent's group costs the nested run its own group-wide kill: it
+// can only end its direct child, and that is documented as a known limit.
 func newSupervisor(cmd *exec.Cmd) (*supervisor, error) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if os.Getenv("INCODA_HELD") == "" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	return &supervisor{}, nil
 }
 
 func (s *supervisor) afterStart(cmd *exec.Cmd) error {
+	s.pid = cmd.Process.Pid
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		return nil
+	}
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil {
 		// Fall back to the pid: the child is its own group leader by
@@ -74,6 +88,10 @@ func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.
 func (s *supervisor) killTree() {
 	if s.pgid > 0 {
 		_ = syscall.Kill(-s.pgid, syscall.SIGKILL)
+		return
+	}
+	if s.pid > 0 {
+		_ = syscall.Kill(s.pid, syscall.SIGKILL)
 	}
 }
 

@@ -108,6 +108,46 @@ func TestKillRefusals(t *testing.T) {
 	}
 }
 
+// TestKillDuringMultiKeyWait: a run holding key A while it queues on key B
+// is a holder on A as far as status is concerned, so that is where a kill
+// gets addressed. It must end the wait on B and release A, not sit unread
+// until every key is held.
+func TestKillDuringMultiKeyWait(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+
+	blocker, _ := startHolder(t, incoda, stamp, state, "mk2-b", "blocker", 30000, "50ms")
+	defer func() { _ = blocker.Process.Kill(); _ = blocker.Wait() }()
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	victim := exec.Command(incoda, "run", "--queue", "mk2-a,mk2-b", "--wait", "60s", "--poll", "50ms",
+		"--", stamp, filepath.Join(t.TempDir(), "v.txt"), "v", "10")
+	victim.Env = laneEnv(state)
+	var victimErr bytes.Buffer
+	victim.Stderr = &victimErr
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, incoda, state, "mk2-a", func(q queueReport) bool { return len(q.Holders) == 1 })
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Waiting) == 1 })
+
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "mk2-a", "--pid", strconv.Itoa(victim.Process.Pid),
+		"--reason", "needed the desktop for something else")
+	if code != 0 {
+		t.Fatalf("kill on the held key: exit %d\n%s", code, out)
+	}
+	if got := exitCodeOf(victim.Wait()); got != 124 {
+		t.Fatalf("a run killed while queueing on its second key exits 124, got %d; stderr:\n%s", got, victimErr.String())
+	}
+	if !strings.Contains(victimErr.String(), "needed the desktop") {
+		t.Fatalf("the reason must reach the run's stderr:\n%s", victimErr.String())
+	}
+	if n := countTickets(t, state, "mk2-a"); n != 0 {
+		t.Fatalf("the held key still has %d ticket(s)", n)
+	}
+	waitFor(t, incoda, state, "mk2-b", func(q queueReport) bool { return len(q.Waiting) == 0 })
+}
+
 // TestKillForceTerminates covers the holder that never acknowledges: an
 // older incoda, or one wedged in a syscall. --force ends its process, the
 // kernel frees the lock, and the reason still lands in the log.
