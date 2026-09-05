@@ -133,9 +133,11 @@ with a smaller `--slots` can briefly observe more holders than its own number.
 live participant asked for, so one scratch script that forgot the flag on a
 two-slot queue dragged it down to one, and `run` could only warn. The number
 belongs to the queue: `config.json` beside the tickets holds `slots`, and a
-ticket that does not ask for a count is stamped with it at enrollment. The
-minimum rule is untouched; it now just sees the same number from everyone who
-did not say otherwise. An explicit `--slots` still wins downward.
+ticket that does not ask for a count is stamped with it at enrollment; a
+ticket that asks for more is clamped to it, because a queue that says 2
+means 2. The minimum rule is untouched; it now just sees the same number
+from everyone who did not say otherwise, and an explicit smaller `--slots`
+still narrows the queue.
 
 The same file carries a description (for `status` and `watch`), a
 `require_reason` switch, and a `closed` message. A closed queue refuses every
@@ -197,6 +199,14 @@ This is inheritance, not a global: only descendants of the holding `incoda`
 see the variable, so an unrelated session cannot claim a lane it does not
 hold by setting it. Setting `INCODA_HELD` by hand is the same bypass as not
 using the tool.
+
+Re-entrancy has one cost against the lock-ordering argument above: a parent
+holding `b` whose recipe then takes `a` is acquiring out of sorted order, and
+two such parents (one holding `a` and wanting `b`, one the reverse) can wait
+on each other until `--wait` expires. `run` warns when a nested key sorts
+before a held one. The cure is the same as for any nested lock: a recipe
+that needs two lanes should name both in one `--queue a,b` at the top,
+rather than taking the second inside.
 
 ## Job accounting
 

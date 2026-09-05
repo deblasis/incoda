@@ -170,7 +170,11 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 	sortTickets(live)
 	slots := effectiveSlots(live)
 	for i := range live {
-		live[i].Holding = i < slots
+		// A participant that already acquired is holding whatever the count
+		// says now: an exclusive arrival or a smaller --slots narrows the
+		// queue for newcomers but never revokes a running job, and status
+		// must not show that job as waiting.
+		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
 		live[i].fill(now)
 	}
 	return live, nil
@@ -316,16 +320,20 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 		t.PID = os.Getpid()
 		t.ArrivalNano = now.UnixNano()
 		t.Arrival = now.Format(time.RFC3339Nano)
-		if t.Slots < 1 {
-			// An unset count takes the queue's configured default, so
-			// the minimum rule sees the same number from every caller
-			// that did not ask for something else. A missing or broken
-			// config falls through to 1, the safe direction.
-			if cfg, err := q.LoadConfig(); err == nil && cfg.Slots > 0 {
-				t.Slots = cfg.Slots
-			} else {
-				t.Slots = 1
-			}
+		// The configured count is both the default for a ticket that did
+		// not ask and the ceiling for one that asked for more: a queue that
+		// says 2 means 2, and a caller passing --slots 4 is not allowed to
+		// widen it. Asking for fewer still narrows it through the minimum
+		// rule. A missing or broken config leaves an unset count at 1, the
+		// safe direction.
+		cfg, cfgErr := q.LoadConfig()
+		switch {
+		case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
+			t.Slots = cfg.Slots
+		case t.Slots < 1:
+			t.Slots = 1
+		case cfgErr == nil && cfg.Slots > 0 && t.Slots > cfg.Slots:
+			t.Slots = cfg.Slots
 		}
 		name := ticketName(t.ArrivalNano, t.PID)
 		path := ticketPath(q.Dir, name)

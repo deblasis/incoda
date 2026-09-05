@@ -58,8 +58,8 @@ tool prevents.
 
 **Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
 `incoda config builds --slots 2` lets two holders run at once, and every
-`run` on that key inherits the number; `--slots` on a run still overrides it
-downward. `--exclusive` asks for the queue alone: while that run is live the
+`run` on that key inherits the number; `--slots` on a run can narrow it, not
+widen it. `--exclusive` asks for the queue alone: while that run is live the
 count is 1, whatever the queue says, which is what a timing-sensitive test
 needs. `--queue a,b` holds several queues for one command, taken in sorted
 order so two such runs can never deadlock each other.
@@ -198,6 +198,9 @@ memory limits or cgroups, per-project state directories, distributed locks.
   is what makes it deadlock-free, and it also means a job on `a,b` can keep
   `a` busy while it queues on `b`. Use lists for jobs that need everything
   they name, not as a convenience.
+- **A nested run can acquire out of order.** A recipe under a held `b` that
+  takes `a` inside is the one shape the sorted-order argument does not cover;
+  `run` warns about it. Name both keys at the top instead.
 - **The memory readout is not uniform.** macOS reports total and swap but not
   available physical memory, because that needs cgo and this binary stays pure
   Go. It says "unavailable" instead of printing a confident zero.

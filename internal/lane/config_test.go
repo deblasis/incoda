@@ -86,6 +86,58 @@ func TestConfigSlotsAreTheDefaultForTickets(t *testing.T) {
 	if snap.EffectiveSlots != 2 {
 		t.Fatalf("explicit smaller --slots must still win, got %d", snap.EffectiveSlots)
 	}
+	b.Release(0)
+
+	// A larger --slots cannot widen the queue past its config: two callers
+	// both passing 5 on a 3-slot queue would otherwise see 5 slots.
+	c, err := q.Enroll(Ticket{Slots: 5, Command: []string{"c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Release(0)
+	if got := c.Ticket().Slots; got != 3 {
+		t.Fatalf("--slots above the config should be clamped to 3, got %d", got)
+	}
+}
+
+func TestAcquiredHolderStaysAHolderWhenExclusiveArrives(t *testing.T) {
+	dir := t.TempDir()
+	q, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.SaveConfig(Config{Slots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	var holders []*Enrollment
+	for _, name := range []string{"a", "b"} {
+		en, err := q.Enroll(Ticket{Command: []string{name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := en.Acquire(context.Background(), AcquireOptions{Wait: 0}); err != nil {
+			t.Fatal(err)
+		}
+		holders = append(holders, en)
+	}
+	x, err := q.Enroll(Ticket{Command: []string{"x"}, Exclusive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Release(0)
+	snap, err := q.Observe(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The exclusive ticket narrows the count to 1 for newcomers, but the
+	// second holder is still running and must be reported as holding.
+	if len(snap.Holders) != 2 || len(snap.Waiting) != 1 {
+		t.Fatalf("want 2 holders and 1 waiter, got %d/%d", len(snap.Holders), len(snap.Waiting))
+	}
+	for _, h := range holders {
+		h.Release(0)
+	}
 }
 
 func TestExclusiveTicketForcesOneSlot(t *testing.T) {

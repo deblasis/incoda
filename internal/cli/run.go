@@ -100,6 +100,19 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 		toTake = append(toTake, pt)
 	}
+	// The sorted-order argument that makes multi-key runs deadlock-free
+	// stops at a nested run: a parent holding "b" whose recipe now takes "a"
+	// is acquiring out of order, and two such parents can each wait on the
+	// other's key until --wait expires. It cannot be prevented from here
+	// (the parent's key is already held), so it is said out loud.
+	for _, pt := range toTake {
+		for h := range held {
+			if pt.key < h && !*quiet {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+					p.Yellow(fmt.Sprintf("warning: taking %q while a parent incoda holds %q acquires out of sorted order; two nested runs shaped like this can wait on each other until --wait expires", pt.key, h)))
+			}
+		}
+	}
 
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
