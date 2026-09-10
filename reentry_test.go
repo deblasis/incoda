@@ -64,6 +64,7 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	stamps := t.TempDir()
 
 	cmd := exec.Command(incoda, "run", "--queue", "acct", "--quiet", "--owner", "test-session",
+		"--reason", "nightly matrix",
 		"--", stamp, filepath.Join(stamps, "a.txt"), "a", "50")
 	cmd.Env = laneEnv(state)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -77,7 +78,18 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	if !strings.Contains(s, "event=release") || !strings.Contains(s, "peak_mem=") || !strings.Contains(s, "cpu=") {
 		t.Fatalf("release line should carry peak_mem and cpu:\n%s", s)
 	}
-	if !strings.Contains(s, "owner=test-session") {
+	if !strings.Contains(s, `owner="test-session"`) {
 		t.Fatalf("enqueue line should name the owner:\n%s", s)
+	}
+	// Attribution fields (dir/reason/dur): where the job ran, why, and how
+	// long it held the lane, on the lifecycle lines themselves.
+	if !strings.Contains(s, `reason="nightly matrix"`) {
+		t.Fatalf("lifecycle lines should carry the reason (%q survives spaces):\n%s", "--reason", s)
+	}
+	if !strings.Contains(s, "event=enqueue") || !strings.Contains(s, " dir=") {
+		t.Fatalf("enqueue line should carry the launch dir:\n%s", s)
+	}
+	if !strings.Contains(s, "event=release") || !strings.Contains(s, " dur=") {
+		t.Fatalf("release line should carry the wall duration:\n%s", s)
 	}
 }

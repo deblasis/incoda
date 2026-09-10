@@ -370,10 +370,7 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 	if en.ticket.Exclusive {
 		extra += " exclusive=true"
 	}
-	if en.ticket.Owner != "" {
-		extra += " owner=" + en.ticket.Owner
-	}
-	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.CommandString())
+	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), en.ticket.CommandString())
 	return en, nil
 }
 
@@ -391,7 +388,14 @@ func (e *Enrollment) Release(rc int) {
 		return nil
 	})
 	e.lock = nil
-	e.q.Logf("queue=%s event=release pid=%d rc=%d%s", e.q.Key, e.ticket.PID, rc, e.Stats.logFields())
+	// dur is the wall time from enqueue to release (the arrival nano is the
+	// enqueue instant); cpu= already covers processor time. A pre-upgrade
+	// ticket lacks the attribution and simply logs the old shape.
+	dur := ""
+	if e.ticket.ArrivalNano > 0 {
+		dur = " dur=" + time.Since(time.Unix(0, e.ticket.ArrivalNano)).Round(time.Second).String()
+	}
+	e.q.Logf("queue=%s event=release pid=%d rc=%d%s%s%s", e.q.Key, e.ticket.PID, rc, e.Stats.logFields(), e.ticket.attribution(), dur)
 }
 
 // Position reports this enrollment's 0-based place in the live queue plus the
@@ -424,7 +428,7 @@ func (e *Enrollment) MarkAcquired() {
 	e.ticket.Acquired = now.Format(time.RFC3339Nano)
 	b, _ := json.Marshal(e.ticket)
 	_ = e.q.withRegistry(func() error { return e.lock.Truncate(b) })
-	e.q.Logf("queue=%s event=acquire pid=%d cmd=%s", e.q.Key, e.ticket.PID, e.ticket.CommandString())
+	e.q.Logf("queue=%s event=acquire pid=%d%s cmd=%s", e.q.Key, e.ticket.PID, e.ticket.attribution(), e.ticket.CommandString())
 }
 
 // ForceRelease deletes every ticket in the queue. It refuses while any live
