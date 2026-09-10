@@ -81,15 +81,26 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	if !strings.Contains(s, `owner="test-session"`) {
 		t.Fatalf("enqueue line should name the owner:\n%s", s)
 	}
-	// Attribution fields (dir/reason/dur): where the job ran, why, and how
-	// long it held the lane, on the lifecycle lines themselves.
-	if !strings.Contains(s, `reason="nightly matrix"`) {
-		t.Fatalf("lifecycle lines should carry the reason (%q survives spaces):\n%s", "--reason", s)
+	// Attribution fields, asserted on the SPECIFIC lifecycle line (a
+	// whole-file Contains would pass if one site dropped them):
+	// dir=/reason=/owner= on enqueue and acquire, dur= on release (time in
+	// the lane, wait included, wall clock).
+	lineFor := func(ev string) string {
+		for _, l := range strings.Split(s, "\n") {
+			if strings.Contains(l, "event="+ev+" ") {
+				return l
+			}
+		}
+		return ""
 	}
-	if !strings.Contains(s, "event=enqueue") || !strings.Contains(s, " dir=") {
-		t.Fatalf("enqueue line should carry the launch dir:\n%s", s)
-	}
-	if !strings.Contains(s, "event=release") || !strings.Contains(s, " dur=") {
-		t.Fatalf("release line should carry the wall duration:\n%s", s)
+	for _, c := range []struct{ ev, want string }{
+		{"enqueue", " dir="}, {"enqueue", `reason="nightly matrix"`}, {"enqueue", `owner="test-session"`},
+		{"acquire", " dir="}, {"acquire", `owner="test-session"`},
+		{"release", " dir="}, {"release", " dur="},
+	} {
+		l := lineFor(c.ev)
+		if l == "" || !strings.Contains(l, c.want) {
+			t.Fatalf("the %s line must carry %s:\n%s", c.ev, c.want, s)
+		}
 	}
 }

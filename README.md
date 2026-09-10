@@ -131,13 +131,14 @@ size a queue from evidence: whether `--slots 2` fits is a question this log
 can answer.
 
 **Every lifecycle line carries where and why.** Enqueue, acquire and release
-each append `dir=` (the directory the run was launched from), plus `reason=`
-and `owner=` when set (`%q`-quoted, so free text with spaces survives); the
-release line adds `dur=`, the wall time from enqueue to release. The log is
-the machine history of what ran where: after the fact it can answer "what
-was building in this directory last week" and "whose job pinned the lane for
-33 minutes", questions the ticket answers only while it lives. The fields
-are additive per line, so a log mixing old and new entries parses alike.
+each append `dir=` (the directory the run was launched from, quoted when it
+contains a space), plus `reason=` and `owner=` when set (`%q`-quoted, so free
+text with spaces survives); the release line adds `dur=`, the wall time from
+enqueue to release, wait included. The log is the machine history of what ran
+where: after the fact it can answer "what was building in this directory last
+week" and "whose job pinned the lane for 33 minutes", questions the ticket
+answers only while it lives. The fields are additive per line, so a log
+mixing old and new entries parses alike.
 
 ## The watch screen
 

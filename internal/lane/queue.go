@@ -389,11 +389,17 @@ func (e *Enrollment) Release(rc int) {
 	})
 	e.lock = nil
 	// dur is the wall time from enqueue to release (the arrival nano is the
-	// enqueue instant); cpu= already covers processor time. A pre-upgrade
-	// ticket lacks the attribution and simply logs the old shape.
+	// enqueue instant): time in the lane, wait included; cpu= already covers
+	// processor time. ArrivalNano is a wall stamp, so a backward clock step
+	// (NTP resync) could go negative - clamped like every other duration
+	// this repo renders.
 	dur := ""
 	if e.ticket.ArrivalNano > 0 {
-		dur = " dur=" + time.Since(time.Unix(0, e.ticket.ArrivalNano)).Round(time.Second).String()
+		d := time.Since(time.Unix(0, e.ticket.ArrivalNano)).Round(time.Second)
+		if d < 0 {
+			d = 0
+		}
+		dur = " dur=" + d.String()
 	}
 	e.q.Logf("queue=%s event=release pid=%d rc=%d%s%s%s", e.q.Key, e.ticket.PID, rc, e.Stats.logFields(), e.ticket.attribution(), dur)
 }
