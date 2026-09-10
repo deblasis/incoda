@@ -38,6 +38,36 @@ type Ticket struct {
 	Dir      string `json:"cwd"`
 }
 
+// attribution is the k=v block every lifecycle line (enqueue/acquire/release)
+// carries: WHERE the job ran (dir, the launch cwd), and - when set - WHY
+// (reason) and WHOSE (owner). reason/owner are %q-quoted because the values
+// are free text with spaces; dir is quoted only when it needs it (a path
+// with a space would otherwise make the mid-line value ambiguous), so the
+// common no-space roots stay clean. Readers that do not know the fields
+// ignore them, and old lines simply lack them.
+func (t Ticket) attribution() string {
+	s := ""
+	if t.Dir != "" {
+		s += " dir=" + quoteIfNeeded(t.Dir)
+	}
+	if t.Reason != "" {
+		s += fmt.Sprintf(" reason=%q", t.Reason)
+	}
+	if t.Owner != "" {
+		s += fmt.Sprintf(" owner=%q", t.Owner)
+	}
+	return s
+}
+
+// quoteIfNeeded quotes a value only when it would otherwise be ambiguous in
+// the whitespace-delimited k=v line (a space or a quote in the value).
+func quoteIfNeeded(v string) string {
+	if strings.ContainsAny(v, ` "`) {
+		return strconv.Quote(v)
+	}
+	return v
+}
+
 // ticketName encodes the arrival order into the filename so that ordering can
 // be recovered from a directory listing alone, without opening anything.
 //

@@ -64,6 +64,7 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	stamps := t.TempDir()
 
 	cmd := exec.Command(incoda, "run", "--queue", "acct", "--quiet", "--owner", "test-session",
+		"--reason", "nightly matrix",
 		"--", stamp, filepath.Join(stamps, "a.txt"), "a", "50")
 	cmd.Env = laneEnv(state)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -77,7 +78,29 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	if !strings.Contains(s, "event=release") || !strings.Contains(s, "peak_mem=") || !strings.Contains(s, "cpu=") {
 		t.Fatalf("release line should carry peak_mem and cpu:\n%s", s)
 	}
-	if !strings.Contains(s, "owner=test-session") {
+	if !strings.Contains(s, `owner="test-session"`) {
 		t.Fatalf("enqueue line should name the owner:\n%s", s)
+	}
+	// Attribution fields, asserted on the SPECIFIC lifecycle line (a
+	// whole-file Contains would pass if one site dropped them):
+	// dir=/reason=/owner= on enqueue and acquire, dur= on release (time in
+	// the lane, wait included, wall clock).
+	lineFor := func(ev string) string {
+		for _, l := range strings.Split(s, "\n") {
+			if strings.Contains(l, "event="+ev+" ") {
+				return l
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct{ ev, want string }{
+		{"enqueue", " dir="}, {"enqueue", `reason="nightly matrix"`}, {"enqueue", `owner="test-session"`},
+		{"acquire", " dir="}, {"acquire", `owner="test-session"`},
+		{"release", " dir="}, {"release", " dur="},
+	} {
+		l := lineFor(c.ev)
+		if l == "" || !strings.Contains(l, c.want) {
+			t.Fatalf("the %s line must carry %s:\n%s", c.ev, c.want, s)
+		}
 	}
 }
