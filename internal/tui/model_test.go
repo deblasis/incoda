@@ -276,6 +276,58 @@ func TestKillRefusalIsShown(t *testing.T) {
 	}
 }
 
+func TestMouseClickSelectsOverviewRow(t *testing.T) {
+	m := newTestModel(&fakeKiller{})
+	y := m.overviewQueueRow(1) // wintty-desktop
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.qsel != 1 {
+		t.Fatalf("click on row 1 should select index 1, got %d", m.qsel)
+	}
+}
+
+func TestMouseDoubleClickOpensQueue(t *testing.T) {
+	m := newTestModel(&fakeKiller{})
+	y := m.overviewQueueRow(0)
+	now := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	m.opt.Now = func() time.Time { return now }
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	m.opt.Now = func() time.Time { return now.Add(200 * time.Millisecond) }
+	mm, _ = m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.screen != screenQueue || m.key != "wintty-build" {
+		t.Fatalf("double-click should open the queue, got screen %d key %q", m.screen, m.key)
+	}
+}
+
+func TestMouseWheelMovesSelection(t *testing.T) {
+	m := newTestModel(&fakeKiller{})
+	mm, _ := m.Update(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
+	m = mm.(Model)
+	if m.qsel != 1 {
+		t.Fatalf("wheel down should move selection down, got qsel=%d", m.qsel)
+	}
+	mm, _ = m.Update(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp})
+	m = mm.(Model)
+	if m.qsel != 0 {
+		t.Fatalf("wheel up should move selection up, got qsel=%d", m.qsel)
+	}
+}
+
+func TestMouseClickSelectsParticipant(t *testing.T) {
+	m := press(newTestModel(&fakeKiller{}), "enter")
+	hits := m.participantRowsAt()
+	if len(hits) < 2 {
+		t.Fatal("sample report should have two participants")
+	}
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: hits[1].y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.psel != hits[1].idx {
+		t.Fatalf("click should select participant %d, got psel=%d", hits[1].idx, m.psel)
+	}
+}
+
 func TestSingleQueueModeQuitsOnQ(t *testing.T) {
 	rep := sampleReport()
 	m := New(Options{Key: "wintty-build", Killer: &fakeKiller{}, Load: func() (*report.Report, error) { return rep, nil }})

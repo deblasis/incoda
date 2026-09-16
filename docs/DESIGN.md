@@ -308,8 +308,11 @@ with each other.
 
 The palette adapts to the terminal's background (Bubble Tea asks for it on
 start) and the accent is a warm amber rather than the purple every terminal
-dashboard reaches for. On a pipe, or with `--once` or `--plain`, `watch`
-repaints the old plain text, so nothing that scraped it breaks.
+dashboard reaches for. Mouse support uses Bubble Tea's cell-motion mode:
+click to select a row, double-click a queue to open it, scroll wheel to move
+selection; the kill prompt keeps mouse for cursor placement in the reason
+field. On a pipe, or with `--once` or `--plain`, `watch` repaints the old
+plain text, so nothing that scraped it breaks.
 
 ## Exit codes
 
@@ -335,11 +338,13 @@ renderer says "unavailable" rather than printing a confident zero.
 
 - **Windows**: total, available and page-file commit, via
   `GlobalMemoryStatusEx`. This is the one hand-rolled syscall in the tree,
-  because `x/sys/windows` does not wrap it.
-- **Linux**: total, available and swap from `/proc/meminfo`.
+  because `x/sys/windows` does not wrap it. CPU comes from `GetSystemTimes`
+  (two samples, 100 ms apart).
+- **Linux**: total, available and swap from `/proc/meminfo`; CPU from
+  `/proc/stat`.
 - **macOS**: total from `hw.memsize` and swap from `vm.swapusage`, but **not**
   available physical memory: that needs a mach `host_statistics64` call and
-  therefore cgo, and this binary stays pure Go.
+  therefore cgo, and this binary stays pure Go. CPU comes from `kern.cp_time`.
 
 ## Color
 

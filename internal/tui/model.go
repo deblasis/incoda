@@ -124,8 +124,9 @@ type Model struct {
 	input   textinput.Model
 	pending *pendingKill
 	killSeq int
-	toast   toast
-	help    bool
+	toast     toast
+	help      bool
+	lastClick clickStamp
 }
 
 // New builds a model. Missing options get the real implementations.
@@ -281,6 +282,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.load()
 	case tea.KeyPressMsg:
 		return m.key_(msg)
+	case tea.MouseMsg:
+		return m.mouse_(msg)
 	}
 	if m.screen == screenKillPrompt {
 		var cmd tea.Cmd
