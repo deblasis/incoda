@@ -4,35 +4,12 @@ package sysinfo
 
 import (
 	"encoding/binary"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 func readCPU() CPU {
-	c := CPU{Source: "sysctl kern.cp_time"}
-	a, ok := cpTimeTotals()
-	if !ok {
-		c.Err = "could not read kern.cp_time"
-		return c
-	}
-	time.Sleep(sampleInterval)
-	b, ok := cpTimeTotals()
-	if !ok {
-		c.Err = "could not re-read kern.cp_time"
-		return c
-	}
-	if pct, ok := cpuUsagePct(a, b); ok {
-		c.UsagePct, c.HaveUsage = pct, true
-	} else {
-		c.Err = "cpu counters did not advance"
-	}
-	return c
-}
-
-type cpuTotals struct {
-	total uint64
-	idle  uint64
+	return sampleCPU("sysctl kern.cp_time", cpTimeTotals)
 }
 
 // cpTimeTotals reads aggregate CPU ticks from kern.cp_time. The layout is
@@ -71,13 +48,4 @@ func cpTimeValues(raw []byte) []uint64 {
 	default:
 		return nil
 	}
-}
-
-func cpuUsagePct(a, b cpuTotals) (float64, bool) {
-	total := b.total - a.total
-	idle := b.idle - a.idle
-	if total == 0 || idle > total {
-		return 0, false
-	}
-	return 100 * float64(total-idle) / float64(total), true
 }

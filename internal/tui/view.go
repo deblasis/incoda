@@ -98,14 +98,19 @@ func (m Model) renderGauge(w int) string {
 	line := st.dim.Render("memory ") + bar + " " + st.bold.Render(fmt.Sprintf("%.0f%%", pct*100)) +
 		st.dim.Render(fmt.Sprintf(" used · %s free of %s", sysinfo.Human(mem.AvailableBytes), sysinfo.Human(mem.TotalBytes)))
 	if cpu.HaveUsage {
-		if w < 100 {
-			line += st.dim.Render(" · cpu ") + st.bold.Render(fmt.Sprintf("%.0f%%", cpu.UsagePct))
+		cpuText := st.dim.Render(" · cpu ") + st.bold.Render(fmt.Sprintf("%.0f%%", cpu.UsagePct))
+		cpuBar := st.dim.Render(" · ") + m.pctGauge("cpu", cpu.UsagePct/100, 10)
+		if w < 100 || lipgloss.Width(line)+lipgloss.Width(cpuBar) > w {
+			line += cpuText
 		} else {
-			line += st.dim.Render(" · ") + m.pctGauge("cpu", cpu.UsagePct/100, 10)
+			line += cpuBar
 		}
 	}
 	if mem.HaveSwap {
-		line += st.dim.Render(" · swap " + sysinfo.Human(mem.SwapUsedBytes))
+		swap := st.dim.Render(" · swap " + sysinfo.Human(mem.SwapUsedBytes))
+		if lipgloss.Width(line)+lipgloss.Width(swap) <= w {
+			line += swap
+		}
 	}
 	return line
 }

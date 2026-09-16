@@ -7,33 +7,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func readCPU() CPU {
-	c := CPU{Source: "/proc/stat"}
-	a, ok := cpuTotalsFromProc()
-	if !ok {
-		c.Err = "could not read /proc/stat"
-		return c
-	}
-	time.Sleep(sampleInterval)
-	b, ok := cpuTotalsFromProc()
-	if !ok {
-		c.Err = "could not re-read /proc/stat"
-		return c
-	}
-	if pct, ok := cpuUsagePct(a, b); ok {
-		c.UsagePct, c.HaveUsage = pct, true
-	} else {
-		c.Err = "cpu counters did not advance"
-	}
-	return c
-}
-
-type cpuTotals struct {
-	total uint64
-	idle  uint64
+	return sampleCPU("/proc/stat", cpuTotalsFromProc)
 }
 
 func cpuTotalsFromProc() (cpuTotals, bool) {
@@ -72,13 +49,4 @@ func parseProcStatCPU(line string) (cpuTotals, bool) {
 		idle += vals[4] // iowait counts as idle for utilization
 	}
 	return cpuTotals{total: total, idle: idle}, true
-}
-
-func cpuUsagePct(a, b cpuTotals) (float64, bool) {
-	total := b.total - a.total
-	idle := b.idle - a.idle
-	if total == 0 || idle > total {
-		return 0, false
-	}
-	return 100 * float64(total-idle) / float64(total), true
 }

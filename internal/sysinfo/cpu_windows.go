@@ -2,36 +2,10 @@
 
 package sysinfo
 
-import (
-	"time"
-
-	"golang.org/x/sys/windows"
-)
+import "golang.org/x/sys/windows"
 
 func readCPU() CPU {
-	c := CPU{Source: "GetSystemTimes"}
-	a, ok := systemTimes()
-	if !ok {
-		c.Err = "GetSystemTimes failed"
-		return c
-	}
-	time.Sleep(sampleInterval)
-	b, ok := systemTimes()
-	if !ok {
-		c.Err = "GetSystemTimes failed"
-		return c
-	}
-	if pct, ok := cpuUsagePct(a, b); ok {
-		c.UsagePct, c.HaveUsage = pct, true
-	} else {
-		c.Err = "cpu counters did not advance"
-	}
-	return c
-}
-
-type cpuTotals struct {
-	total uint64
-	idle  uint64
+	return sampleCPU("GetSystemTimes", systemTimes)
 }
 
 func systemTimes() (cpuTotals, bool) {
@@ -50,13 +24,4 @@ func systemTimes() (cpuTotals, bool) {
 
 func filetimeToUint64(ft *windows.Filetime) uint64 {
 	return uint64(ft.HighDateTime)<<32 + uint64(ft.LowDateTime)
-}
-
-func cpuUsagePct(a, b cpuTotals) (float64, bool) {
-	total := b.total - a.total
-	idle := b.idle - a.idle
-	if total == 0 || idle > total {
-		return 0, false
-	}
-	return 100 * float64(total-idle) / float64(total), true
 }
