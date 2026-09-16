@@ -14,6 +14,6 @@ func TestWatchTTYRestoreSequence(t *testing.T) {
 }
 
 func TestRestoreWatchTTYNoPanic(t *testing.T) {
-	// /dev/tty is absent in some CI sandboxes; skip rather than fail the build.
+	// No-op when /dev/tty is missing; must not panic either way.
 	restoreWatchTTY()
 }

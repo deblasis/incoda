@@ -6,8 +6,8 @@ import (
 	"syscall"
 )
 
-// watchTTYRestoreSeq matches bubbletea v2 cursed_renderer.close teardown for
-// MouseModeCellMotion: alt screen off, cursor on, every mouse mode off.
+// watchTTYRestoreSeq is bubbletea v2 MouseModeCellMotion teardown plus ?1000l
+// for belt-and-suspenders: alt screen off, cursor on, every mouse mode off.
 const watchTTYRestoreSeq = "\x1b[?1049l\x1b[?25h" +
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
 

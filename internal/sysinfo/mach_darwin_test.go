@@ -50,20 +50,29 @@ func TestReadMemoryDarwinNoUnavailableFallback(t *testing.T) {
 }
 
 func TestDarwinCPUTotalsIdleAdvances(t *testing.T) {
+	// Mach may not bump HOST_CPU_LOAD_INFO on every rapid poll; wait for movement.
+	time.Sleep(200 * time.Millisecond)
 	a, ok := darwinCPUTotals()
 	if !ok {
 		t.Fatal("first mach cpu sample failed")
 	}
-	time.Sleep(150 * time.Millisecond)
-	b, ok := darwinCPUTotals()
-	if !ok {
-		t.Fatal("second mach cpu sample failed")
+	deadline := time.Now().Add(3 * time.Second)
+	var b cpuTotals
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		b, ok = darwinCPUTotals()
+		if !ok {
+			t.Fatal("mach cpu sample failed")
+		}
+		if b.total > a.total {
+			goto check
+		}
 	}
+	t.Fatal("cpu counters did not advance within 3s")
+
+check:
 	total := b.total - a.total
 	idle := b.idle - a.idle
-	if total == 0 {
-		t.Fatal("cpu counters did not advance")
-	}
 	if idle == 0 {
 		t.Fatal("idle counter at index 2 did not advance; wrong HOST_CPU_LOAD_INFO layout?")
 	}
