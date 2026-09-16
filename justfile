@@ -76,7 +76,12 @@ publish TAG:
 	cat > "$notes" <<'NOTES'
 	Cross-compiled binaries for windows/amd64, windows/arm64, darwin/arm64, darwin/amd64, linux/amd64 and linux/arm64, plus SHA256SUMS.
 
-	Install (both scripts verify the SHA-256 before installing):
+	Install:
+
+	    brew install deblasis/tap/incoda
+
+	    scoop bucket add deblasis https://github.com/deblasis/scoop-bucket
+	    scoop install deblasis/incoda
 
 	    curl -fsSL https://raw.githubusercontent.com/deblasis/incoda/main/install.sh | sh
 
@@ -91,3 +96,9 @@ publish TAG:
 
 # full manual release from this machine: just release v0.1.1
 release TAG: (dist TAG) (publish TAG)
+
+# regenerate packaging/homebrew/incoda.rb and packaging/scoop/incoda.json from
+# a published release. After a release, copy them into deblasis/homebrew-tap
+# and deblasis/scoop-bucket (or set OUT_TAP / OUT_BUCKET to local clone paths).
+packaging TAG:
+	./packaging/update.sh {{TAG}}

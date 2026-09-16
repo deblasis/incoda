@@ -1,0 +1,34 @@
+{
+  "version": "0.4.0",
+  "description": "Keyed, machine-local job lane for builds, tests and AI-agent fleets",
+  "homepage": "https://github.com/deblasis/incoda",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/deblasis/incoda/releases/download/v0.4.0/incoda_windows_amd64.exe",
+      "hash": "3f126f1f2c361b2b74e81c6ff55db6cdc8680ecbbb2cd5b705c59bb08f8268e1"
+    },
+    "arm64": {
+      "url": "https://github.com/deblasis/incoda/releases/download/v0.4.0/incoda_windows_arm64.exe",
+      "hash": "01a1d6429576d4de7de5ddacecfaefc2cbb1cb01da9126f024c05167d14a8e4f"
+    }
+  },
+  "bin": "incoda.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/deblasis/incoda/releases/download/v$version/incoda_windows_amd64.exe",
+        "hash": {
+          "url": "$baseurl/SHA256SUMS"
+        }
+      },
+      "arm64": {
+        "url": "https://github.com/deblasis/incoda/releases/download/v$version/incoda_windows_arm64.exe",
+        "hash": {
+          "url": "$baseurl/SHA256SUMS"
+        }
+      }
+    }
+  }
+}
