@@ -30,3 +30,11 @@ exit codes, the `status --json` schema) needs a line in the README.
 
 The `status --json` schema is a contract: fields are added, never renamed or
 removed.
+
+## Demo assets
+
+- **CLI GIF:** [`docs/img/demo.tape`](docs/img/demo.tape) — re-record with
+  [vhs](https://github.com/charmbracelet/vhs).
+- **Watch screenshots:** [`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig)
+  — drive `incoda watch` with [ttyrig](https://github.com/deblasis/ttyrig) and
+  commit the PNGs under `docs/img/`.

@@ -1,161 +1,47 @@
 # incoda
 
-### One heavy job at a time. A keyed, machine-local job lane for builds, tests and AI-agent fleets.
+### Power is nothing without control.
 
-`incoda` serialises heavy processes through named queues on one machine. Prefix
-any command and it either runs immediately or waits its turn, FIFO by arrival.
-When a holder dies, the kernel frees the lane: no stale locks, no takeover
-logic, no `--force` in the common case. One static Go binary, no dependencies.
+**Machine-local FIFO job queue with OS file locks** — serialize builds, tests, and
+AI-agent workloads on one machine. One static Go binary, no daemon.
 
-![incoda demo: a second job queues behind a running build, `status` shows both, and the lane hands over when the holder exits](docs/img/demo.gif)
+[![release](https://img.shields.io/github/v/release/deblasis/incoda)](https://github.com/deblasis/incoda/releases)
+[![CI](https://github.com/deblasis/incoda/actions/workflows/ci.yml/badge.svg)](https://github.com/deblasis/incoda/actions/workflows/ci.yml)
+macOS · Linux · Windows · amd64/arm64
 
-*(Recorded with [`docs/img/demo.tape`](docs/img/demo.tape); re-record it with [vhs](https://github.com/charmbracelet/vhs).)*
+## Contents
+
+- [Quick start](#quick-start)
+- [Install](#install)
+- [Why](#why)
+- [Use cases](#use-cases)
+- [Watch](#watch)
+- [How it works](#how-it-works)
+- [Commands](#commands)
+- [AI agents](#ai-agents)
+- [Alternatives](#alternatives)
+- [Limits](#limits)
+- [Design](#design)
+
+![incoda watch TUI: live overview of all queues — state, holders, waiters, memory gauge, keyboard hints](docs/img/watch-overview.png)
+
+## Quick start
 
 ```bash
-incoda run --queue builds --reason "zig build (LLVM)" -- zig build -Denable-llvm
-incoda run --queue builds --reason "dotnet test suite" -- dotnet test
-incoda status --queue builds
+brew install deblasis/tap/incoda   # or see Install below
+
+incoda run --queue builds --reason "my build" -- make -j8
+incoda status --queue builds       # who holds it, who waits
+incoda watch                       # live dashboard of every queue
 ```
 
-## Why
+Same `--queue` key from any directory or git worktree. Or run
+[`examples/demo.sh`](examples/demo.sh) for a 30-second tour.
 
-Load a machine with enough heavy jobs and it settles the argument for you. On a
-memory-constrained workstation, two concurrent memory-hungry builds can push
-the kernel into swap exhaustion and a watchdog panic, and there is no warning:
-macOS reports `memoryPressure` as FALSE right up until the machine dies. The
-fix is not more RAM. It is making the collision impossible: heavy jobs go
-through one lane, so they cannot overlap.
+![incoda CLI demo: FIFO queue — second job waits, status shows holders and waiters, automatic handoff when the holder exits](docs/img/demo.gif)
 
-The same shape of problem shows up wherever two jobs fight over a resource:
-GUI test runs that need the desktop to itself, builds that share one cache
-directory, anything driving a device. `incoda` is for anything that needs the
-machine, or some part of it, to be quiet.
-
-## What people use it for
-
-- **AI agent fleets.** You are orchestrating a dozen agent sessions in parallel
-  and they all want to build, test and lint at once. Give each session the same
-  `--queue` key and the heavy work serialises instead of colliding. Works
-  across git worktrees: nothing is keyed to a working directory.
-- **GUI and E2E test runs.** Two of them at once fight over focus, the
-  foreground window and synthesized input, and both fail in ways that look like
-  product bugs. A `gui-tests` queue gives each run the desktop to itself.
-- **`--slots N` for resources that are not exclusive.** Two CPU-heavy linters
-  at a time, no more. Participants that disagree about N settle on the minimum.
-- **Shared workstations and self-hosted runners.** One Mac mini serving several
-  people, agents or CI jobs: same key, orderly queue, full visibility of who is
-  holding it from where.
-- **Agent compliance by convention.** Ships with a rule block
-  ([`AGENT-RULE.md`](AGENT-RULE.md)) for `CLAUDE.md` / `AGENTS.md`, so your
-  agents route heavy commands through the lane without being told each time.
-
-## How it works
-
-**Keys.** A queue is a name. `--queue builds` and `--queue gui-tests` never
-block each other. There is no default key: an unkeyed `run` is refused, because
-two unrelated projects silently sharing one lane is exactly the failure this
-tool prevents.
-
-**Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
-`incoda config builds --slots 2` lets two holders run at once, and every
-`run` on that key inherits the number; `--slots` on a run can narrow it, not
-widen it. `--exclusive` asks for the queue alone: while that run is live the
-count is 1, whatever the queue says, which is what a timing-sensitive test
-needs. `--queue a,b` holds several queues for one command, taken in sorted
-order so two such runs can never deadlock each other.
-
-**Config, not convention.** A queue can carry a description, require a
-`--reason` on every run, or be closed with a message that names its
-replacements. A closed key refuses every run, which is how a retired lane
-stops silently serialising work nobody meant to put there.
-
-**FIFO, really.** Ticket filenames encode arrival order, every participant
-derives the order from the same directory listing, and a later arrival cannot
-overtake an earlier one. Waiters poll instead of waiting on a signal, so
-nothing can go stale; the cost is up to one poll interval (500 ms default) of
-handoff latency.
-
-**The kernel holds the lock.** Every participant holds an OS-level exclusive
-lock on its ticket file for its whole lifetime: `flock` on Unix,
-`LockFileEx` on Windows. The kernel releases it when the process ends for any
-reason, including `SIGKILL` and power loss. Stale tickets are reaped by trying
-to lock them; there is no pid file to lie.
-
-**Machine-local and per-user, never per-directory.** The real callers are
-several agent sessions, each in its own git worktree. `incoda run --queue
-builds` contends for the same lane from any folder, worktree or drive letter.
-State lives in one place per user (`%LOCALAPPDATA%\incoda` on Windows,
-`~/Library/Application Support/incoda` on macOS, `$XDG_STATE_HOME/incoda` on
-Linux) and nothing is ever resolved from the working directory.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
-| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, and a closing message that refuses every run. |
-| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
-| `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
-| `incoda queues` | Every queue with state on this machine, and whether it is busy. |
-| `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
-| `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
-| `incoda doctor` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. |
-
-`run` passes the child's own exit code through unchanged. Lane-level failures
-use a separate band, documented and stable: `120` usage, `121` wait elapsed,
-`122` state unusable, `123` spawn failure, `124` killed through the lane,
-`125` a kill that was not acknowledged, `130` interrupted while queueing.
-
-Output is colored on a terminal and plain everywhere else. The standard
-opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and
-color never reaches `--json` or a pipe. `CLICOLOR_FORCE=1` turns it back on
-for `| less -R` and its cousins.
-
-Signals are forwarded to the child. On Windows the child runs inside a Job
-Object with kill-on-close, so a `SIGKILL` of `incoda` still takes the whole
-build tree with it. On Unix the child gets its own process group; a hard kill
-of `incoda` can orphan it (see [limits](#known-limits)).
-
-**Nested runs on a held key pass through.** `run` exports `INCODA_HELD` to
-its child, listing the keys it holds. A nested `incoda run` on one of those
-keys runs at once inside the parent's lane instead of queueing behind it,
-which is what lets a build recipe take its own lane while an agent wraps the
-whole recipe in `run` from outside. A nested run on a *different* key queues
-as usual.
-
-**Every job leaves its cost in `lane.log`.** The release line records the
-peak memory and CPU time of the job tree (`peak_mem=3.2 GB cpu=4m12s`), from
-the Job Object on Windows and from `rusage` on Unix, and a dead holder's
-ticket is logged as `reaped` when the next scan deletes it. The point is to
-size a queue from evidence: whether `--slots 2` fits is a question this log
-can answer.
-
-**Every lifecycle line carries where and why.** Enqueue, acquire and release
-each append `dir=` (the directory the run was launched from, quoted when it
-contains a space), plus `reason=` and `owner=` when set (`%q`-quoted, so free
-text with spaces survives); the release line adds `dur=`, the wall time from
-enqueue to release, wait included. The log is the machine history of what ran
-where: after the fact it can answer "what was building in this directory last
-week" and "whose job pinned the lane for 33 minutes", questions the ticket
-answers only while it lives. The fields are additive per line, so a log
-mixing old and new entries parses alike.
-
-## The watch screen
-
-`incoda watch` on a terminal is an overview of the machine: one row per
-queue with its state (`FREE`, `1/2 HELD`, `EXCLUSIVE`, `CLOSED`), who holds
-it, how many wait and for how long, and the description from its config;
-above it the memory gauge, below it the selected queue's holders. Enter
-opens a queue: holders and waiters with pid, owner, reason, command and
-directory, then the recent events. `k` on a row asks for a reason and kills
-the job through the lane, the same request `incoda kill` leaves; `K` forces
-a participant that does not answer. Every kill is logged with who and why,
-and the killed job's owner reads the reason on their own stderr.
-
-It is built on [Bubble Tea](https://github.com/charmbracelet/bubbletea),
-adapts to light and dark terminals, honours `NO_COLOR`, and supports the
-mouse: click to select a row, double-click a queue to open it, scroll wheel
-to move selection.
+*FIFO in the terminal: `incoda run --queue builds` serialises heavy jobs; the lane
+hands over when the holder exits (even under `kill -9`).*
 
 ## Install
 
@@ -187,7 +73,8 @@ irm https://raw.githubusercontent.com/deblasis/incoda/main/install.ps1 | iex
 The scripts detect OS and architecture, download the matching release asset,
 verify its SHA-256 against `SHA256SUMS`, and install to `~/.local/bin` or
 `%LOCALAPPDATA%\Programs\incoda`. They refuse to install anything they could
-not verify.
+not verify. If `incoda` is not found after the script, add `~/.local/bin` to
+your `PATH`.
 
 Or with Go 1.27+:
 
@@ -199,61 +86,169 @@ Prebuilt binaries for `windows/amd64`, `windows/arm64`, `darwin/arm64`,
 `darwin/amd64`, `linux/amd64` and `linux/arm64` are on the
 [Releases page](https://github.com/deblasis/incoda/releases).
 
-## Using it with AI agents
+## Why
 
-The tool works by convention: it binds only what is routed through it. That is
-a feature, not a gap, but it means agents have to be told. `AGENT-RULE.md` is a
-copy-pasteable rule block for a machine's `~/.claude/CLAUDE.md` or a
-repository's `AGENTS.md` that tells every agent session: these command classes
-run under the lane, use this key, never bypass it. One paragraph, and a dozen
-parallel sessions stop stepping on each other.
+Parallel AI agent sessions on one machine all decide to build, test and lint at
+once. Six worktrees, six heavy jobs — swap exhaustion, watchdog panic, or GUI
+tests fighting over focus until both fail like product bugs. The fix is not
+more RAM. It is making the collision impossible: heavy jobs go through one
+lane, so they cannot overlap.
 
-## Scope and non-goals
+The same shape shows up wherever two jobs fight over a resource: GUI/E2E runs
+that need the desktop to themselves, builds that share one cache directory,
+anything driving a device. `incoda` is for anything that needs the machine, or
+some part of it, to be quiet.
 
-**It serialises. It does not make an oversized single job fit.** If one job
-alone drives the machine into swap or an OOM kill, that job is too big for that
-machine, and no amount of queueing fixes it. `status` shows a memory readout so
-you can see this happening; it is a gauge, not a governor.
+## Use cases
 
-**It is advisory. It binds only what is routed through it.** There is no
-process-creation interception and there deliberately is none. This works by
-convention, which is why `AGENT-RULE.md` exists.
+- **AI agent fleets.** A dozen agent sessions in parallel all want to build,
+  test and lint at once. Give each session the same `--queue` key and the heavy
+  work serialises instead of colliding. Works across git worktrees: nothing is
+  keyed to a working directory.
+- **GUI and E2E test runs.** Two at once fight over focus, the foreground
+  window and synthesized input. A `gui-tests` queue gives each run the desktop
+  to itself.
+- **`--slots N` for resources that are not exclusive.** Two CPU-heavy linters at
+  a time, no more. Participants that disagree about N settle on the minimum.
+- **Shared workstations and self-hosted runners.** One Mac mini serving several
+  people, agents or CI jobs: same key, orderly queue, full visibility of who is
+  holding it from where.
+- **Agent compliance by convention.** Ships with a rule block
+  ([`AGENT-RULE.md`](AGENT-RULE.md)) for `CLAUDE.md` / `AGENTS.md`, so agents
+  route heavy commands through the lane without being told each time.
 
-**When the lane makes you wait, that is the tool working.** If the wait is
-long, surface it. Do not bypass it.
+## Watch
 
-Not planned: cross-machine coordination (use a real queue or CI for that),
-memory limits or cgroups, per-project state directories, distributed locks.
+`incoda watch` is the live screen: one row per queue with state (`FREE`,
+`1/2 HELD`, `EXCLUSIVE`, `CLOSED`), holders, waiters, oldest wait, and the
+memory gauge. Enter opens a queue — pid, owner, reason, command, directory,
+recent events. `k` kills with a reason (same as `incoda kill`); `K` forces.
+Mouse: click to select, double-click to open, wheel to move.
 
-## Known limits
+![incoda watch drill-down: holders and waiters with pid, owner, reason, and command](docs/img/watch-queue.png)
 
-- **Machine-local and per-user.** Two machines, or two OS users on one machine,
-  never serialise each other. State must be on a local filesystem; `doctor`
-  fails loudly on network mounts that do not enforce locks.
-- **Unix process trees survive a hard kill of `incoda`.** The process group
-  covers signalled exits; only Windows gets the kill-on-close guarantee.
-- **`--slots` disagreement is resolved to the minimum, not prevented.** A
-  participant already running is never revoked, and that includes the moment
-  an `--exclusive` run arrives: it waits for the holders to leave rather than
-  evicting them.
-- **A multi-key run holds its first keys while it waits for the rest.** That
-  is what makes it deadlock-free, and it also means a job on `a,b` can keep
-  `a` busy while it queues on `b`. Use lists for jobs that need everything
-  they name, not as a convenience.
-- **A nested run can acquire out of order.** A recipe under a held `b` that
-  takes `a` inside is the one shape the sorted-order argument does not cover;
-  `run` warns about it. Name both keys at the top instead.
-- **The memory readout is not uniform.** macOS reports total and swap but not
-  available physical memory, because that needs cgo and this binary stays pure
-  Go. It says "unavailable" instead of printing a confident zero.
-- **Polling costs up to one interval of handoff latency**, and `lane.log`
-  grows without bound (slowly; a few lines per run).
+![incoda watch kill prompt: cooperative kill with a required reason](docs/img/watch-kill-prompt.png)
+
+Re-record the watch screenshots with
+[`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig) and
+[ttyrig](https://github.com/deblasis/ttyrig).
+
+## How it works
+
+**Keys.** A queue is a name. `--queue builds` and `--queue gui-tests` never
+block each other. There is no default key: an unkeyed `run` is refused, because
+two unrelated projects silently sharing one lane is exactly the failure this
+tool prevents.
+
+**Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
+`incoda config builds --slots 2` lets two holders run at once; `--slots` on a
+run can narrow it, not widen it. `--exclusive` asks for the queue alone.
+`--queue a,b` holds several queues for one command, taken in sorted order so
+two such runs can never deadlock each other.
+
+**FIFO, really.** Ticket filenames encode arrival order; a later arrival cannot
+overtake an earlier one. Waiters poll instead of waiting on a signal — up to one
+poll interval (500 ms default) of handoff latency, nothing goes stale.
+
+**The kernel holds the lock.** Every participant holds an OS-level exclusive
+lock on its ticket file: `flock` on Unix, `LockFileEx` on Windows. The kernel
+releases it when the process ends for any reason, including `SIGKILL`. Stale
+tickets are reaped by trying to lock them; there is no pid file to lie.
+
+**Machine-local and per-user, never per-directory.** `incoda run --queue builds`
+contends for the same lane from any folder, worktree or drive letter. State lives
+in one place per user (`%LOCALAPPDATA%\incoda` on Windows,
+`~/Library/Application Support/incoda` on macOS, `$XDG_STATE_HOME/incoda` on
+Linux).
+
+Queue config (description, `--require-reason`, close/replace keys), nested runs
+via `INCODA_HELD`, and `lane.log` accounting are documented in
+[`docs/DESIGN.md`](docs/DESIGN.md).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire, run, release. `--wait` default `30m`; `0` fails fast. `--owner` (or `INCODA_OWNER`) names the session or worktree. |
+| `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | Live dashboard, or plain `status` text on a pipe. |
+| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order. `--json` is a stable schema for scripts. |
+| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Standing queue configuration. |
+| `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop; exits `124` when acknowledged. |
+| `incoda queues` | Every queue with state on this machine. |
+| `incoda force-release --queue KEY [--live]` | Delete tickets. Refuses while live participants exist unless `--live`. |
+| `incoda doctor` | State directory, writability, locking probe. |
+
+`run` passes the child's exit code through. Lane failures use a stable band:
+`120` usage, `121` wait elapsed, `122` state unusable, `123` spawn failure,
+`124` killed through the lane, `125` kill not acknowledged, `130` interrupted
+while queueing. Signals forward to the child; on Windows the child runs inside a
+Job Object with kill-on-close.
+
+Full flag reference, exit codes, nested runs, and log format:
+[`docs/DESIGN.md`](docs/DESIGN.md).
+
+## AI agents
+
+The tool works by convention: it binds only what is routed through it. Copy
+[`AGENT-RULE.md`](AGENT-RULE.md) into `~/.claude/CLAUDE.md`, a repository's
+`AGENTS.md`, or Cursor project rules — one paragraph listing which command
+classes run under the lane, which key to use, and never to bypass it.
+
+Set once per machine or session:
+
+```bash
+export INCODA_QUEUE=builds
+export INCODA_OWNER="$(git branch --show-current 2>/dev/null || hostname)"
+```
+
+Wrap recipes the same way agents wrap one-off commands:
+
+```bash
+incoda run --queue builds --reason "just build" -- just build
+```
+
+## Alternatives
+
+| They use… | incoda is… |
+|---|---|
+| Shell `flock` wrapper | Same primitive, plus FIFO ordering, multi-key acquire, `status`/`watch`/`kill`, crash-safe reaping |
+| `make -j` / ninja | Per-target parallelism inside one build; incoda serialises *whole jobs* across sessions |
+| Redis / Celery / SQS | Cross-machine, networked; incoda is machine-local by design |
+| CI queue concurrency | Remote runner limits; incoda is for local boxes and self-hosted runners |
+| Process mutex in app code | External CLI — wraps any command, no code changes, works across worktrees |
+
+## Limits
+
+**It serialises. It does not make an oversized single job fit.** If one job alone
+drives the machine into swap or OOM, that job is too big for that machine.
+`watch` shows a memory gauge; it is observability, not a governor.
+
+**It is advisory.** No process-creation interception — by design. When the lane
+makes you wait, that is the tool working; surface it, do not bypass it.
+
+Not planned: cross-machine coordination, memory limits or cgroups, per-project
+state directories, distributed locks.
+
+- **Machine-local and per-user.** Two machines, or two OS users, never serialise
+  each other. State must be on a local filesystem; `doctor` fails on network
+  mounts that do not enforce locks.
+- **Unix process trees can survive a hard kill of `incoda`.** Only Windows gets
+  the Job Object kill-on-close guarantee.
+- **`--slots` disagreement resolves to the minimum**, never revokes a running
+  holder. `--exclusive` waits; it does not evict.
+- **Multi-key runs hold early keys while waiting for later ones** — deadlock-free,
+  but `a,b` can keep `a` busy while queuing on `b`.
+- **Polling:** up to one interval of handoff latency; `lane.log` grows without
+  bound (slowly).
+
+Platform caveats, nested-run warnings, and the full locking protocol:
+[`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Design
 
-The full rationale (locking protocol, the registry-lock window, ordering
-guarantees and their caveats, platform process-tree behaviour, state directory
-resolution) is in [`docs/DESIGN.md`](docs/DESIGN.md).
+The full rationale (locking protocol, registry-lock window, ordering guarantees,
+platform process-tree behaviour, state directory resolution) is in
+[`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## License
 

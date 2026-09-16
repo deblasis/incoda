@@ -1,0 +1,40 @@
+# incoda watch, end to end: overview -> drill-down -> kill a waiter with a reason
+expect "wintty-build" 15s
+expect "OLDEST WAIT"
+snap 01-overview
+key down
+snap 02-overview-second-row
+key up
+key enter
+expect "HOLDING (2)" 5s
+expect "WAITING (1)"
+snap 03-queue
+key down
+key down
+key k
+expect "kill pid" 5s
+snap 04-prompt-empty
+key enter
+expect "reason is required"
+snap 05-prompt-refused
+type "queued by mistake, the branch moved on"
+key enter
+expect "released the lane" 15s
+snap 06-after-kill
+absent "WAITING (1)" 5s
+key esc
+expect "OLDEST WAIT"
+key ?
+snap 07-overview-help
+key ?
+key down
+key down
+key enter
+expect "wintty-publish" 5s
+snap 08-empty-queue
+key esc
+resize 80 24
+sleep 400ms
+snap 09-narrow
+key q
+exit 5s
