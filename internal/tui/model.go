@@ -171,6 +171,10 @@ func New(opt Options) Model {
 
 // Run drives the model in a real terminal.
 func Run(opt Options) error {
+	stop := installTTYRestore()
+	defer stop()
+	defer restoreWatchTTY()
+
 	var popts []tea.ProgramOption
 	if opt.NoColor {
 		popts = append(popts, tea.WithColorProfile(colorprofile.Ascii))
