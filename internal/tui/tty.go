@@ -6,6 +6,11 @@ import (
 	"syscall"
 )
 
+// watchTTYRestoreSeq matches bubbletea v2 cursed_renderer.close teardown for
+// MouseModeCellMotion: alt screen off, cursor on, every mouse mode off.
+const watchTTYRestoreSeq = "\x1b[?1049l\x1b[?25h" +
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+
 // restoreWatchTTY turns off mouse tracking and leaves the alt screen. Bubble
 // Tea normally does this on exit, but a kill/SIGHUP (or closing the terminal
 // panel) can skip cleanup and leave the shell reading SGR mouse events as
@@ -17,11 +22,7 @@ func restoreWatchTTY() {
 		return
 	}
 	defer f.Close()
-	// Match bubbletea cursed_renderer.close: alt screen off, cursor on,
-	// disable every mouse mode we might have enabled (1002/1003/1006 + 1000).
-	const seq = "\x1b[?1049l\x1b[?25h" +
-		"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
-	_, _ = f.WriteString(seq)
+	_, _ = f.WriteString(watchTTYRestoreSeq)
 }
 
 // installTTYRestore runs restoreWatchTTY on common termination signals and
