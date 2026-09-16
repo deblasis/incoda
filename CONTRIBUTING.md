@@ -33,8 +33,20 @@ removed.
 
 ## Demo assets
 
-- **CLI GIF:** [`docs/img/demo.tape`](docs/img/demo.tape) — re-record with
-  [vhs](https://github.com/charmbracelet/vhs).
-- **Watch screenshots:** [`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig)
-  — drive `incoda watch` with [ttyrig](https://github.com/deblasis/ttyrig) and
-  commit the PNGs under `docs/img/`.
+Requires `incoda` on `PATH`. Watch recording also needs
+[ttyrig](https://github.com/deblasis/ttyrig); CLI GIF needs
+[vhs](https://github.com/charmbracelet/vhs).
+
+```sh
+just demo-watch   # ttyrig -> docs/img/watch-*.png
+just demo-cli     # vhs -> docs/img/demo.gif
+```
+
+Scripts:
+
+- [`docs/demo/seed-watch-state.sh`](docs/demo/seed-watch-state.sh) — holder,
+  waiter, exclusive, and closed queues for the watch tour
+- [`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig) — ttyrig script
+- [`docs/img/demo.tape`](docs/img/demo.tape) — vhs script for the CLI GIF
+
+Scratch output goes to `docs/demo/.state/` and `docs/demo/shots/` (gitignored).

@@ -7,6 +7,13 @@
 
 default: ci
 
+# Re-record README demo assets (needs incoda on PATH; see CONTRIBUTING.md).
+demo-watch:
+	./docs/demo/record-watch.sh
+
+demo-cli:
+	./docs/demo/record-cli-demo.sh
+
 # gates: formatting, module hygiene, vet, tests
 ci: fmt-check tidy-check vet test
 

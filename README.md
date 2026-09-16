@@ -129,9 +129,11 @@ Mouse: click to select, double-click to open, wheel to move.
 
 ![incoda watch kill prompt: cooperative kill with a required reason](docs/img/watch-kill-prompt.png)
 
-Re-record the watch screenshots with
-[`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig) and
-[ttyrig](https://github.com/deblasis/ttyrig).
+![incoda watch after kill: waiter gone, kill logged, lane released](docs/img/watch-after-kill.png)
+
+Re-record: `./docs/demo/record-watch.sh` (needs
+[ttyrig](https://github.com/deblasis/ttyrig)) or `./docs/demo/record-cli-demo.sh`
+for the CLI GIF.
 
 ## How it works
 
