@@ -38,14 +38,16 @@ incoda watch                       # live dashboard of every queue
 Same `--queue` key from any directory or git worktree. Or run
 [`examples/demo.sh`](examples/demo.sh) for a 30-second tour.
 
-![incoda queue demo: two-slot queue, parallel holders, FIFO waiter, kill -9 handoff](docs/img/demo-queue.gif)
+<video autoplay loop muted playsinline src="docs/img/demo-queue.mp4"></video>
 
 *Two jobs overlap on a `--slots 2` queue; a third waits FIFO. When a holder dies,
-the kernel frees the lock and the next waiter runs.*
+the kernel frees the lock and the next waiter runs.
+([GIF](docs/img/demo-queue.gif))*
 
-![incoda watch demo: overview, drill-down, help — exclusive and closed queues](docs/img/demo-watch.gif)
+<video autoplay loop muted playsinline src="docs/img/demo-watch.mp4"></video>
 
-*`incoda watch`: every queue on the machine — holders, waiters, memory gauge.*
+*`incoda watch`: every queue on the machine — holders, waiters, memory gauge.
+([GIF](docs/img/demo-watch.gif))*
 
 ## Install
 

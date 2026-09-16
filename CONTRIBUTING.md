@@ -39,7 +39,7 @@ Requires `incoda` on `PATH`. Watch recording also needs
 
 ```sh
 just demo-watch   # ttyrig -> docs/img/watch-*.png
-just demo-cli     # vhs -> docs/img/demo-queue.gif + demo-watch.gif
+just demo-cli     # vhs -> docs/img/demo-{queue,watch}.{gif,mp4}
 ```
 
 Scripts:
