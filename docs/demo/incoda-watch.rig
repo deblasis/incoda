@@ -1,0 +1,38 @@
+# incoda watch demo: overview -> drill-down -> kill waiter with reason -> help
+expect "builds" 15s
+expect "OLDEST WAIT"
+snap 01-overview
+key down
+snap 02-overview-second-row
+key up
+key enter
+expect "HOLDING (1)" 5s
+expect "WAITING (1)"
+snap 03-queue
+key down
+key k
+expect "kill pid" 5s
+snap 04-prompt-empty
+key enter
+expect "reason is required"
+snap 05-prompt-refused
+type "queued by mistake, the branch moved on"
+key enter
+expect "released the lane" 15s
+snap 06-after-kill
+absent "WAITING (1)" 5s
+key esc
+expect "OLDEST WAIT"
+key ?
+snap 07-overview-help
+key ?
+key down
+key enter
+expect "playwright e2e" 5s
+snap 08-exclusive-queue
+key esc
+resize 80 24
+sleep 400ms
+snap 09-narrow
+key q
+exit 5s

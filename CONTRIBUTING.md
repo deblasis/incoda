@@ -30,3 +30,24 @@ exit codes, the `status --json` schema) needs a line in the README.
 
 The `status --json` schema is a contract: fields are added, never renamed or
 removed.
+
+## Demo assets
+
+Requires `incoda` on `PATH`. Watch recording also needs
+[ttyrig](https://github.com/deblasis/ttyrig); CLI GIF needs
+[vhs](https://github.com/charmbracelet/vhs).
+
+```sh
+just demo-watch   # ttyrig -> docs/img/watch-*.png
+just demo-cli     # vhs -> docs/img/demo-{queue,watch}.{gif,mp4}
+```
+
+Scripts:
+
+- [`docs/demo/seed-watch-state.sh`](docs/demo/seed-watch-state.sh) — holder,
+  waiter, exclusive, and closed queues for the watch tour
+- [`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig) — ttyrig script
+- [`docs/img/demo-queue.tape`](docs/img/demo-queue.tape) — queue / multi-slot GIF
+- [`docs/img/demo-watch.tape`](docs/img/demo-watch.tape) — watch TUI GIF
+
+Scratch output goes to `docs/demo/.state/` and `docs/demo/shots/` (gitignored).

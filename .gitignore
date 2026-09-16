@@ -7,3 +7,7 @@ incoda.exe
 # go test scratch
 *.test
 *.exe~
+
+# demo recording scratch
+/docs/demo/.state/
+/docs/demo/shots/
