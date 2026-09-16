@@ -7,6 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/colorprofile v0.4.3
+	github.com/ebitengine/purego v0.11.0
 	golang.org/x/sys v0.47.0
 )
 

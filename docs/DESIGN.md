@@ -342,9 +342,10 @@ renderer says "unavailable" rather than printing a confident zero.
   (two samples, 100 ms apart).
 - **Linux**: total, available and swap from `/proc/meminfo`; CPU from
   `/proc/stat`.
-- **macOS**: total from `hw.memsize` and swap from `vm.swapusage`, but **not**
-  available physical memory: that needs a mach `host_statistics64` call and
-  therefore cgo, and this binary stays pure Go. CPU comes from `kern.cp_time`.
+- **macOS**: total from `hw.memsize`, available from mach
+  `host_statistics(HOST_VM_INFO)`, swap from `vm.swapusage`, CPU from mach
+  `host_statistics(HOST_CPU_LOAD_INFO)`. Loaded via purego (no cgo); `kern.cp_time`
+  is gone on recent macOS anyway.
 
 ## Color
 
