@@ -159,32 +159,19 @@ to move selection.
 
 ## Install
 
-macOS (Homebrew):
-
-```bash
-brew install deblasis/tap/incoda
-```
-
-Windows (Scoop):
-
-```powershell
-scoop bucket add deblasis https://github.com/deblasis/scoop-bucket
-scoop install deblasis/incoda
-```
-
-macOS and Linux (install script):
+macOS and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/deblasis/incoda/main/install.sh | sh
 ```
 
-Windows (PowerShell install script):
+Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/deblasis/incoda/main/install.ps1 | iex
 ```
 
-The scripts detect OS and architecture, download the matching release asset,
+Both scripts detect OS and architecture, download the matching release asset,
 verify its SHA-256 against `SHA256SUMS`, and install to `~/.local/bin` or
 `%LOCALAPPDATA%\Programs\incoda`. They refuse to install anything they could
 not verify.

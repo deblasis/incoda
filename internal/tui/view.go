@@ -16,7 +16,7 @@ import (
 func (m Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
-	if m.screen != screenKillPending {
+	if m.screen != screenKillPending && m.screen != screenKillPrompt {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
 	return v

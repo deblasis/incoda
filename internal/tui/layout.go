@@ -4,12 +4,23 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-// bodyStartRow is the terminal row where the overview/queue body begins:
-// header, gauge, then a blank line.
+func (m Model) layoutWidth() int {
+	w := m.width
+	if w < 40 {
+		w = 40
+	}
+	return w
+}
+
+// bodyStartRow is the terminal row where the overview/queue body begins,
+// derived from the same header and gauge strings render() uses so hit
+// testing stays aligned if either wraps.
 func (m Model) bodyStartRow() int {
-	return 3
+	w := m.layoutWidth()
+	return lipgloss.Height(m.renderHeader(w)) + lipgloss.Height(m.renderGauge(w)) + 1
 }
 
 // overviewQueueAt maps a terminal row to a queue index in the overview.
@@ -30,10 +41,10 @@ func (m Model) overviewQueueRow(i int) int {
 }
 
 // participantHit maps a terminal row to a participant index on the queue
-// screen. Only the first line of each participant block is clickable.
+// screen. All three lines of each block count as the same row.
 func (m Model) participantHit(y int) (idx int, ok bool) {
 	for _, h := range m.participantRowsAt() {
-		if y == h.y {
+		if y >= h.y && y < h.y+3 {
 			return h.idx, true
 		}
 	}
@@ -96,14 +107,8 @@ func (m Model) participantRowsAt() []rowHit {
 const doubleClickWindow = 400 * time.Millisecond
 
 func (m Model) mouse_(msg tea.MouseMsg) (Model, tea.Cmd) {
-	// Kill prompt: let bubbles/textinput handle clicks for cursor placement.
-	if m.screen == screenKillPrompt {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
-	}
-	// Pending and other modal-ish screens: keyboard only.
-	if m.screen == screenKillPending {
+	// Modal screens: keyboard only; clicks must not move selection behind.
+	if m.screen == screenKillPrompt || m.screen == screenKillPending {
 		return m, nil
 	}
 

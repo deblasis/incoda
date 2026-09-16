@@ -310,9 +310,9 @@ The palette adapts to the terminal's background (Bubble Tea asks for it on
 start) and the accent is a warm amber rather than the purple every terminal
 dashboard reaches for. Mouse support uses Bubble Tea's cell-motion mode:
 click to select a row, double-click a queue to open it, scroll wheel to move
-selection; the kill prompt keeps mouse for cursor placement in the reason
-field. On a pipe, or with `--once` or `--plain`, `watch` repaints the old
-plain text, so nothing that scraped it breaks.
+selection; mouse is off while the kill prompt is open. On a pipe, or with
+`--once` or `--plain`, `watch` repaints the old plain text, so nothing that
+scraped it breaks.
 
 ## Exit codes
 
