@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Seed state for demo-watch.gif: builds busy, gui-tests exclusive, legacy closed.
+# Seed state for demo-watch.gif (also used by demo-watch.tape Hide block).
 set -euo pipefail
 
 export INCODA_DIR="${INCODA_DIR:-/tmp/incoda-watch-gif/state}"
+export CLICOLOR_FORCE=1
 rm -rf "$INCODA_DIR"
 mkdir -p "$INCODA_DIR"
 

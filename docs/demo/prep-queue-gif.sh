@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Seed state for demo-queue.gif: 2 holders + 1 waiter on a 2-slot queue.
+# Seed state for demo-queue.gif (also used by demo-queue.tape Hide block).
 set -euo pipefail
 
 export INCODA_DIR="${INCODA_DIR:-/tmp/incoda-cli-demo/state}"
+export CLICOLOR_FORCE=1
 rm -rf "$INCODA_DIR"
 mkdir -p "$INCODA_DIR"
 
@@ -15,3 +16,4 @@ incoda run --queue builds --owner agents --reason "dotnet test suite" -- sleep 3
 
 sleep 1
 disown -a 2>/dev/null || true
+echo "seeded $INCODA_DIR (2 holders + 1 waiter)"
