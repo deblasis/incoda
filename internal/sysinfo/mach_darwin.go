@@ -19,22 +19,23 @@ const (
 	kernSuccess = 0
 )
 
-// vmStatistics mirrors struct vm_statistics (natural_t fields).
+// vmStatistics mirrors struct vm_statistics (15 natural_t fields = 60 bytes).
 type vmStatistics struct {
-	freeCount      uint32
-	activeCount    uint32
-	inactiveCount  uint32
-	wireCount      uint32
-	zeroFillCount  uint32
-	reactivations  uint32
-	pageins        uint32
-	pageouts       uint32
-	faults         uint32
-	cowFaults      uint32
-	lookups        uint32
-	hits           uint32
-	purgeableCount uint32
-	purgeablePages uint32
+	freeCount        uint32
+	activeCount      uint32
+	inactiveCount    uint32
+	wireCount        uint32
+	zeroFillCount    uint32
+	reactivations    uint32
+	pageins          uint32
+	pageouts         uint32
+	faults           uint32
+	cowFaults        uint32
+	lookups          uint32
+	hits             uint32
+	purgeableCount   uint32
+	purges           uint32
+	speculativeCount uint32
 }
 
 type hostCPULoadData struct {
@@ -90,8 +91,8 @@ func darwinCPUTotals() (cpuTotals, bool) {
 	if hostStatistics(machHostSelf(), hostCPULoadInfo, unsafe.Pointer(&load), &count) != kernSuccess {
 		return cpuTotals{}, false
 	}
-	// mach/host_info.h names IDLE=3, but recent macOS reports idle at index 2
-	// (index 3 is always zero here). Match gopsutil's layout.
+	// HOST_CPU_LOAD_INFO: idle ticks sit at index 2 on current macOS (index 3
+	// is nice and often zero). Same layout gopsutil uses.
 	const cpuStateIdle = 2
 	var total uint64
 	for _, v := range load.cpuTicks {
