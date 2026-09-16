@@ -50,6 +50,15 @@ func (m Memory) String() string {
 	return out
 }
 
+// MachineLine renders memory plus an optional CPU percentage for status.
+func MachineLine(mem Memory, cpu CPU) string {
+	line := mem.String()
+	if cpu.HaveUsage {
+		line += fmt.Sprintf("; cpu %.0f%%", cpu.UsagePct)
+	}
+	return line
+}
+
 // Human renders a byte count the way the memory line does ("3.2 GB"), so the
 // per-job peaks in lane.log read in the same units as the machine gauge.
 func Human(b uint64) string {

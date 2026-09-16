@@ -28,6 +28,7 @@ type Report struct {
 	Host           string         `json:"hostname"`
 	Time           string         `json:"time"`
 	Memory         sysinfo.Memory `json:"memory"`
+	CPU            sysinfo.CPU    `json:"cpu"`
 	Queues         []Queue        `json:"queues"`
 }
 
@@ -75,6 +76,7 @@ func Build(dir, version string, keys []string, events int) (*Report, error) {
 		Host:           host,
 		Time:           time.Now().Format(time.RFC3339),
 		Memory:         sysinfo.ReadMemory(),
+		CPU:            sysinfo.ReadCPU(),
 		Queues:         []Queue{},
 	}
 	for _, key := range keys {

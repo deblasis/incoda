@@ -232,7 +232,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "%s %s\n", p.Dim("INCODA_QUEUE:"), p.Dim("unset (run needs --queue)"))
 	}
-	fmt.Fprintf(stdout, "%s\n", p.Dim(sysinfo.ReadMemory().String()))
+	fmt.Fprintf(stdout, "%s\n", p.Dim(sysinfo.MachineLine(sysinfo.ReadMemory(), sysinfo.ReadCPU())))
 	return nil
 }
 
