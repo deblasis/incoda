@@ -121,9 +121,9 @@ type Model struct {
 	key  string // queue open in the queue screen
 	psel int    // selected participant in the queue screen
 
-	input   textinput.Model
-	pending *pendingKill
-	killSeq int
+	input     textinput.Model
+	pending   *pendingKill
+	killSeq   int
 	toast     toast
 	help      bool
 	lastClick clickStamp
