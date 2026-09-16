@@ -10,6 +10,7 @@ import (
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
+	"github.com/deblasis/incoda/internal/sysinfo"
 )
 
 // Report and QueueReport are the shapes `status --json` emits. They live in
@@ -94,7 +95,7 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 		}
 		renderQueue(w, p, qr)
 	}
-	fmt.Fprintf(w, "\n%s\n", p.Dim(rep.Memory.String()))
+	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
 }
 
 func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {

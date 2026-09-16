@@ -64,9 +64,8 @@ func (m Model) renderHeader(w int) string {
 	return left + "  " + mid + strings.Repeat(" ", gap) + right
 }
 
-// renderGauge is the memory readout as a bar: the same gauge `status`
-// prints as a sentence, painted so a machine near its limit reads red
-// before anyone parses a number.
+// renderGauge is the memory readout as a bar, plus a simple CPU percentage
+// when available. Swap stays as the byte count it already was.
 func (m Model) renderGauge(w int) string {
 	st := m.st
 	if m.rep == nil {
@@ -76,8 +75,13 @@ func (m Model) renderGauge(w int) string {
 		return st.dim.Render("loading…")
 	}
 	mem := m.rep.Memory
+	cpu := m.rep.CPU
 	if !mem.HaveTotal || !mem.HaveAvailable || mem.TotalBytes == 0 {
-		return st.dim.Render(mem.String())
+		line := st.dim.Render(mem.String())
+		if cpu.HaveUsage {
+			line += st.dim.Render(" · cpu ") + st.bold.Render(fmt.Sprintf("%.0f%%", cpu.UsagePct))
+		}
+		return line
 	}
 	used := mem.TotalBytes - mem.AvailableBytes
 	pct := float64(used) / float64(mem.TotalBytes)
@@ -93,10 +97,34 @@ func (m Model) renderGauge(w int) string {
 	bar := fill.Render(strings.Repeat("█", filled)) + st.gaugeEmpty.Render(strings.Repeat("░", width-filled))
 	line := st.dim.Render("memory ") + bar + " " + st.bold.Render(fmt.Sprintf("%.0f%%", pct*100)) +
 		st.dim.Render(fmt.Sprintf(" used · %s free of %s", sysinfo.Human(mem.AvailableBytes), sysinfo.Human(mem.TotalBytes)))
+	if cpu.HaveUsage {
+		if w < 100 {
+			line += st.dim.Render(" · cpu ") + st.bold.Render(fmt.Sprintf("%.0f%%", cpu.UsagePct))
+		} else {
+			line += st.dim.Render(" · ") + m.pctGauge("cpu", cpu.UsagePct/100, 10)
+		}
+	}
 	if mem.HaveSwap {
 		line += st.dim.Render(" · swap " + sysinfo.Human(mem.SwapUsedBytes))
 	}
 	return line
+}
+
+func (m Model) pctGauge(label string, pct float64, width int) string {
+	st := m.st
+	if width < 4 {
+		width = 4
+	}
+	filled := int(pct*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	fill := st.gaugeFill
+	if pct > 0.85 {
+		fill = st.gaugeHot
+	}
+	bar := fill.Render(strings.Repeat("█", filled)) + st.gaugeEmpty.Render(strings.Repeat("░", width-filled))
+	return st.dim.Render(label+" ") + bar + " " + st.bold.Render(fmt.Sprintf("%.0f%%", pct*100))
 }
 
 func (m Model) renderOverview(w int) string {
