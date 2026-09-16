@@ -95,7 +95,7 @@ publish TAG:
 	rm -f "$notes"
 
 # full manual release from this machine: just release v0.1.1
-release TAG: (dist TAG) (publish TAG)
+release TAG: (dist TAG) (publish TAG) (packaging TAG)
 
 # regenerate packaging/homebrew/incoda.rb and packaging/scoop/incoda.json from
 # a published release. After a release, copy them into deblasis/homebrew-tap

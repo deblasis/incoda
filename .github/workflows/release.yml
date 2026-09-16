@@ -49,3 +49,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: just publish "${{ steps.tag.outputs.tag }}"
+
+      - name: Regenerate packaging manifests
+        run: just packaging "${{ steps.tag.outputs.tag }}"
