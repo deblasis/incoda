@@ -16,6 +16,9 @@ import (
 func (m Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
+	if m.screen != screenKillPending && m.screen != screenKillPrompt {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -312,15 +315,15 @@ func (m Model) renderBottom(w int) string {
 	var help string
 	switch m.screen {
 	case screenOverview:
-		help = "↑/↓ select · enter open · r refresh · ? help · q quit"
+		help = "↑/↓ or wheel · click select · double-click open · enter open · r refresh · ? help · q quit"
 		if m.help {
 			help += "\n" + "inside a queue: k kills the selected job with a reason, K forces it · every kill is logged with who and why"
 		}
 	case screenQueue:
 		if m.single {
-			help = "↑/↓ select · k kill · K force-kill · r refresh · q quit"
+			help = "↑/↓ or wheel · click select · k kill · K force-kill · r refresh · q quit"
 		} else {
-			help = "↑/↓ select · k kill · K force-kill · r refresh · esc back · q quit"
+			help = "↑/↓ or wheel · click select · k kill · K force-kill · r refresh · esc back · q quit"
 		}
 	case screenKillPrompt:
 		help = "type the reason · enter confirm · esc cancel"
