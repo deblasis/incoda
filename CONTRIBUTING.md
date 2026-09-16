@@ -39,7 +39,7 @@ Requires `incoda` on `PATH`. Watch recording also needs
 
 ```sh
 just demo-watch   # ttyrig -> docs/img/watch-*.png
-just demo-cli     # vhs -> docs/img/demo.gif
+just demo-cli     # vhs -> docs/img/demo-queue.gif + demo-watch.gif
 ```
 
 Scripts:
@@ -47,6 +47,7 @@ Scripts:
 - [`docs/demo/seed-watch-state.sh`](docs/demo/seed-watch-state.sh) — holder,
   waiter, exclusive, and closed queues for the watch tour
 - [`docs/demo/incoda-watch.rig`](docs/demo/incoda-watch.rig) — ttyrig script
-- [`docs/img/demo.tape`](docs/img/demo.tape) — vhs script for the CLI GIF
+- [`docs/img/demo-queue.tape`](docs/img/demo-queue.tape) — queue / multi-slot GIF
+- [`docs/img/demo-watch.tape`](docs/img/demo-watch.tape) — watch TUI GIF
 
 Scratch output goes to `docs/demo/.state/` and `docs/demo/shots/` (gitignored).

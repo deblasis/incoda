@@ -38,10 +38,14 @@ incoda watch                       # live dashboard of every queue
 Same `--queue` key from any directory or git worktree. Or run
 [`examples/demo.sh`](examples/demo.sh) for a 30-second tour.
 
-![incoda CLI demo: FIFO queue — second job waits, status shows holders and waiters, automatic handoff when the holder exits](docs/img/demo.gif)
+![incoda queue demo: two-slot queue, parallel holders, FIFO waiter, kill -9 handoff](docs/img/demo-queue.gif)
 
-*FIFO in the terminal: `incoda run --queue builds` serialises heavy jobs; the lane
-hands over when the holder exits (even under `kill -9`).*
+*Two jobs overlap on a `--slots 2` queue; a third waits FIFO. When a holder dies,
+the kernel frees the lock and the next waiter runs.*
+
+![incoda watch demo: overview, drill-down, help — exclusive and closed queues](docs/img/demo-watch.gif)
+
+*`incoda watch`: every queue on the machine — holders, waiters, memory gauge.*
 
 ## Install
 

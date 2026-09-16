@@ -12,7 +12,7 @@ demo-watch:
 	./docs/demo/record-watch.sh
 
 demo-cli:
-	./docs/demo/record-cli-demo.sh
+	./docs/demo/record-demos.sh
 
 # gates: formatting, module hygiene, vet, tests
 ci: fmt-check tidy-check vet test
