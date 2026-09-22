@@ -3,6 +3,7 @@ package lane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,110 @@ func TestConfiguredSlotsFloorAdmission(t *testing.T) {
 	defer second.Release(0)
 	if err := second.Acquire(context.Background(), AcquireOptions{Wait: 0}); err != nil {
 		t.Fatalf("a slots=1 ticket must not narrow a 2-slot configured queue: %v", err)
+	}
+}
+
+// TestConfiguredSlotsCapAboveConfig is the other half of the clamp: a live
+// ticket carrying a count ABOVE the config (a ticket written before the
+// config was narrowed) must not widen the queue past what it now allows.
+func TestConfiguredSlotsCapAboveConfig(t *testing.T) {
+	wide := []Entry{{Ticket: Ticket{Slots: 8}}, {Ticket: Ticket{Slots: 5}}}
+	if got := effectiveSlots(wide, 3); got != 3 {
+		t.Fatalf("effectiveSlots with above-config tickets on a 3-slot queue = %d, want 3", got)
+	}
+
+	dir := t.TempDir()
+	q, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.SaveConfig(Config{Slots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	// Plant the pre-narrowing ticket: enrolled at the configured count, then
+	// rewritten to the wider count an older config would have stamped.
+	stale, err := q.Enroll(Ticket{Slots: 2, Command: []string{"stale"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.ticket.Slots = 8
+	b, err := json.Marshal(stale.ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.lock.Truncate(b); err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Release(0)
+	if err := stale.Acquire(context.Background(), AcquireOptions{Wait: 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := q.Enroll(Ticket{Command: []string{"first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release(0)
+	if err := first.Acquire(context.Background(), AcquireOptions{Wait: 0}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := q.Enroll(Ticket{Command: []string{"third"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Release(0)
+	if err := third.Acquire(context.Background(), AcquireOptions{Wait: 0}); err != ErrTimeout {
+		t.Fatalf("a slots=8 ticket must not widen a 2-slot configured queue: %v", err)
+	}
+	// And the observer agrees with admission: the count is the config's.
+	snap, err := q.Observe(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.EffectiveSlots != 2 {
+		t.Fatalf("snapshot effective slots = %d, want 2", snap.EffectiveSlots)
+	}
+}
+
+// TestSlotsDisagreementError pins the one message and the two advice shapes
+// every refusal path shares: a plain caller is pointed at --exclusive, a
+// caller that already passed --exclusive is told to drop --slots.
+func TestSlotsDisagreementError(t *testing.T) {
+	plain := NewSlotsDisagreement("builds", 5, 1, false)
+	msg := plain.Error()
+	for _, want := range []string{
+		`queue "builds" is configured for 5 slot(s)`,
+		"--slots 1 is not allowed to disagree",
+		"pass --exclusive if the job needs the queue alone",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("plain refusal missing %q:\n%s", want, msg)
+		}
+	}
+	excl := NewSlotsDisagreement("builds", 5, 1, true).Error()
+	if !strings.Contains(excl, "--exclusive already holds the queue alone") {
+		t.Fatalf("exclusive refusal should tell the caller to drop --slots:\n%s", excl)
+	}
+	if strings.Contains(excl, "pass --exclusive") {
+		t.Fatalf("exclusive refusal must not advise passing --exclusive:\n%s", excl)
+	}
+
+	// Enroll returns the typed error, so the CLI can map it to the usage
+	// exit instead of a state error.
+	dir := t.TempDir()
+	q, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.SaveConfig(Config{Slots: 3}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = q.Enroll(Ticket{Slots: 2, Command: []string{"x"}})
+	var sd *SlotsDisagreement
+	if !errors.As(err, &sd) || sd.Configured != 3 || sd.Asked != 2 {
+		t.Fatalf("Enroll should refuse with a typed SlotsDisagreement, got %v", err)
 	}
 }
 

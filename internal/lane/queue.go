@@ -114,16 +114,18 @@ func (q *Queue) TailLog(n int) []string {
 	return lines
 }
 
-// scanLocked lists live tickets in arrival order and reaps dead ones. The
-// caller must hold the registry lock.
+// scanLocked lists live tickets in arrival order, reaps dead ones, and
+// resolves the effective slot count under the same lock hold, so the Holding
+// flags and the count can never disagree. The caller must hold the registry
+// lock.
 //
 // Reaping is the whole staleness story: a ticket whose exclusive lock can be
 // taken has no living owner, because the kernel drops that lock on process
 // death however the process died.
-func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
+func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 	names, err := os.ReadDir(q.Dir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var live []Entry
 	for _, de := range names {
@@ -179,17 +181,18 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 		live[i].fill(now)
 	}
 	q.reapKillFiles(names)
-	return live, nil
+	return live, slots, nil
 }
 
 // effectiveSlots resolves the slot count for the current ticket set.
 //
-// On a queue whose config sets slots, that number is the width: each ticket
-// counts as at least the configured value, so nobody can narrow the queue by
-// asking for less. Tickets that carry a smaller or unset count still occur
-// (a stale binary that predates per-queue config, a ticket written during a
-// rolling upgrade) and they ride at the configured width rather than dragging
-// everyone down to one.
+// On a queue whose config sets slots, that number is the width in both
+// directions: the result is clamped to it, so nobody can narrow the queue by
+// asking for less, and nobody can widen it either. Tickets that carry a
+// different count still occur (a stale binary that predates per-queue config,
+// a ticket written during a rolling upgrade) and they ride at the configured
+// width rather than dragging everyone down to one or lifting the queue past
+// what it was sized for.
 //
 // A queue with no configured count keeps the original rule: the minimum
 // requested by any live participant, floored at 1. Mixing --slots values
@@ -210,15 +213,23 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 		if s < 1 {
 			s = 1
 		}
-		if cfgSlots > s {
-			s = cfgSlots
-		}
 		if slots == 0 || s < slots {
 			slots = s
 		}
 	}
 	if slots < 1 {
 		slots = 1
+	}
+	if cfgSlots > 0 {
+		// The configured count is a clamp on both ends, not a floor: a live
+		// ticket carrying a larger count (written before the config was
+		// narrowed) must not admit more holders than the queue now allows.
+		if slots > cfgSlots {
+			slots = cfgSlots
+		}
+		if slots < cfgSlots {
+			slots = cfgSlots
+		}
 	}
 	return slots
 }
@@ -270,20 +281,28 @@ type Snapshot struct {
 	RecentEvents   []string `json:"recent_events"`
 }
 
-// Observe scans the queue without joining it.
+// Observe scans the queue without joining it. The ticket set and the config
+// are read inside one registry lock hold (SaveConfig writes under the same
+// lock), so the snapshot can never pair one era's tickets with another era's
+// count.
 func (q *Queue) Observe(logLines int) (*Snapshot, error) {
 	var live []Entry
+	var slots int
+	var cfg Config
+	var cfgErr error
 	err := q.withRegistry(func() error {
 		var e error
-		live, e = q.scanLocked(time.Now())
-		return e
+		live, slots, e = q.scanLocked(time.Now())
+		if e != nil {
+			return e
+		}
+		cfg, cfgErr = q.LoadConfig()
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	cfg, cfgErr := q.LoadConfig()
-	slots := effectiveSlots(live, cfg.Slots)
-	if len(live) == 0 && cfg.Slots > 0 {
+	if cfgErr == nil && len(live) == 0 && cfg.Slots > 0 {
 		// Nobody is enrolled to carry the number, so the config is the
 		// only thing that can say how wide an empty queue is.
 		slots = cfg.Slots
@@ -355,8 +374,7 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 		cfg, cfgErr := q.LoadConfig()
 		switch {
 		case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
-			return fmt.Errorf("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. Drop --slots to take the configured count, change it with `incoda config %s --slots N`, or pass --exclusive if the job needs the queue alone",
-				q.Key, cfg.Slots, t.Slots, q.Key)
+			return NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)
 		case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
 			t.Slots = cfg.Slots
 		case t.Slots < 1:
@@ -430,17 +448,17 @@ func (e *Enrollment) Release(rc int) {
 }
 
 // Position reports this enrollment's 0-based place in the live queue plus the
-// current effective slot count.
+// current effective slot count. Both come from one scan under the registry
+// lock, so the place and the count describe the same instant.
 func (e *Enrollment) Position() (idx, slots int, live []Entry, err error) {
 	err = e.q.withRegistry(func() error {
 		var scanErr error
-		live, scanErr = e.q.scanLocked(time.Now())
+		live, slots, scanErr = e.q.scanLocked(time.Now())
 		return scanErr
 	})
 	if err != nil {
 		return -1, 0, nil, err
 	}
-	slots = e.q.effectiveSlotsLocked(live)
 	idx = -1
 	for i, x := range live {
 		if x.File == e.name {
@@ -471,7 +489,7 @@ func (e *Enrollment) MarkAcquired() {
 // only removes the record that was keeping the next caller out of the way.
 func (q *Queue) ForceRelease(allowLive bool) (removed int, err error) {
 	err = q.withRegistry(func() error {
-		live, err := q.scanLocked(time.Now())
+		live, _, err := q.scanLocked(time.Now())
 		if err != nil {
 			return err
 		}

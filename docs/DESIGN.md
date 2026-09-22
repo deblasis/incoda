@@ -121,13 +121,14 @@ permits N concurrent holders, which is the point of the generalisation: not
 every resource is exclusive.
 
 On a queue whose config sets a count, that count is the width. The effective
-slot count floors at the configured number: every live ticket counts as at
-least the configured width, so neither a stale ticket (a binary predating
-per-queue config enrolls with no count) nor a hand-planted one can narrow the
-queue. A run that passes a `--slots` disagreeing with the config is refused
-before any ticket exists, in either direction: narrowing silently was how one
-stray `--slots 1` turned a five-slot queue into a one-slot queue for everyone,
-and silent clamping of a wider ask hides what the queue actually is.
+slot count is clamped to the configured number at both ends: a stale ticket
+(a binary predating per-queue config enrolls with no count) can neither
+narrow the queue nor widen it, and neither can a ticket written before the
+config was changed. A run that passes a `--slots` disagreeing with the
+config is refused before any ticket exists, in either direction: narrowing
+silently was how one stray `--slots 1` turned a five-slot queue into a
+one-slot queue for everyone, and silent clamping of a wider ask hides what
+the queue actually is.
 
 A queue with no configured count keeps the original rule: the effective count
 is the **minimum** asked for by any live participant, floored at 1. Mixing

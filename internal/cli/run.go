@@ -93,8 +93,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			return usagef("queue %q requires --reason: say what this job is so status can answer \"whose is that and why\"", key)
 		}
 		if cfg.Slots > 0 && *slots >= 1 && *slots != cfg.Slots {
-			return usagef("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. Drop --slots to take the configured count, change it with `incoda config %s --slots N`, or pass --exclusive if the job needs the queue alone",
-				key, cfg.Slots, *slots, key)
+			return usagef("%v", lane.NewSlotsDisagreement(key, cfg.Slots, *slots, *exclusive))
 		}
 		if held[key] {
 			if !*quiet {
@@ -175,6 +174,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Dir:       cwd,
 		})
 		if err != nil {
+			// The queue's config can change between the pre-check above and
+			// this enrollment; the refusal is the same caller mistake either
+			// way, so it gets the same message and the same usage exit
+			// rather than masquerading as unusable state.
+			var sd *lane.SlotsDisagreement
+			if errors.As(err, &sd) {
+				rc = ExitUsage
+				return usagef("%v", err)
+			}
 			rc = ExitState
 			return exitWith(ExitState, "cannot enter queue %q: %v", pt.key, err)
 		}

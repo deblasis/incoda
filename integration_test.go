@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -291,7 +292,10 @@ func TestConfiguredSlotsAreHonored(t *testing.T) {
 
 	const n = 6
 	const slots = 3
-	const holdMS = 500
+	// The hold is long enough that the first three holders must overlap
+	// whatever spawn jitter does: the lower bound on concurrency is the
+	// feature under test and must not depend on process-startup timing.
+	const holdMS = 5000
 
 	// Configure through the CLI so the write path is exercised too.
 	cfg := exec.Command(incoda, "config", "cfglane", "--slots", strconv.Itoa(slots))
@@ -387,6 +391,91 @@ func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
 	ok.Env = laneEnv(state)
 	if out, err := ok.CombinedOutput(); err != nil {
 		t.Fatalf("--slots 3 on a 3-slot queue should run: %v\n%s", err, out)
+	}
+}
+
+// TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange covers the refusal
+// path the pre-check cannot reach: the queue's config changes after a run
+// has passed the pre-check but before it enrolls the key (here: the second
+// key of a multi-key run, enrolled only after the first key is acquired).
+// The refusal must be the same message and the same exit 120 as the
+// pre-check's, not a state error.
+func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	stamps := t.TempDir()
+
+	// racea,raceb both start at slots 1 so the pre-check passes.
+	for _, key := range []string{"racea", "raceb"} {
+		cfg := exec.Command(incoda, "config", key, "--slots", "1")
+		cfg.Env = laneEnv(state)
+		if out, err := cfg.CombinedOutput(); err != nil {
+			t.Fatalf("config %s: %v\n%s", key, err, out)
+		}
+	}
+
+	// A holder keeps racea busy so the contender finishes its pre-check of
+	// both keys and then waits before it can enroll raceb.
+	holder := exec.Command(incoda, "run", "--queue", "racea", "--wait", "60s", "--poll", "50ms",
+		"--quiet", "--", stamp, filepath.Join(stamps, "holder.txt"), "holder", "6000")
+	holder.Env = laneEnv(state)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	contender := exec.Command(incoda, "run", "--queue", "racea,raceb", "--slots", "1",
+		"--wait", "60s", "--poll", "50ms", "--quiet",
+		"--", stamp, filepath.Join(stamps, "never.txt"), "never", "1000")
+	contender.Env = laneEnv(state)
+	var cout bytes.Buffer
+	contender.Stdout = &cout
+	contender.Stderr = &cout
+	if err := contender.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The contender waiting on racea proves its pre-check of both keys is
+	// done: the enrollment loop runs after every key was checked.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		rep := statusJSON(t, incoda, state, "racea")
+		if len(rep.Queues) == 1 && len(rep.Queues[0].Waiting) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = contender.Process.Kill()
+			_ = holder.Process.Kill()
+			t.Fatal("contender never queued on racea")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Narrow the second key's config out from under the contender: --slots 1
+	// still matched at pre-check time and no longer does.
+	reconfig := exec.Command(incoda, "config", "raceb", "--slots", "2")
+	reconfig.Env = laneEnv(state)
+	if out, err := reconfig.CombinedOutput(); err != nil {
+		t.Fatalf("reconfig raceb: %v\n%s", err, out)
+	}
+
+	err := contender.Wait()
+	if err == nil {
+		t.Fatal("the contender should have been refused at enrollment")
+	}
+	if code := exitCodeOf(err); code != 120 {
+		t.Fatalf("enroll-time refusal exited %d, want 120:\n%s", code, cout.String())
+	}
+	if !strings.Contains(cout.String(), `queue "raceb" is configured for 2 slot(s)`) {
+		t.Fatalf("enroll-time refusal should name the key and its configured count:\n%s", cout.String())
+	}
+	if _, err := os.Stat(filepath.Join(stamps, "never.txt")); !os.IsNotExist(err) {
+		t.Fatal("a refused run must not have run its command")
+	}
+	if got := countTickets(t, state, "raceb"); got != 0 {
+		t.Fatalf("the refused run left %d ticket(s) on raceb", got)
+	}
+	if err := holder.Wait(); err != nil {
+		t.Fatalf("holder: %v", err)
 	}
 }
 

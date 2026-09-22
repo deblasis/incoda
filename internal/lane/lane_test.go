@@ -244,11 +244,16 @@ func TestEffectiveSlotsTakesTheMinimum(t *testing.T) {
 	if got := effectiveSlots(nil, 0); got != 1 {
 		t.Fatalf("effectiveSlots(nil) = %d, want 1", got)
 	}
-	// A configured count is a floor, not a target: every ticket counts as at
+	// A configured count is a clamp, not a target: every ticket counts as at
 	// least the configured width, so the same mixed set on a 6-slot queue
-	// resolves to 6.
+	// resolves to 6...
 	if got := effectiveSlots(live, 6); got != 6 {
 		t.Fatalf("effectiveSlots with a configured floor of 6 = %d, want 6", got)
+	}
+	// ...and a configured 1 caps the same set at 1, so a ticket written
+	// before the config was narrowed cannot keep the queue wide.
+	if got := effectiveSlots(live, 1); got != 1 {
+		t.Fatalf("effectiveSlots with a configured cap of 1 = %d, want 1", got)
 	}
 }
 

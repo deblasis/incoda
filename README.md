@@ -59,15 +59,15 @@ tool prevents.
 
 **Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
 `incoda config builds --slots 2` lets two holders run at once, and the config
-is the width: every `run` on that key takes the configured number, and a run
-that passes a disagreeing `--slots` is refused rather than silently clamped,
-because one stray `--slots 1` used to drag a five-slot queue down to one for
-everyone. A ticket left by an older `incoda` cannot narrow the queue either:
-the configured count floors the effective width. `--exclusive` asks for the
-queue alone: while that run is live the count is 1, whatever the queue says,
-which is what a timing-sensitive test needs. `--queue a,b` holds several
-queues for one command, taken in sorted order so two such runs can never
-deadlock each other.
+is the width, in both directions: every `run` on that key takes the
+configured number, a run that passes a disagreeing `--slots` is refused
+rather than silently clamped (one stray `--slots 1` used to drag a five-slot
+queue down to one for everyone), and a ticket left by an older `incoda` can
+neither narrow the queue nor widen it. `--exclusive` asks for the queue
+alone: while that run is live the count is 1, whatever the queue says, which
+is what a timing-sensitive test needs. `--queue a,b` holds several queues
+for one command, taken in sorted order so two such runs can never deadlock
+each other.
 
 **Config, not convention.** A queue can carry a description, require a
 `--reason` on every run, or be closed with a message that names its
