@@ -41,6 +41,10 @@ func TestQueueConfigSuppliesSlots(t *testing.T) {
 	}
 
 	const n = 6
+	// The hold is long enough that the first two holders must overlap
+	// whatever spawn jitter does: the concurrency assertions must depend on
+	// the slot count, not on process-startup timing.
+	const holdMS = 5000
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for i := 0; i < n; i++ {
@@ -49,7 +53,7 @@ func TestQueueConfigSuppliesSlots(t *testing.T) {
 			defer wg.Done()
 			label := fmt.Sprintf("c%d", i)
 			cmd := exec.Command(incoda, "run", "--queue", "cfgslots", "--wait", "60s", "--poll", "50ms", "--quiet",
-				"--", stamp, filepath.Join(stamps, label+".txt"), label, "400")
+				"--", stamp, filepath.Join(stamps, label+".txt"), label, strconv.Itoa(holdMS))
 			cmd.Env = laneEnv(state)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				errs[i] = fmt.Errorf("child %d: %v\n%s", i, err, out)

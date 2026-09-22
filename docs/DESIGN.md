@@ -120,12 +120,23 @@ Each queue has a slot count, default 1: plain mutual exclusion. `--slots N`
 permits N concurrent holders, which is the point of the generalisation: not
 every resource is exclusive.
 
-The effective slot count for the current ticket set is the **minimum** asked
-for by any live participant, floored at 1. Mixing values on one queue is a
-configuration error; the minimum is the safe direction (the most restrictive
-caller wins), and `run` warns when it observes a disagreement. It is not a full
-guarantee: a participant already running is never revoked, so a late arrival
-with a smaller `--slots` can briefly observe more holders than its own number.
+On a queue whose config sets a count, that count is the width. The effective
+slot count is clamped to the configured number at both ends: a stale ticket
+(a binary predating per-queue config enrolls with no count) can neither
+narrow the queue nor widen it, and neither can a ticket written before the
+config was changed. A run that passes a `--slots` disagreeing with the
+config is refused before any ticket exists, in either direction: narrowing
+silently was how one stray `--slots 1` turned a five-slot queue into a
+one-slot queue for everyone, and silent clamping of a wider ask hides what
+the queue actually is.
+
+A queue with no configured count keeps the original rule: the effective count
+is the **minimum** asked for by any live participant, floored at 1. Mixing
+values there is a configuration error; the minimum is the safe direction (the
+most restrictive caller wins), and `run` warns when it observes a disagreement.
+It is not a full guarantee: a participant already running is never revoked, so
+a late arrival with a smaller `--slots` can briefly observe more holders than
+its own number.
 
 ## Queue configuration
 
@@ -133,11 +144,11 @@ with a smaller `--slots` can briefly observe more holders than its own number.
 live participant asked for, so one scratch script that forgot the flag on a
 two-slot queue dragged it down to one, and `run` could only warn. The number
 belongs to the queue: `config.json` beside the tickets holds `slots`, and a
-ticket that does not ask for a count is stamped with it at enrollment; a
-ticket that asks for more is clamped to it, because a queue that says 2
-means 2. The minimum rule is untouched; it now just sees the same number
-from everyone who did not say otherwise, and an explicit smaller `--slots`
-still narrows the queue.
+ticket that does not ask for a count is stamped with it at enrollment. A
+ticket that asks for a different count, smaller or larger, is refused: the
+config is the number, and a job that genuinely needs the queue alone says
+`--exclusive`, which is explicit and visible in `status`, rather than
+narrowing the queue for everyone under a flag nobody can see.
 
 The same file carries a description (for `status` and `watch`), a
 `require_reason` switch, and a `closed` message. A closed queue refuses every
@@ -157,9 +168,10 @@ failing anything. A timing test on a two-slot build queue does not need one
 slot; it needs the machine. `--exclusive` marks the ticket, and while any
 exclusive ticket is live the effective slot count is 1.
 
-This is the minimum rule used on purpose. It was already true that the most
-restrictive participant wins; an exclusive ticket is simply the most
-restrictive one, and because it is that ticket's own request rather than a
+This is the most-restrictive-participant rule used on purpose, and it is the
+one narrowing that survives a configured count: an exclusive ticket is checked
+before the config floor, so the queue says 5 and still admits nobody but the
+exclusive run. Because it is that ticket's own request rather than a
 mismatch, it is not counted as a slots disagreement. Everything else follows
 from the existing ordering: an exclusive arrival waits for the holders ahead
 of it to leave (a running participant is never revoked), holds alone, and the

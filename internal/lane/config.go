@@ -19,8 +19,10 @@ const configName = "config.json"
 // Every field is optional and the zero Config means "one slot, no rules",
 // which is exactly how a never-configured queue always behaved.
 type Config struct {
-	// Slots is the default for tickets that do not ask for a count. An
-	// explicit --slots still participates in the minimum rule.
+	// Slots is the queue's width. A ticket that does not ask for a count is
+	// stamped with it at enrollment; a ticket that asks for a different
+	// count is refused (see NewSlotsDisagreement), so the number every
+	// participant carries is the same one.
 	Slots int `json:"slots,omitempty"`
 	// Description says what the queue guards, for status and watch.
 	Description string `json:"description,omitempty"`
@@ -31,6 +33,35 @@ type Config struct {
 	// retired key points at its replacements instead of quietly going on
 	// serialising work nobody meant to put there.
 	Closed string `json:"closed,omitempty"`
+}
+
+// SlotsDisagreement is the refusal a configured queue gives a ticket whose
+// explicit --slots does not match. It is a typed error so every entry point
+// (run's pre-check and Enroll itself, which a config change between the two
+// can still reach) reports the same message and the same exit code.
+type SlotsDisagreement struct {
+	Key        string
+	Configured int
+	Asked      int
+	// Exclusive records whether the refused ticket also passed --exclusive,
+	// which changes the advice: telling an exclusive caller to "pass
+	// --exclusive" would be nonsense.
+	Exclusive bool
+}
+
+// NewSlotsDisagreement builds the refusal for a ticket that asked for Asked
+// slots on a queue configured for Configured.
+func NewSlotsDisagreement(key string, configured, asked int, exclusive bool) *SlotsDisagreement {
+	return &SlotsDisagreement{Key: key, Configured: configured, Asked: asked, Exclusive: exclusive}
+}
+
+func (e *SlotsDisagreement) Error() string {
+	advice := fmt.Sprintf("Drop --slots to take the configured count, change it with `incoda config %s --slots N`, or pass --exclusive if the job needs the queue alone", e.Key)
+	if e.Exclusive {
+		advice = "Drop --slots: --exclusive already holds the queue alone, whatever the count says"
+	}
+	return fmt.Sprintf("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. %s",
+		e.Key, e.Configured, e.Asked, advice)
 }
 
 // LoadConfig reads the queue's config. A missing file is the zero Config

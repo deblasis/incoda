@@ -49,8 +49,8 @@ incoda watch                         # live overview of every queue; enter opens
 - `--wait` defaults to 30 minutes. `--wait 0` fails immediately instead of
   queueing, which is occasionally what you want in a script.
 - Do not pass `--slots`. The queue's own config carries the number
-  (`incoda config <KEY>` shows it); a stray `--slots 1` narrows the queue for
-  everyone.
+  (`incoda config <KEY>` shows it), and on a configured queue a disagreeing
+  `--slots` is refused outright.
 - A run that exits 120 saying the queue is closed is telling you which keys
   replaced it. Use those; do not force the old one.
 - Use `--reason` every time. When six sessions share a lane, "which worktree is

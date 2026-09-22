@@ -48,7 +48,7 @@ var ErrNoParticipant = errors.New("no live participant with that pid")
 func (q *Queue) RequestKill(pid int, req KillRequest) (Entry, error) {
 	var found Entry
 	err := q.withRegistry(func() error {
-		live, err := q.scanLocked(time.Now())
+		live, _, err := q.scanLocked(time.Now())
 		if err != nil {
 			return err
 		}
@@ -116,7 +116,7 @@ func (q *Queue) WaitGone(pid int, wait, poll time.Duration) (bool, error) {
 	for {
 		var present bool
 		err := q.withRegistry(func() error {
-			live, err := q.scanLocked(time.Now())
+			live, _, err := q.scanLocked(time.Now())
 			if err != nil {
 				return err
 			}
