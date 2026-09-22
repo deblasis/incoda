@@ -21,7 +21,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	}
 	fs := newFlagSet("config", stderr)
 	queue := fs.String("queue", explicit, "queue key (or the first positional argument; defaults to $INCODA_QUEUE)")
-	slots := fs.Int("slots", 0, "default --slots for runs that do not pass one (0 means 1)")
+	slots := fs.Int("slots", 0, "the queue's slot count; runs that do not pass --slots take it, runs that disagree with it are refused (0 means 1)")
 	desc := fs.String("description", "", "one line saying what the queue guards, shown by status and watch")
 	requireReason := fs.Bool("require-reason", false, "refuse a run that has no --reason")
 	closeMsg := fs.String("close", "", "refuse every run with this message, for a retired key that should name its replacements")

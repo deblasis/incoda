@@ -169,7 +169,7 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 		live = append(live, e)
 	}
 	sortTickets(live)
-	slots := effectiveSlots(live)
+	slots := q.effectiveSlotsLocked(live)
 	for i := range live {
 		// A participant that already acquired is holding whatever the count
 		// says now: an exclusive arrival or a smaller --slots narrows the
@@ -182,19 +182,25 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, error) {
 	return live, nil
 }
 
-// effectiveSlots resolves the slot count for the current ticket set as the
-// minimum requested by any live participant, floored at 1, and 1 outright
-// while an exclusive participant is live.
+// effectiveSlots resolves the slot count for the current ticket set.
 //
-// Mixing --slots values on one queue is a configuration error; taking the
-// minimum makes the *most restrictive* caller win, which is the safe direction.
-// It is not a full guarantee: a participant already running is never revoked,
-// so a late arrival with a smaller --slots can observe more holders than its own
-// number. `incoda run` warns when it sees a disagreement. An exclusive ticket
-// is the same rule used on purpose: it rides the minimum down to 1 and back
-// up when it leaves, and because it is the ticket's own request rather than a
-// mismatch, it is not a disagreement.
-func effectiveSlots(live []Entry) int {
+// On a queue whose config sets slots, that number is the width: each ticket
+// counts as at least the configured value, so nobody can narrow the queue by
+// asking for less. Tickets that carry a smaller or unset count still occur
+// (a stale binary that predates per-queue config, a ticket written during a
+// rolling upgrade) and they ride at the configured width rather than dragging
+// everyone down to one.
+//
+// A queue with no configured count keeps the original rule: the minimum
+// requested by any live participant, floored at 1. Mixing --slots values
+// there is a configuration error; the minimum is the safe direction, and
+// `incoda run` warns when it sees a disagreement.
+//
+// An exclusive participant overrides both: while one is live the count is 1,
+// whatever the queue or anyone else asked for. That is the one narrowing that
+// survives, because it is the ticket's explicit ask for the machine alone, and
+// it is not counted as a disagreement.
+func effectiveSlots(live []Entry, cfgSlots int) int {
 	slots := 0
 	for _, e := range live {
 		if e.Ticket.Exclusive {
@@ -204,6 +210,9 @@ func effectiveSlots(live []Entry) int {
 		if s < 1 {
 			s = 1
 		}
+		if cfgSlots > s {
+			s = cfgSlots
+		}
 		if slots == 0 || s < slots {
 			slots = s
 		}
@@ -212,6 +221,18 @@ func effectiveSlots(live []Entry) int {
 		slots = 1
 	}
 	return slots
+}
+
+// effectiveSlotsLocked is effectiveSlots with the queue's own config applied.
+// The caller must hold the registry lock. A config that cannot be read must
+// not widen the queue, so the resolution falls back to the ticket-set minimum
+// with no configured floor, exactly the pre-config behavior.
+func (q *Queue) effectiveSlotsLocked(live []Entry) int {
+	cfg, err := q.LoadConfig()
+	if err != nil {
+		return effectiveSlots(live, 0)
+	}
+	return effectiveSlots(live, cfg.Slots)
 }
 
 // SlotsDisagree reports whether live participants asked for different slot
@@ -261,7 +282,7 @@ func (q *Queue) Observe(logLines int) (*Snapshot, error) {
 		return nil, err
 	}
 	cfg, cfgErr := q.LoadConfig()
-	slots := effectiveSlots(live)
+	slots := effectiveSlots(live, cfg.Slots)
 	if len(live) == 0 && cfg.Slots > 0 {
 		// Nobody is enrolled to carry the number, so the config is the
 		// only thing that can say how wide an empty queue is.
@@ -322,20 +343,24 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 		t.PID = os.Getpid()
 		t.ArrivalNano = now.UnixNano()
 		t.Arrival = now.Format(time.RFC3339Nano)
-		// The configured count is both the default for a ticket that did
-		// not ask and the ceiling for one that asked for more: a queue that
-		// says 2 means 2, and a caller passing --slots 4 is not allowed to
-		// widen it. Asking for fewer still narrows it through the minimum
-		// rule. A missing or broken config leaves an unset count at 1, the
-		// safe direction.
+		// The configured count is the queue's width, in full. A ticket that
+		// does not ask is stamped with it; a ticket that asks for a
+		// different number is refused rather than silently clamped in either
+		// direction. Narrowing used to be allowed through the minimum rule
+		// and one stray "--slots 1" dragged a five-slot queue down to one
+		// for everyone; a job that genuinely needs the queue alone says
+		// --exclusive, which is explicit, visible in status, and still
+		// narrows to 1 on purpose. A missing or broken config leaves an
+		// unset count at 1, the safe direction.
 		cfg, cfgErr := q.LoadConfig()
 		switch {
+		case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
+			return fmt.Errorf("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. Drop --slots to take the configured count, change it with `incoda config %s --slots N`, or pass --exclusive if the job needs the queue alone",
+				q.Key, cfg.Slots, t.Slots, q.Key)
 		case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
 			t.Slots = cfg.Slots
 		case t.Slots < 1:
 			t.Slots = 1
-		case cfgErr == nil && cfg.Slots > 0 && t.Slots > cfg.Slots:
-			t.Slots = cfg.Slots
 		}
 		name := ticketName(t.ArrivalNano, t.PID)
 		path := ticketPath(q.Dir, name)
@@ -415,7 +440,7 @@ func (e *Enrollment) Position() (idx, slots int, live []Entry, err error) {
 	if err != nil {
 		return -1, 0, nil, err
 	}
-	slots = effectiveSlots(live)
+	slots = e.q.effectiveSlotsLocked(live)
 	idx = -1
 	for i, x := range live {
 		if x.File == e.name {

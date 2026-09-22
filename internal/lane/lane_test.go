@@ -232,7 +232,7 @@ func TestEffectiveSlotsTakesTheMinimum(t *testing.T) {
 		{Ticket: Ticket{Slots: 2}},
 		{Ticket: Ticket{Slots: 7}},
 	}
-	if got := effectiveSlots(live); got != 2 {
+	if got := effectiveSlots(live, 0); got != 2 {
 		t.Fatalf("effectiveSlots = %d, want 2 (the most restrictive participant wins)", got)
 	}
 	if !SlotsDisagree(live) {
@@ -241,8 +241,14 @@ func TestEffectiveSlotsTakesTheMinimum(t *testing.T) {
 	if SlotsDisagree([]Entry{{Ticket: Ticket{Slots: 3}}, {Ticket: Ticket{Slots: 3}}}) {
 		t.Fatal("SlotsDisagree should not fire on an agreeing set")
 	}
-	if got := effectiveSlots(nil); got != 1 {
+	if got := effectiveSlots(nil, 0); got != 1 {
 		t.Fatalf("effectiveSlots(nil) = %d, want 1", got)
+	}
+	// A configured count is a floor, not a target: every ticket counts as at
+	// least the configured width, so the same mixed set on a 6-slot queue
+	// resolves to 6.
+	if got := effectiveSlots(live, 6); got != 6 {
+		t.Fatalf("effectiveSlots with a configured floor of 6 = %d, want 6", got)
 	}
 }
 

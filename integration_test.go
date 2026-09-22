@@ -279,6 +279,117 @@ func TestSlotsAllowExactlyN(t *testing.T) {
 	}
 }
 
+// TestConfiguredSlotsAreHonored proves the queue's configured count is what
+// admission uses: six runs that pass no --slots on a queue configured for
+// three admit exactly three at a time. This is the end-to-end shape of the
+// "config says 5, runtime says 1" discrepancy: a queue configured for more
+// than one must never serialise to one for runs that did not ask to narrow.
+func TestConfiguredSlotsAreHonored(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	stamps := t.TempDir()
+
+	const n = 6
+	const slots = 3
+	const holdMS = 500
+
+	// Configure through the CLI so the write path is exercised too.
+	cfg := exec.Command(incoda, "config", "cfglane", "--slots", strconv.Itoa(slots))
+	cfg.Env = laneEnv(state)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+	// An empty configured queue reports the configured width.
+	if rep := statusJSON(t, incoda, state, "cfglane"); rep.Queues[0].EffectiveSlots != slots {
+		t.Fatalf("empty queue effective_slots = %d, want %d", rep.Queues[0].EffectiveSlots, slots)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			label := fmt.Sprintf("c%d", i)
+			cmd := exec.Command(incoda, "run", "--queue", "cfglane",
+				"--wait", "60s", "--poll", "50ms", "--quiet",
+				"--", stamp, filepath.Join(stamps, label+".txt"), label, strconv.Itoa(holdMS))
+			cmd.Env = laneEnv(state)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				errs[i] = fmt.Errorf("child %d: %v\n%s", i, err, out)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var ivs []interval
+	for i := 0; i < n; i++ {
+		iv, ok := readInterval(t, filepath.Join(stamps, fmt.Sprintf("c%d.txt", i)))
+		if !ok {
+			t.Fatalf("child %d left no complete stamp", i)
+		}
+		ivs = append(ivs, iv)
+	}
+	got, witness := maxOverlap(ivs)
+	if got > slots {
+		t.Fatalf("max concurrent holders = %d, want at most %d; overlapping pairs: %v", got, slots, witness)
+	}
+	if got < slots {
+		t.Fatalf("max concurrent holders = %d; a queue configured for %d should have let %d overlap, so the configured count is not being honoured", got, slots, slots)
+	}
+}
+
+// TestDisagreeingSlotsRefusedOnConfiguredQueue: on a queue whose config sets
+// the count, a run passing a different --slots is refused with exit 120 before
+// any ticket exists, the refusal names the configured number, and a run whose
+// --slots agrees still enters.
+func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	stamps := t.TempDir()
+
+	cfg := exec.Command(incoda, "config", "cfgref", "--slots", "3")
+	cfg.Env = laneEnv(state)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+
+	for _, ask := range []string{"1", "5"} {
+		cmd := exec.Command(incoda, "run", "--queue", "cfgref", "--slots", ask,
+			"--wait", "0", "--quiet", "--", stamp, filepath.Join(stamps, "never.txt"), "never", "1000")
+		cmd.Env = laneEnv(state)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("--slots %s on a 3-slot queue should be refused", ask)
+		}
+		if code := exitCodeOf(err); code != 120 {
+			t.Fatalf("--slots %s refused with exit %d, want 120:\n%s", ask, code, out)
+		}
+		if !strings.Contains(string(out), "configured for 3 slot(s)") {
+			t.Fatalf("refusal should name the configured count:\n%s", out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stamps, "never.txt")); !os.IsNotExist(err) {
+		t.Fatal("a refused run must not have run its command")
+	}
+	if got := countTickets(t, state, "cfgref"); got != 0 {
+		t.Fatalf("a refused run left %d ticket(s) behind", got)
+	}
+
+	// An agreeing --slots still enters and runs.
+	ok := exec.Command(incoda, "run", "--queue", "cfgref", "--slots", "3",
+		"--wait", "10s", "--quiet", "--", stamp, filepath.Join(stamps, "ok.txt"), "ok", "1")
+	ok.Env = laneEnv(state)
+	if out, err := ok.CombinedOutput(); err != nil {
+		t.Fatalf("--slots 3 on a 3-slot queue should run: %v\n%s", err, out)
+	}
+}
+
 // TestHardKilledHolderFreesTheLane is the headline claim over build-lane: a
 // holder that dies without running any cleanup must not wedge the queue, and no
 // force-release should be needed.

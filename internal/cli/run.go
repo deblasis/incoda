@@ -21,12 +21,13 @@ type lanePart struct {
 	key string
 	q   *lane.Queue
 	en  *lane.Enrollment
+	cfg lane.Config
 }
 
 func cmdRun(args []string, _, stderr io.Writer) error {
 	fs := newFlagSet("run", stderr)
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
-	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1")
+	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
 	exclusive := fs.Bool("exclusive", false, "hold the queue alone: the effective slot count is 1 while this run is live")
 	reason := fs.String("reason", "", "free-text note shown in status")
 	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "who queued this (a session id, a worktree name); defaults to $INCODA_OWNER")
@@ -84,11 +85,16 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if err != nil {
 			return exitWith(ExitState, "queue %q: %v", key, err)
 		}
+		pt.cfg = cfg
 		if cfg.Closed != "" {
 			return usagef("queue %q is closed: %s", key, cfg.Closed)
 		}
 		if cfg.RequireReason && strings.TrimSpace(*reason) == "" {
 			return usagef("queue %q requires --reason: say what this job is so status can answer \"whose is that and why\"", key)
+		}
+		if cfg.Slots > 0 && *slots >= 1 && *slots != cfg.Slots {
+			return usagef("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. Drop --slots to take the configured count, change it with `incoda config %s --slots N`, or pass --exclusive if the job needs the queue alone",
+				key, cfg.Slots, *slots, key)
 		}
 		if held[key] {
 			if !*quiet {
@@ -245,8 +251,16 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 
 		if _, _, live, err := en.Position(); err == nil && lane.SlotsDisagree(live) {
+			// On a configured queue every new ticket carries the configured
+			// count, so a disagreement means a stale or foreign ticket; the
+			// config floors the effective width regardless. On a queue with
+			// no configured count the minimum still rules.
+			inForce := "the smallest value is in force"
+			if pt.cfg.Slots > 0 {
+				inForce = fmt.Sprintf("the configured %d is in force", pt.cfg.Slots)
+			}
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-				p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; the smallest value is in force", key)))
+				p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; %s", key, inForce)))
 		}
 		if !*quiet {
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),

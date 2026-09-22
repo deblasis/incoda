@@ -41,7 +41,8 @@ machine, or some part of it, to be quiet.
   foreground window and synthesized input, and both fail in ways that look like
   product bugs. A `gui-tests` queue gives each run the desktop to itself.
 - **`--slots N` for resources that are not exclusive.** Two CPU-heavy linters
-  at a time, no more. Participants that disagree about N settle on the minimum.
+  at a time, no more. Put the number in the queue's config; a run may not
+  disagree with it.
 - **Shared workstations and self-hosted runners.** One Mac mini serving several
   people, agents or CI jobs: same key, orderly queue, full visibility of who is
   holding it from where.
@@ -57,12 +58,16 @@ two unrelated projects silently sharing one lane is exactly the failure this
 tool prevents.
 
 **Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
-`incoda config builds --slots 2` lets two holders run at once, and every
-`run` on that key inherits the number; `--slots` on a run can narrow it, not
-widen it. `--exclusive` asks for the queue alone: while that run is live the
-count is 1, whatever the queue says, which is what a timing-sensitive test
-needs. `--queue a,b` holds several queues for one command, taken in sorted
-order so two such runs can never deadlock each other.
+`incoda config builds --slots 2` lets two holders run at once, and the config
+is the width: every `run` on that key takes the configured number, and a run
+that passes a disagreeing `--slots` is refused rather than silently clamped,
+because one stray `--slots 1` used to drag a five-slot queue down to one for
+everyone. A ticket left by an older `incoda` cannot narrow the queue either:
+the configured count floors the effective width. `--exclusive` asks for the
+queue alone: while that run is live the count is 1, whatever the queue says,
+which is what a timing-sensitive test needs. `--queue a,b` holds several
+queues for one command, taken in sorted order so two such runs can never
+deadlock each other.
 
 **Config, not convention.** A queue can carry a description, require a
 `--reason` on every run, or be closed with a message that names its
@@ -232,10 +237,10 @@ memory limits or cgroups, per-project state directories, distributed locks.
   fails loudly on network mounts that do not enforce locks.
 - **Unix process trees survive a hard kill of `incoda`.** The process group
   covers signalled exits; only Windows gets the kill-on-close guarantee.
-- **`--slots` disagreement is resolved to the minimum, not prevented.** A
-  participant already running is never revoked, and that includes the moment
-  an `--exclusive` run arrives: it waits for the holders to leave rather than
-  evicting them.
+- **A configured queue refuses a disagreeing `--slots`; an unconfigured one
+  settles disagreements on the minimum.** A participant already running is
+  never revoked, and that includes the moment an `--exclusive` run arrives: it
+  waits for the holders to leave rather than evicting them.
 - **A multi-key run holds its first keys while it waits for the rest.** That
   is what makes it deadlock-free, and it also means a job on `a,b` can keep
   `a` busy while it queues on `b`. Use lists for jobs that need everything
