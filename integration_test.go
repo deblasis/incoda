@@ -422,6 +422,14 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if holder.ProcessState == nil {
+			_ = holder.Process.Kill()
+		}
+	}()
+
+	// Wait until the holder actually holds racea before starting the contender.
+	waitFor(t, incoda, state, "racea", func(q queueReport) bool { return len(q.Holders) == 1 })
 
 	contender := exec.Command(incoda, "run", "--queue", "racea,raceb", "--slots", "1",
 		"--wait", "60s", "--poll", "50ms", "--quiet",
@@ -436,10 +444,11 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 
 	// The contender waiting on racea proves its pre-check of both keys is
 	// done: the enrollment loop runs after every key was checked.
+	// Also verify the waiter is actually the contender (by PID).
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		rep := statusJSON(t, incoda, state, "racea")
-		if len(rep.Queues) == 1 && len(rep.Queues[0].Waiting) == 1 {
+		if len(rep.Queues) == 1 && len(rep.Queues[0].Waiting) == 1 && rep.Queues[0].Waiting[0].Ticket.PID == contender.Process.Pid {
 			break
 		}
 		if time.Now().After(deadline) {
