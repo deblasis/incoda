@@ -39,8 +39,10 @@ tidy-check:
 		exit 1
 	fi
 
+# vet the release build and the crash-injection test build (internal/machine/crash_on.go)
 vet:
 	go vet ./...
+	go vet -tags incoda_crashpoints ./...
 
 # race everywhere it is solid; plain on Windows to keep the matrix green
 test:
