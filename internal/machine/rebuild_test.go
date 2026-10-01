@@ -102,3 +102,24 @@ func TestRebuildRefusals(t *testing.T) {
 		t.Fatalf("a newer registry is never overwritten: %v", err)
 	}
 }
+
+func TestRebuildRefusesUnreadableNamedConfig(t *testing.T) {
+	var rf *Refusal
+	state := t.TempDir()
+	if _, _, err := ensure(t, state); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(lane.LaneDir(state, "builds"), "config.json")
+	if err := os.WriteFile(cfg, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rebuild(state, "builds"); !errors.As(err, &rf) || rf.Msg != `kind-busy: "builds" has an unreadable config.json; fix or delete it first` {
+		t.Fatalf("a named key with a malformed config: %v", err)
+	}
+	if err := os.WriteFile(cfg, []byte(`{"schema":99}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rebuild(state, "builds"); !errors.As(err, &rf) || rf.Msg != `kind-busy: "builds" has an unreadable config.json; fix or delete it first` {
+		t.Fatalf("a named key with a newer-schema config: %v", err)
+	}
+}

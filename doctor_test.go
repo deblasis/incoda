@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -162,5 +163,37 @@ func TestDoctorRebuildRegistry(t *testing.T) {
 	reg, err := machine.ReadRegistry(state)
 	if err != nil || strings.Join(reg.Pools, ",") != "builds,tests" {
 		t.Fatalf("registry %+v %v", reg, err)
+	}
+}
+
+// TestDoctorEscapesProblemsOnce guards against double escaping: textsafe.Escape
+// is not idempotent (a\b -> a\\b, escaped again -> a\\\\b). The unreadable-config
+// error message is already escaped once inside internal/machine; doctor must
+// print it as is, not escape it a second time. A backslash in the state dir
+// path is a convenient way to get a literal backslash into that message; it
+// is an ordinary filename character everywhere except Windows, where it is a
+// path separator, so this test is skipped there.
+func TestDoctorEscapesProblemsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a backslash is a path separator on windows")
+	}
+	incoda, _ := binaries(t)
+	state := filepath.Join(t.TempDir(), `a\b`)
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedOldLayout(t, state)
+	if out, code := runIncoda(t, incoda, state, "config", "alpha"); code != 0 {
+		t.Fatalf("config: %d\n%s", code, out)
+	}
+	out, code := doctor(t, incoda, state)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, `a\\b`) {
+		t.Fatalf("expected the state dir's backslash escaped exactly once (a\\\\b) in:\n%s", out)
+	}
+	if strings.Contains(out, `a\\\\b`) {
+		t.Fatalf("the backslash was escaped twice:\n%s", out)
 	}
 }

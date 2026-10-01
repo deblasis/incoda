@@ -206,14 +206,6 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "%s %s\n", p.Dim("state dir:"), dir)
 	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("source: "), stateDirSource())
-	if src := stateDirSource(); src == "INCODA_DIR" {
-		// A per-project override is the one configuration mistake that breaks
-		// the whole model quietly: every fragment looks like a healthy, empty
-		// lane while the jobs it was meant to serialise run side by side.
-		fmt.Fprintf(stdout, "  %s INCODA_DIR is set. It is a MACHINE-level override, not a per-project one.\n", p.BoldYellow("WARNING:"))
-		fmt.Fprintln(stdout, "           If some callers have it set and others do not, they will use different")
-		fmt.Fprintln(stdout, "           state directories, form separate lanes, and stop serialising each other.")
-	}
 	fmt.Fprintf(stdout, "  %s %s (state is never derived from the working directory)\n", p.Dim("cwd-independent:"), p.Green("yes"))
 	if cwd, err := os.Getwd(); err == nil {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("current cwd (not used for resolution):"), cwd)
@@ -274,13 +266,13 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	attention := h.Attention
 	if stateDirSource() == "INCODA_DIR" {
-		attention = append(attention, "INCODA_DIR is set: pools are per state directory, so a caller without it uses other pools")
+		attention = append(attention, "INCODA_DIR is set: it is a MACHINE-level override, not a per-project one; it splits pools across state directories, so a caller without it set uses a different state directory, forms separate lanes, and stops serialising against this one")
 	}
 	for _, a := range attention {
-		fmt.Fprintf(stdout, "%s %s\n", p.BoldYellow("attention:"), textsafe.Escape(a))
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldYellow("attention:"), a)
 	}
 	for _, pr := range h.Problems {
-		fmt.Fprintf(stdout, "%s %s\n", p.BoldRed("problem:  "), textsafe.Escape(pr))
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldRed("problem:  "), pr)
 	}
 	fmt.Fprintf(stdout, "%s\n", p.Dim(sysinfo.MachineLine(sysinfo.ReadMemory(), sysinfo.ReadCPU())))
 	if len(h.Problems) > 0 {

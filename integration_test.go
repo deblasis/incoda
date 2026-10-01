@@ -835,7 +835,7 @@ func TestDoctorAndVersionAndQueues(t *testing.T) {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
 	}
 	s := string(out)
-	for _, want := range []string{state, "locking: enforced", "cwd-independent: yes", "WARNING: INCODA_DIR is set"} {
+	for _, want := range []string{state, "locking: enforced", "cwd-independent: yes", "attention: INCODA_DIR is set"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, s)
 		}

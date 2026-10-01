@@ -12,6 +12,11 @@ import (
 // Health is doctor's reading of the layout: the parts of spec 5.5 that
 // exist with layout 2. PATH versions, strays, orphan records and stopped
 // holders are added by plan 2b.
+//
+// Every string in Problems and Attention is already escaped for display
+// (textsafe.Escape applied once, here, to whatever came from state, a file
+// or the environment); a caller that prints them must not escape them
+// again, since textsafe.Escape is not idempotent.
 type Health struct {
 	// Layout is one line describing the layout.
 	Layout string

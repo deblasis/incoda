@@ -60,7 +60,11 @@ func Rebuild(stateDir string, pools []string, o Options, report func(key, kind s
 		return nil, stateErrorf("a migration is unfinished; run any mutating incoda command to resume it before rebuilding the registry")
 	}
 	for _, p := range names {
-		if cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, p)); err == nil && len(cfg.Pools) > 0 {
+		cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, p))
+		if err != nil {
+			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q has an unreadable config.json; fix or delete it first", p)}
+		}
+		if len(cfg.Pools) > 0 {
 			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q links pools", p)}
 		}
 	}
