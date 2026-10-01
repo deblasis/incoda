@@ -63,8 +63,10 @@ func repair(stateDir string, o Options) (*Registry, error) {
 	return runMigration(stateDir, lk, o)
 }
 
-// migrate runs the transaction of spec 3.3 under machine.lock.
+// migrate runs the transaction of spec 3.3: M0 before machine.lock, then
+// everything else under it.
 func migrate(stateDir string, o Options) (*Registry, error) {
+	checkPath(o)
 	lk, err := AcquireLock(stateDir, o.lockOptions("migrate"))
 	if err != nil {
 		return nil, err
