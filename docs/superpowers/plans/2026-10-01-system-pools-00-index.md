@@ -16,3 +16,12 @@ guessing them.
 | 5 | Observability and docs | 5.1 to 5.4, section 10 | status JSON, plain and tree, busy lines, watch pool tree; README, docs/DESIGN.md, AGENT-RULE.md, demo tape and gif, release notes. |
 
 Branch: `feat/system-pools`. No release is cut between plans; the first release is after plan 5.
+
+## Carried forward from plan 1
+
+Plan 1 landed as `90edfee..84f58a5`. Its final review routed these items to later plans; each later plan must cover the items listed for it.
+
+- Plan 2: do not cut any build from this branch before the fence lands (a v0.6 binary and this one queue behind each other's nested runs until `--wait`).
+- Plan 3: `lane.Enroll` fails closed on `NewerSchemaError` (the waiter poll surfaces it; `effectiveSlotsLocked` may keep its fallback); table-drive the `config` text checks when link flags arrive; rewrite the closed refusal per 4.5.
+- Plan 4: the `pgid` clause of the process-group rule and the `set -m` test; non-blocking `out-of-order-busy` replaces today's blocking wait for live non-ancestor entries (`TestLiveNonAncestorEntryDoesNotPassThrough` then expects exit 120, not 121); `ParentChain` stops at a ppid of 0 or less; a probe error other than "not found" on `registry.lock` counts as live and unverifiable (keep "dead" for a delete-pending ticket on Windows); merge the duplicate comment above the main `child.Run`; a non-ancestor variant of `TestNestedChildStaysInOuterGroup`.
+- Plan 5: escape status, misc and TUI output; one quoting layer for `dir=` in lane.log (today a Windows path is double-escaped; needs a spec amendment); the escaper also covers U+061C, U+2028 and U+2029 and disambiguates 0x85; decide whether `status --json` config carries `schema` and unknown fields; update docs/DESIGN.md and README.md on `INCODA_HELD`; log malformed bare-key drops; align spec text with logging live held-dropped entries.
