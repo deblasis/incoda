@@ -63,7 +63,7 @@ func TestKillHolderCooperatively(t *testing.T) {
 	if n := countTickets(t, state, "kill"); n != 0 {
 		t.Fatalf("%d ticket(s) left after the kill", n)
 	}
-	log, _ := os.ReadFile(filepath.Join(state, "queues", "kill", "lane.log"))
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "kill"), "lane.log"))
 	if !strings.Contains(string(log), "event=kill ") || !strings.Contains(string(log), "reason=") {
 		t.Fatalf("lane.log should record the kill with its reason:\n%s", log)
 	}
@@ -176,7 +176,7 @@ func TestKillForceTerminates(t *testing.T) {
 		}
 	}
 	waitFor(t, incoda, state, "kf", func(q queueReport) bool { return len(q.Holders) == 0 })
-	log, _ := os.ReadFile(filepath.Join(state, "queues", "kf", "lane.log"))
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "kf"), "lane.log"))
 	if !strings.Contains(string(log), "forced=true") {
 		t.Fatalf("lane.log should record the forced kill:\n%s", log)
 	}
@@ -213,7 +213,7 @@ func TestKillReasonEscaped(t *testing.T) {
 		t.Fatalf("holder stderr should show the reason with \\x1b escaped literally, got:\n%s", s)
 	}
 
-	log, err := os.ReadFile(filepath.Join(state, "queues", "killesc", "lane.log"))
+	log, err := os.ReadFile(filepath.Join(laneDir(state, "killesc"), "lane.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,23 +40,63 @@ type Queue struct {
 	Key      string
 	Dir      string
 	registry *lockfile.File
+	readOnly bool
 }
 
-// Open prepares the on-disk state for key and opens the registry lock file. It
-// does not take any lock.
+// Mode says what a Queue handle may create or change.
+type Mode int
+
+const (
+	// Create makes the lane directory and its registry lock when missing.
+	// Only commands that have migrated the state directory use it, so it
+	// never runs against the old queues/ root.
+	Create Mode = iota
+	// Existing opens a lane that already exists and never creates a
+	// directory, so it cannot recreate a root the migration has just moved
+	// away. It may create the registry lock inside an existing lane
+	// directory, and scans reap dead tickets as usual.
+	Existing
+	// ReadOnly opens only files that already exist and changes nothing:
+	// scans skip dead tickets without removing them and Logf writes
+	// nothing. Read-only commands use it on a layout not upgraded yet.
+	ReadOnly
+)
+
+// Open prepares key's lane under <stateDir>/lanes and opens its registry
+// lock file. It does not take any lock.
 func Open(stateDir, key string) (*Queue, error) {
+	return OpenIn(LanesDir(stateDir), key, Create)
+}
+
+// OpenIn opens key's lane directory inside root (lanes/ on layout 2, the old
+// queues/ for a read-only view of a layout not upgraded yet) in mode.
+func OpenIn(root, key string, mode Mode) (*Queue, error) {
 	if err := ValidateKey(key); err != nil {
 		return nil, err
 	}
-	dir := QueueDir(stateDir, key)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create queue directory: %w", err)
+	dir := filepath.Join(root, key)
+	var reg *lockfile.File
+	var err error
+	switch mode {
+	case Create:
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create queue directory: %w", err)
+		}
+		reg, err = lockfile.Open(RegistryLockPath(dir))
+	case Existing:
+		if fi, serr := os.Stat(dir); serr != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("queue %q has no state in %s: %w", key, root, os.ErrNotExist)
+		}
+		reg, err = lockfile.Open(RegistryLockPath(dir))
+	case ReadOnly:
+		reg, err = lockfile.OpenExisting(RegistryLockPath(dir))
+	default:
+		return nil, fmt.Errorf("unknown open mode %d", mode)
 	}
-	reg, err := lockfile.Open(filepath.Join(dir, registryLockName))
 	if err != nil {
 		return nil, fmt.Errorf("open registry lock: %w", err)
 	}
-	return &Queue{Key: key, Dir: dir, registry: reg}, nil
+	return &Queue{Key: key, Dir: dir, registry: reg, readOnly: mode == ReadOnly}, nil
 }
 
 // Close releases the registry handle. It does not release tickets.
@@ -79,15 +119,29 @@ func (q *Queue) withRegistry(fn func() error) error {
 }
 
 // Logf appends one line to the queue's handoff log. Log failures are never
-// fatal: the log is history for humans, not state the algorithm reads.
+// fatal: the log is history for humans, not state the algorithm reads. A
+// read-only handle writes nothing.
 func (q *Queue) Logf(format string, args ...any) {
-	f, err := os.OpenFile(filepath.Join(q.Dir, logName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if q.readOnly {
+		return
+	}
+	AppendLog(q.Dir, format, args...)
+}
+
+// AppendLog appends one timestamped line to the lane.log of a lane
+// directory. The migration uses it for lanes it touches without opening
+// them.
+func AppendLog(dir, format string, args ...any) {
+	f, err := os.OpenFile(LogPath(dir), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
+
+// LogPath is the lane.log of a lane directory.
+func LogPath(dir string) string { return filepath.Join(dir, logName) }
 
 // TailLog returns the last n log lines, oldest first.
 func (q *Queue) TailLog(n int) []string {
@@ -141,7 +195,13 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 			continue
 		}
 		path := ticketPath(q.Dir, de.Name())
-		free, err := lockfile.IsFree(path)
+		var free bool
+		var err error
+		if q.readOnly {
+			free, err = lockfile.IsFreeExisting(path)
+		} else {
+			free, err = lockfile.IsFree(path)
+		}
 		if err != nil {
 			// A ticket we cannot even open is not something we can reason
 			// about; treat it as live so we fail safe (wait) rather than
@@ -149,6 +209,9 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 			free = false
 		}
 		if free {
+			if q.readOnly {
+				continue
+			}
 			// The only record of how a hard-killed holder ended. Without
 			// this line the log shows an enqueue with no ending, and a
 			// history that cannot say how a job finished cannot be used to
@@ -184,7 +247,9 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
 		live[i].fill(now)
 	}
-	q.reapKillFiles(names)
+	if !q.readOnly {
+		q.reapKillFiles(names)
+	}
 	return live, slots, nil
 }
 
@@ -530,9 +595,13 @@ func (q *Queue) ForceRelease(allowLive bool) (removed int, err error) {
 	return removed, err
 }
 
-// ListQueues returns the keys that have state on this machine.
-func ListQueues(stateDir string) ([]string, error) {
-	entries, err := os.ReadDir(QueuesDir(stateDir))
+// ListQueues returns the keys that have state under <stateDir>/lanes.
+func ListQueues(stateDir string) ([]string, error) { return ListIn(LanesDir(stateDir)) }
+
+// ListIn returns the keys that have a lane directory inside root. A missing
+// root has none.
+func ListIn(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -548,8 +617,11 @@ func ListQueues(stateDir string) ([]string, error) {
 	return keys, nil
 }
 
-// Exists reports whether a queue key has any state on this machine.
-func Exists(stateDir, key string) bool {
-	fi, err := os.Stat(QueueDir(stateDir, key))
+// Exists reports whether a queue key has state under <stateDir>/lanes.
+func Exists(stateDir, key string) bool { return ExistsIn(LanesDir(stateDir), key) }
+
+// ExistsIn reports whether root holds a lane directory for key.
+func ExistsIn(root, key string) bool {
+	fi, err := os.Stat(filepath.Join(root, key))
 	return err == nil && fi.IsDir()
 }

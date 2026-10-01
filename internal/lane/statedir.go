@@ -39,11 +39,17 @@ func StateDir() (string, error) {
 	}
 }
 
-// QueuesDir is the parent of every per-key directory.
-func QueuesDir(stateDir string) string { return filepath.Join(stateDir, "queues") }
+// LanesDir is the parent of every lane directory (layout 2).
+func LanesDir(stateDir string) string { return filepath.Join(stateDir, "lanes") }
 
-// QueueDir is the per-key state directory. key must already be validated.
-func QueueDir(stateDir, key string) string { return filepath.Join(QueuesDir(stateDir), key) }
+// LaneDir is one lane's state directory. key must already be validated.
+func LaneDir(stateDir, key string) string { return filepath.Join(LanesDir(stateDir), key) }
+
+// QueuesDir is <state>/queues: the lanes root of every release before
+// layout 2, and the fence file once a state directory is on layout 2. Only
+// the migration (internal/machine) and tests use it; this binary never
+// creates it as a directory.
+func QueuesDir(stateDir string) string { return filepath.Join(stateDir, "queues") }
 
 // maxKeyLen keeps a key comfortably inside every filesystem's component limit
 // even after the ticket-name suffix is appended.

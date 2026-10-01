@@ -44,7 +44,7 @@ func TestDeadHeldEntryIsDropped(t *testing.T) {
 	if strings.Contains(out, "already held") {
 		t.Fatalf("a dead entry must not pass through:\n%s", out)
 	}
-	log, _ := os.ReadFile(filepath.Join(state, "queues", "hd", "lane.log"))
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "hd"), "lane.log"))
 	if !strings.Contains(string(log), "event=enqueue") || !strings.Contains(string(log), "event=held-dropped") {
 		t.Fatalf("the run should enroll and log the drop:\n%s", log)
 	}
@@ -75,7 +75,7 @@ func TestLiveNonAncestorEntryDoesNotPassThrough(t *testing.T) {
 	waitFor(t, incoda, state, "na", func(q queueReport) bool { return len(q.Holders) == 1 })
 
 	var ticket string
-	entries, _ := os.ReadDir(filepath.Join(state, "queues", "na"))
+	entries, _ := os.ReadDir(laneDir(state, "na"))
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".ticket") {
 			ticket = e.Name()

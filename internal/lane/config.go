@@ -176,8 +176,14 @@ func (e *SlotsDisagreement) Error() string {
 // LoadConfig reads the queue's config. A missing file is the zero Config
 // and no error; a file that cannot be parsed is an error, because a queue
 // that silently forgot it was closed would let the old key back in.
-func (q *Queue) LoadConfig() (Config, error) {
-	b, err := os.ReadFile(filepath.Join(q.Dir, configName))
+func (q *Queue) LoadConfig() (Config, error) { return ReadConfig(q.Dir) }
+
+// ReadConfig is LoadConfig for a lane directory that is not open. It takes
+// no lock; the migration and doctor use it on lanes nobody can enroll on at
+// that moment, and its reads are atomic because every write is a rename.
+func ReadConfig(dir string) (Config, error) {
+	path := filepath.Join(dir, configName)
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Config{}, nil
 	}
@@ -186,10 +192,10 @@ func (q *Queue) LoadConfig() (Config, error) {
 	}
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
-		return Config{}, fmt.Errorf("config %s is not valid JSON: %w", filepath.Join(q.Dir, configName), err)
+		return Config{}, fmt.Errorf("config %s is not valid JSON: %w", path, err)
 	}
 	if c.Schema > ConfigSchema {
-		return Config{}, &NewerSchemaError{Path: filepath.Join(q.Dir, configName), Schema: c.Schema}
+		return Config{}, &NewerSchemaError{Path: path, Schema: c.Schema}
 	}
 	return c, nil
 }

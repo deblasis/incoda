@@ -172,12 +172,15 @@ func resolveKey(explicit string) (string, error) {
 	return key, nil
 }
 
+// stateDir resolves the state directory and creates it. It never creates
+// <state>/queues: that path belongs to older releases, and on layout 2 it is
+// the fence file (internal/machine).
 func stateDir() (string, error) {
 	d, err := lane.StateDir()
 	if err != nil {
 		return "", exitWith(ExitState, "cannot resolve state directory: %v", err)
 	}
-	if err := os.MkdirAll(lane.QueuesDir(d), 0o755); err != nil {
+	if err := os.MkdirAll(d, 0o755); err != nil {
 		return "", exitWith(ExitState, "cannot create state directory %s: %v", d, err)
 	}
 	return d, nil

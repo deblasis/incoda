@@ -204,7 +204,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("current cwd (not used for resolution):"), cwd)
 	}
 
-	if err := os.MkdirAll(lane.QueuesDir(dir), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("writable:"), p.BoldRed(fmt.Sprintf("NO (%v)", err)))
 		return exitWith(ExitState, "state directory is not usable")
 	}

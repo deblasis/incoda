@@ -82,7 +82,7 @@ func Build(dir, version string, keys []string, events int) (*Report, error) {
 	for _, key := range keys {
 		qr := Queue{
 			Key:     key,
-			Dir:     lane.QueueDir(dir, key),
+			Dir:     lane.LaneDir(dir, key),
 			Exists:  lane.Exists(dir, key),
 			Holders: []lane.Entry{},
 			Waiting: []lane.Entry{},

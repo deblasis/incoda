@@ -242,7 +242,7 @@ func TestNewerConfigSchemaRefusesRuns(t *testing.T) {
 	if out, code := runIncoda(t, incoda, state, "config", "newer", "--slots", "1"); code != 0 {
 		t.Fatalf("config: %d\n%s", code, out)
 	}
-	path := filepath.Join(state, "queues", "newer", "config.json")
+	path := filepath.Join(laneDir(state, "newer"), "config.json")
 	if err := os.WriteFile(path, []byte(`{"schema":9,"slots":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestLogLineStaysOneLine(t *testing.T) {
 	if out, code := runIncoda(t, incoda, state, "run", "--queue", "oneline", "--quiet", "--", stamp, marker, "a\nb", "1"); code != 0 {
 		t.Fatalf("run: exit %d\n%s", code, out)
 	}
-	b, err := os.ReadFile(filepath.Join(state, "queues", "oneline", "lane.log"))
+	b, err := os.ReadFile(filepath.Join(laneDir(state, "oneline"), "lane.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,12 +1,9 @@
 package held
 
 import (
-	"encoding/json"
 	"errors"
-	"os"
 
 	"github.com/deblasis/incoda/internal/lane"
-	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/procinfo"
 )
 
@@ -104,36 +101,18 @@ func Verify(stateDir, raw string, chain procinfo.Chain) Result {
 
 // probe reports whether e's ticket is held by a live process, and the pid
 // recorded in its payload. perr reports a payload that could not be read.
+// The probe itself is lane.ProbeTicket, shared with the migration's idle
+// checks; a probe that failed counts as dead here, as it did in plan 1.
 func probe(stateDir string, e Entry) (live bool, payloadPID int, perr error) {
-	dir := lane.QueueDir(stateDir, e.Key)
-	reg, err := lockfile.OpenExisting(lane.RegistryLockPath(dir))
-	if err != nil {
+	p := lane.ProbeTicket(lane.LaneDir(stateDir, e.Key), e.Ticket)
+	if !p.Live {
 		return false, 0, nil
 	}
-	defer reg.Close()
-	if err := reg.Lock(); err != nil {
-		return false, 0, nil
+	if p.PayloadErr != nil {
+		return true, 0, p.PayloadErr
 	}
-	path := lane.TicketFilePath(dir, e.Ticket)
-	tf, err := lockfile.OpenExisting(path)
-	if err != nil {
-		return false, 0, nil
-	}
-	free, err := tf.TryLock()
-	tf.Close()
-	if err != nil || free {
-		return false, 0, nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return true, 0, err
-	}
-	var t lane.Ticket
-	if err := json.Unmarshal(b, &t); err != nil {
-		return true, 0, err
-	}
-	if t.PID == 0 {
+	if p.Ticket.PID == 0 {
 		return true, 0, errors.New("ticket payload has no pid")
 	}
-	return true, t.PID, nil
+	return true, p.Ticket.PID, nil
 }

@@ -154,7 +154,7 @@ func TestVerifyDeadAndMalformedAreDropped(t *testing.T) {
 		t.Fatal("Verify created the ghost lane")
 	}
 	// A probe of a released ticket must not recreate it.
-	if _, err := os.Stat(lane.TicketFilePath(lane.QueueDir(state, "dead"), name)); !os.IsNotExist(err) {
+	if _, err := os.Stat(lane.TicketFilePath(lane.LaneDir(state, "dead"), name)); !os.IsNotExist(err) {
 		t.Fatal("Verify recreated a released ticket")
 	}
 }
