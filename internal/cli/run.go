@@ -103,7 +103,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 		pt.cfg = cfg
 		if cfg.Closed != "" {
-			return usagef("queue %q is closed: %s", key, cfg.Closed)
+			return usagef("queue %q is closed: %s", key, textsafe.Escape(cfg.Closed))
 		}
 		if cfg.RequireReason && strings.TrimSpace(*reason) == "" {
 			return usagef("queue %q requires --reason: say what this job is so status can answer \"whose is that and why\"", key)
@@ -264,7 +264,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				rc = ExitKilled
 				logKill(toTake, killed.Request)
 				return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
-					key, killed.Request.By, killed.Request.Reason)))
+					key, textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
 			}
 			if errors.Is(acqErr, lane.ErrTimeout) {
 				rc = ExitTimeout
@@ -354,7 +354,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		logKill(toTake, req)
 		release()
 		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-			p.Red(fmt.Sprintf("killed by %s: %s", req.By, req.Reason)))
+			p.Red(fmt.Sprintf("killed by %s: %s", textsafe.Escape(req.By), textsafe.Escape(req.Reason))))
 		return &exitCode{code: ExitKilled}
 	}
 	rc = res.Code
@@ -369,7 +369,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 // request the killer left, so the history reads request then outcome.
 func logKill(parts []*lanePart, req lane.KillRequest) {
 	for _, pt := range parts {
-		pt.q.Logf("queue=%s event=kill pid=%d by=%s reason=%q", pt.key, os.Getpid(), req.By, req.Reason)
+		pt.q.Logf("queue=%s event=kill pid=%d by=%s reason=%s", pt.key, os.Getpid(), textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))
 	}
 }
 

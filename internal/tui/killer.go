@@ -7,6 +7,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/proc"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // killedExit is the exit code a forced kill hands the participant, the same
@@ -74,6 +75,6 @@ func (k LaneKiller) Force(key string, pid int, reason string) error {
 		return err
 	}
 	defer q.Close()
-	q.Logf("queue=%s event=kill pid=%d by=%s reason=%q forced=true", key, pid, k.By, reason)
+	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, pid, textsafe.LogValue(k.By), textsafe.LogValue(reason))
 	return nil
 }

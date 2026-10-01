@@ -11,6 +11,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/proc"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // cmdKill addresses a kill request to one participant and reports whether it
@@ -84,7 +85,7 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 	if err := proc.Terminate(*pid, ExitKilled); err != nil {
 		return exitWith(ExitState, "cannot terminate pid %d: %v", *pid, err)
 	}
-	q.Logf("queue=%s event=kill pid=%d by=%s reason=%q forced=true", key, *pid, req.By, req.Reason)
+	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, *pid, textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))
 	gone, err = q.WaitGone(*pid, 5*time.Second, 100*time.Millisecond)
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
