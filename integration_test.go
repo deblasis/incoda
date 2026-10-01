@@ -417,7 +417,7 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	// A holder keeps racea busy so the contender finishes its pre-check of
 	// both keys and then waits before it can enroll raceb.
 	holder := exec.Command(incoda, "run", "--queue", "racea", "--wait", "60s", "--poll", "50ms",
-		"--quiet", "--", stamp, filepath.Join(stamps, "holder.txt"), "holder", "6000")
+		"--quiet", "--", stamp, filepath.Join(stamps, "holder.txt"), "holder", "60000")
 	holder.Env = laneEnv(state)
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
@@ -458,6 +458,22 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 		t.Fatalf("reconfig raceb: %v\n%s", err, out)
 	}
 
+	// Only now let the contender reach raceb: the config change has landed,
+	// so the enroll-time check must see it whatever the machine's load.
+	if out, code := func() (string, int) {
+		cmd := exec.Command(incoda, "kill", "--queue", "racea",
+			"--pid", strconv.Itoa(holder.Process.Pid), "--reason", "release the holder")
+		cmd.Env = laneEnv(state)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return string(output), exitCodeOf(err)
+		}
+		return string(output), 0
+	}(); code != 0 {
+		t.Fatalf("kill holder: exit %d\n%s", code, out)
+	}
+	_ = holder.Wait()
+
 	err := contender.Wait()
 	if err == nil {
 		t.Fatal("the contender should have been refused at enrollment")
@@ -473,9 +489,6 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	}
 	if got := countTickets(t, state, "raceb"); got != 0 {
 		t.Fatalf("the refused run left %d ticket(s) on raceb", got)
-	}
-	if err := holder.Wait(); err != nil {
-		t.Fatalf("holder: %v", err)
 	}
 }
 
