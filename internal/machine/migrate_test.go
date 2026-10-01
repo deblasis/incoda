@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -510,5 +511,61 @@ func TestSuggest(t *testing.T) {
 		if ok != tc.ok || strings.Join(s.Pools, ",") != tc.pools || s.QuietMachine != tc.quiet {
 			t.Fatalf("Suggest(%q) = %+v %v", tc.key, s, ok)
 		}
+	}
+}
+
+// TestCommitRefencesWhenTheFenceVanishedDuringM5: the fence is removed
+// during M5 and an older binary recreates queues/<K> with a live run. M8
+// must not commit unfenced: it re-places the fence (queues/ goes to
+// strays/), goes back to M5, waits for the run and merges its lane, and
+// only then writes machine.json.
+func TestCommitRefencesWhenTheFenceVanishedDuringM5(t *testing.T) {
+	state := t.TempDir()
+	seedOld(t, state)
+	var released atomic.Bool
+	checks := 0
+	beforeCommitCheck = func() {
+		checks++
+		if _, err := ReadRegistry(state); !errors.Is(err, ErrNoRegistry) {
+			t.Errorf("check %d: machine.json already written: %v", checks, err)
+		}
+		switch checks {
+		case 1:
+			if err := os.Remove(lane.QueuesDir(state)); err != nil {
+				t.Fatal(err)
+			}
+			release := holdTicket(t, lane.QueuesDir(state), "slipped", 999999, "zig", "build")
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				released.Store(true)
+				release()
+			}()
+		case 2:
+			if !released.Load() {
+				t.Error("M8 reached before the slipped-in run ended")
+			}
+			if !FencePlaced(state) {
+				t.Error("the fence is not back")
+			}
+			if !lane.Exists(state, "slipped") {
+				t.Error("the slipped-in lane was not merged into lanes/")
+			}
+		}
+	}
+	defer func() { beforeCommitCheck = func() {} }()
+	_, out, err := ensure(t, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks != 2 {
+		t.Fatalf("fence checks before the commit: %d, want 2", checks)
+	}
+	if !strings.Contains(out, "incoda: upgrade-wait: state upgrade waits for 1 run(s) by an older incoda:\n") ||
+		!strings.Contains(out, "slipped pid 999999: zig build") || !strings.Contains(out, "--force") {
+		t.Fatalf("output:\n%s", out)
+	}
+	assertMigrated(t, state, true)
+	if b, _ := os.ReadFile(MachineLogPath(state)); !strings.Contains(string(b), "event=refence") {
+		t.Fatalf("machine.log:\n%s", b)
 	}
 }

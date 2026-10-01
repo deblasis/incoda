@@ -218,20 +218,49 @@ func fenceMigration(stateDir string) error {
 	return nil
 }
 
-// finishMigration is M5 to M8.
+// maxCommitRefences bounds how often M8 finds the fence gone and goes back
+// to M5, so a fence that keeps vanishing cannot spin even with no --wait
+// budget.
+const maxCommitRefences = 100
+
+// Seam for tests; production never changes it.
+var beforeCommitCheck = func() {}
+
+// finishMigration is M5 to M8. Right before the commit it checks the fence
+// again (spec 2.3): if it was removed during a long M5 wait, an older
+// binary may have recreated queues/ and started a run there, which M5
+// never probes. The fence is then re-placed with the race rule (that
+// queues/ goes to strays/) and the migration goes back to M5, which probes
+// strays/ and waits for the run, all within the one --wait budget.
 func finishMigration(stateDir string, lk *Lock, o Options) (*Registry, error) {
-	if err := waitIdle(stateDir, lk, o, phaseM5); err != nil {
-		return nil, err
+	for refences := 0; ; refences++ {
+		if err := waitIdle(stateDir, lk, o, phaseM5); err != nil {
+			return nil, err
+		}
+		crashpoint("M5")
+		if err := mergeStrays(stateDir); err != nil {
+			return nil, err
+		}
+		crashpoint("M6")
+		if err := applyBootstrap(stateDir); err != nil {
+			return nil, err
+		}
+		crashpoint("M7")
+		beforeCommitCheck()
+		if FencePlaced(stateDir) {
+			break
+		}
+		if refences >= maxCommitRefences {
+			return nil, stateErrorf("the queues fence keeps disappearing; machine.json was not written: see incoda doctor")
+		}
+		if err := refence(stateDir); errors.Is(err, errNotIdle) {
+			if err := waitNotIdle(o); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
+			return nil, err
+		}
 	}
-	crashpoint("M5")
-	if err := mergeStrays(stateDir); err != nil {
-		return nil, err
-	}
-	crashpoint("M6")
-	if err := applyBootstrap(stateDir); err != nil {
-		return nil, err
-	}
-	crashpoint("M7")
 	reg := &Registry{Schema: RegistrySchema, Layout: Layout, Generation: 1, Pools: BootstrapPools(),
 		MigratedBy: o.By, MigratedAt: time.Now().UTC().Format(time.RFC3339)}
 	// Logged before the commit, so a crash right after it (row 8) still
