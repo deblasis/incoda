@@ -121,7 +121,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	if len(toTake) == 0 {
 		// Every key is the parent's. Nothing to enroll, nothing to watch:
 		// a kill addressed to the parent takes this process with it.
-		res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil)
+		res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
+			Env:      childEnv(startEnv, joinHeld(held, nil)),
+			OwnGroup: len(held) == 0,
+		})
 		if runErr != nil {
 			return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
 		}
@@ -277,10 +280,6 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}
 
 	stop() // hand interrupt handling to the child supervisor
-	// The child inherits the environment, so this is how the held keys
-	// reach a nested incoda. Set on the process rather than on the child's
-	// env slice because child.Run copies os.Environ() itself.
-	_ = os.Setenv("INCODA_HELD", joinHeld(held, keys))
 
 	// While the command runs, watch every held ticket for a kill request at
 	// the poll interval. A request closes abort, which takes the job tree
@@ -309,7 +308,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 		}
 	}()
-	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort)
+	// The held keys reach a nested incoda through the child's environment
+	// only. Setting them on this process would make every later decision
+	// that reads the environment see the child's value.
+	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
+		Env:      childEnv(startEnv, joinHeld(held, keys)),
+		OwnGroup: len(held) == 0,
+	})
 	close(stopWatch)
 	<-watchDone
 	if runErr != nil {
@@ -391,11 +396,11 @@ func resolveKeys(explicit string) ([]string, error) {
 	return keys, nil
 }
 
-// heldKeys parses INCODA_HELD, the comma-separated keys an ancestor incoda
-// holds on this process's behalf.
+// heldKeys parses INCODA_HELD from the environment incoda was started with:
+// the comma-separated keys an ancestor incoda holds on this process's behalf.
 func heldKeys() map[string]bool {
 	held := map[string]bool{}
-	for _, k := range strings.Split(os.Getenv("INCODA_HELD"), ",") {
+	for _, k := range strings.Split(startGetenv("INCODA_HELD"), ",") {
 		if k = strings.TrimSpace(k); k != "" {
 			held[k] = true
 		}

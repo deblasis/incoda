@@ -40,12 +40,25 @@ type Result struct {
 	Aborted bool
 }
 
+// Options says how to start the child. The caller decides both: incoda
+// builds the child's environment from the one it was started with, and
+// decides the process group from the lanes it verified, never from its own
+// mutable environment.
+type Options struct {
+	// Env is the child's complete environment. Nil means os.Environ().
+	Env []string
+	// OwnGroup puts the child in a new process group on Unix, so a kill
+	// through the lane can signal the whole tree. Ignored on Windows, where
+	// the Job Object contains the tree.
+	OwnGroup bool
+}
+
 // Run starts argv, forwards interrupt signals to it, and returns its exit code
 // and resource usage. Signals arriving while the child runs are forwarded; a
 // second signal escalates to tearing the whole process tree down. Closing
 // abort tears the tree down too: it is how a kill request addressed to the
 // lane holder reaches the job it is running. A nil abort is never fired.
-func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan struct{}) (Result, error) {
+func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan struct{}, opt Options) (Result, error) {
 	if len(argv) == 0 {
 		return Result{}, errors.New("no command given")
 	}
@@ -53,9 +66,12 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan st
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
+	cmd.Env = opt.Env
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 
-	sup, err := newSupervisor(cmd)
+	sup, err := newSupervisor(cmd, opt.OwnGroup)
 	if err != nil {
 		return Result{}, err
 	}

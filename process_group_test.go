@@ -1,0 +1,141 @@
+//go:build !windows
+
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+var (
+	treeOnce sync.Once
+	treeBin  string
+	treeErr  error
+)
+
+// treeBinary builds internal/testprog/tree next to the incoda test binary.
+func treeBinary(t *testing.T) string {
+	t.Helper()
+	incoda, _ := binaries(t)
+	treeOnce.Do(func() {
+		treeBin = filepath.Join(filepath.Dir(incoda), "tree")
+		cmd := exec.Command("go", "build", "-o", treeBin, "./internal/testprog/tree")
+		cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			treeErr = fmt.Errorf("build tree: %v\n%s", err, out)
+		}
+	})
+	if treeErr != nil {
+		t.Fatal(treeErr)
+	}
+	return treeBin
+}
+
+type treeInfo struct{ pid, ppid, pgid, grandchild int }
+
+// readTree waits for the tree program's report file and parses it.
+func readTree(t *testing.T, path string) treeInfo {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			var ti treeInfo
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				k, v, _ := strings.Cut(line, " ")
+				n, _ := strconv.Atoi(v)
+				switch k {
+				case "pid":
+					ti.pid = n
+				case "ppid":
+					ti.ppid = n
+				case "pgid":
+					ti.pgid = n
+				case "grandchild":
+					ti.grandchild = n
+				}
+			}
+			return ti
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tree never wrote %s", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// gone reports whether pid no longer exists, waiting up to d.
+func gone(pid int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestTopLevelChildOwnsItsGroup: a top-level run puts its child in a new
+// process group, so the child's pgid is its own pid.
+func TestTopLevelChildOwnsItsGroup(t *testing.T) {
+	incoda, _ := binaries(t)
+	tree := treeBinary(t)
+	state := t.TempDir()
+	out := filepath.Join(t.TempDir(), "tree.txt")
+
+	holder := exec.Command(incoda, "run", "--queue", "pg", "--quiet", "--poll", "50ms", "--", tree, out)
+	holder.Env = laneEnv(state)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
+
+	ti := readTree(t, out)
+	defer func() { _ = syscall.Kill(-ti.pgid, syscall.SIGKILL) }()
+	if ti.pgid != ti.pid {
+		t.Fatalf("a top-level run's child must lead its own process group: pid %d pgid %d", ti.pid, ti.pgid)
+	}
+}
+
+// TestKillReachesGrandchild is the regression test for the shipped bug:
+// `incoda kill` on a holder whose child spawned a grandchild ends both.
+func TestKillReachesGrandchild(t *testing.T) {
+	incoda, _ := binaries(t)
+	tree := treeBinary(t)
+	state := t.TempDir()
+	out := filepath.Join(t.TempDir(), "tree.txt")
+
+	holder := exec.Command(incoda, "run", "--queue", "pgk", "--quiet", "--poll", "50ms", "--", tree, out)
+	holder.Env = laneEnv(state)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ti := readTree(t, out)
+	defer func() { _ = syscall.Kill(ti.grandchild, syscall.SIGKILL) }()
+
+	msg, code := runIncoda(t, incoda, state, "kill", "--queue", "pgk", "--pid", strconv.Itoa(holder.Process.Pid), "--reason", "test")
+	if code != 0 {
+		t.Fatalf("kill: exit %d\n%s", code, msg)
+	}
+	if got := exitCodeOf(holder.Wait()); got != 124 {
+		t.Fatalf("killed holder exits 124, got %d", got)
+	}
+	if !gone(ti.pid, 5*time.Second) {
+		t.Fatalf("child pid %d survived the kill", ti.pid)
+	}
+	if !gone(ti.grandchild, 5*time.Second) {
+		t.Fatalf("grandchild pid %d survived the kill: the child was not in its own process group", ti.grandchild)
+	}
+}
