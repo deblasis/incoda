@@ -13,6 +13,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/child"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // lanePart is one key of a run: its queue handle and, once enrolled, the
@@ -100,7 +101,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", key)))
 			}
-			q.Logf("queue=%s event=reenter pid=%d cmd=%s", key, os.Getpid(), lane.Ticket{Command: argv}.CommandString())
+			q.Logf("queue=%s event=reenter pid=%d cmd=%s", key, os.Getpid(), textsafe.LogValue(lane.Ticket{Command: argv}.CommandString()))
 			continue
 		}
 		toTake = append(toTake, pt)
@@ -234,7 +235,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 						break
 					}
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
-						p.Dim(fmt.Sprintf("holder pid %d in %s: %s", e.Ticket.PID, e.Ticket.Dir, e.Ticket.CommandString())))
+						p.Dim(fmt.Sprintf("holder pid %d in %s: %s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()))))
 				}
 			},
 		})

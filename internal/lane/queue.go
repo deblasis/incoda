@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/lockfile"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 const (
@@ -413,7 +414,7 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 	if en.ticket.Exclusive {
 		extra += " exclusive=true"
 	}
-	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), en.ticket.CommandString())
+	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), textsafe.LogValue(en.ticket.CommandString()))
 	return en, nil
 }
 
@@ -477,7 +478,7 @@ func (e *Enrollment) MarkAcquired() {
 	e.ticket.Acquired = now.Format(time.RFC3339Nano)
 	b, _ := json.Marshal(e.ticket)
 	_ = e.q.withRegistry(func() error { return e.lock.Truncate(b) })
-	e.q.Logf("queue=%s event=acquire pid=%d%s cmd=%s", e.q.Key, e.ticket.PID, e.ticket.attribution(), e.ticket.CommandString())
+	e.q.Logf("queue=%s event=acquire pid=%d%s cmd=%s", e.q.Key, e.ticket.PID, e.ticket.attribution(), textsafe.LogValue(e.ticket.CommandString()))
 }
 
 // ForceRelease deletes every ticket in the queue. It refuses while any live

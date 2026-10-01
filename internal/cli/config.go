@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // cmdConfig shows or changes a queue's standing configuration. With no
@@ -39,6 +40,20 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	}
 	if *closeMsg != "" && *open {
 		return usagef("--close and --open contradict each other")
+	}
+	for _, c := range []struct{ name, flag string }{{"description", "description"}, {"closed", "close"}} {
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == c.flag })
+		if !set {
+			continue
+		}
+		v := *desc
+		if c.flag == "close" {
+			v = *closeMsg
+		}
+		if err := textsafe.CheckWrite(c.name, v); err != nil {
+			return usagef("%v", err)
+		}
 	}
 	key, err := resolveKey(*queue)
 	if err != nil {
@@ -80,7 +95,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		if err := q.SaveConfig(cfg); err != nil {
 			return exitWith(ExitState, "cannot write config for %q: %v", key, err)
 		}
-		q.Logf("queue=%s event=config pid=%d slots=%d require_reason=%v closed=%q", key, os.Getpid(), cfg.Slots, cfg.RequireReason, cfg.Closed)
+		q.Logf("queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed))
 	}
 
 	p := paletteFor(stdout, *noColor)
@@ -93,13 +108,13 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	if cfg.Description == "" {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("description:"), p.Dim("(none)"))
 	} else {
-		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("description:"), cfg.Description)
+		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("description:"), textsafe.Escape(cfg.Description))
 	}
 	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("require reason:"), yesNo(cfg.RequireReason))
 	if cfg.Closed == "" {
 		fmt.Fprintf(stdout, "  %s no\n", p.Dim("closed:"))
 	} else {
-		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("closed:"), p.BoldRed(cfg.Closed))
+		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("closed:"), p.BoldRed(textsafe.Escape(cfg.Closed)))
 	}
 	return nil
 }

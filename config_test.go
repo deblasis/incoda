@@ -218,3 +218,38 @@ func TestExclusiveRunWaitsForAnEmptyQueue(t *testing.T) {
 	}
 	_ = strconv.Itoa
 }
+
+// TestConfigRefusesControlCharacters: a description is shown in status and
+// in refusals, so it must not carry anything that repaints a terminal.
+func TestConfigRefusesControlCharacters(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	out, code := runIncoda(t, incoda, state, "config", "badtext", "--description", "red\x1b[31m")
+	if code != 120 || !strings.Contains(out, "incoda: bad-text: description contains control characters") {
+		t.Fatalf("want exit 120 and a bad-text refusal, got %d:\n%s", code, out)
+	}
+	out, code = runIncoda(t, incoda, state, "config", "badtext", "--close", "two\nlines")
+	if code != 120 || !strings.Contains(out, "bad-text: closed contains control characters") {
+		t.Fatalf("want exit 120 for --close, got %d:\n%s", code, out)
+	}
+}
+
+// TestLogLineStaysOneLine: a command word with a newline must not split a
+// lane.log event into two lines.
+func TestLogLineStaysOneLine(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "m.txt")
+	if out, code := runIncoda(t, incoda, state, "run", "--queue", "oneline", "--quiet", "--", stamp, marker, "a\nb", "1"); code != 0 {
+		t.Fatalf("run: exit %d\n%s", code, out)
+	}
+	b, err := os.ReadFile(filepath.Join(state, "queues", "oneline", "lane.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if !strings.Contains(line, "queue=oneline event=") {
+			t.Fatalf("a log event was split across lines:\n%s", b)
+		}
+	}
+}

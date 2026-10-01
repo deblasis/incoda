@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 const ticketExt = ".ticket"
@@ -39,33 +41,22 @@ type Ticket struct {
 }
 
 // attribution is the k=v block every lifecycle line (enqueue/acquire/release)
-// carries: WHERE the job ran (dir, the launch cwd), and - when set - WHY
-// (reason) and WHOSE (owner). reason/owner are %q-quoted because the values
-// are free text with spaces; dir is quoted only when it needs it (a path
-// with a space would otherwise make the mid-line value ambiguous), so the
-// common no-space roots stay clean. Readers that do not know the fields
-// ignore them, and old lines simply lack them.
+// carries: WHERE the job ran (dir, the launch cwd), and when set WHY (reason)
+// and WHOSE (owner). Values go through textsafe.LogValue so a space quotes
+// them and a control character can never split the event across lines.
+// Readers that do not know the fields ignore them, and old lines lack them.
 func (t Ticket) attribution() string {
 	s := ""
 	if t.Dir != "" {
-		s += " dir=" + quoteIfNeeded(t.Dir)
+		s += " dir=" + textsafe.LogValue(t.Dir)
 	}
 	if t.Reason != "" {
-		s += fmt.Sprintf(" reason=%q", t.Reason)
+		s += " reason=" + strconv.Quote(textsafe.Escape(t.Reason))
 	}
 	if t.Owner != "" {
-		s += fmt.Sprintf(" owner=%q", t.Owner)
+		s += " owner=" + strconv.Quote(textsafe.Escape(t.Owner))
 	}
 	return s
-}
-
-// quoteIfNeeded quotes a value only when it would otherwise be ambiguous in
-// the whitespace-delimited k=v line (a space or a quote in the value).
-func quoteIfNeeded(v string) string {
-	if strings.ContainsAny(v, ` "`) {
-		return strconv.Quote(v)
-	}
-	return v
 }
 
 // ticketName encodes the arrival order into the filename so that ordering can
