@@ -196,9 +196,10 @@ func (q *Queue) LoadConfig() (Config, error) {
 
 // UpdateConfig loads the config, applies fn and stores the result, all
 // inside one hold of the registry lock, so two writers changing different
-// fields cannot lose each other's change. The stored file is stamped with
-// ConfigSchema and keeps fields this binary does not know. A config written
-// by a newer incoda is refused, never rewritten.
+// fields cannot lose each other's change. The write goes through a temp
+// file and a rename, so a reader never sees half a file. The stored file is
+// stamped with ConfigSchema and keeps fields this binary does not know. A
+// config written by a newer incoda is refused, never rewritten.
 func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 	var out Config
 	err := q.withRegistry(func() error {
@@ -210,12 +211,7 @@ func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 			return err
 		}
 		c.Schema = ConfigSchema
-		// Plain Marshal, not MarshalIndent: Go's Indent pass reformats the
-		// whole byte stream it is given, including the bytes a preserved
-		// unknown field already carries, so a round trip through
-		// MarshalIndent would silently reflow someone else's JSON. Plain
-		// Marshal leaves every RawMessage exactly as its owner wrote it.
-		b, err := json.Marshal(c)
+		b, err := json.MarshalIndent(c, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -252,7 +248,9 @@ func renameRetry(from, to string) error {
 		if err = os.Rename(from, to); err == nil || runtime.GOOS != "windows" {
 			return err
 		}
-		time.Sleep(50 * time.Millisecond)
+		if i < 9 {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	return err
 }

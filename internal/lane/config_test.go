@@ -1,6 +1,7 @@
 package lane
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,7 +75,14 @@ func TestConfigKeepsUnknownFieldsAndStampsSchema(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if string(raw["from_the_future"]) != `{"x":1}` {
+	// The file is pretty-printed, so the preserved field's own whitespace
+	// is reflowed along with everything else; compare it compacted, which
+	// is a content comparison rather than a byte-for-byte one.
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, raw["from_the_future"]); err != nil {
+		t.Fatal(err)
+	}
+	if compacted.String() != `{"x":1}` {
 		t.Fatalf("unknown field lost: %s", b)
 	}
 	if string(raw["schema"]) != "2" || string(raw["slots"]) != "2" || string(raw["description"]) != `"d"` {
