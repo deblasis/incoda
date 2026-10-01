@@ -13,6 +13,10 @@ func openLockable(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 }
 
+func openExistingLockable(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR, 0)
+}
+
 // flock is used rather than fcntl/POSIX record locks on purpose: POSIX locks are
 // released when the process closes *any* descriptor on the file, which makes a
 // stray os.Open in the same process silently drop somebody else's lock. flock

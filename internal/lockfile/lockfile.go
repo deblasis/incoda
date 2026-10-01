@@ -27,6 +27,18 @@ func Open(path string) (*File, error) {
 	return &File{f: f}, nil
 }
 
+// OpenExisting opens path for locking without ever creating it. A probe of
+// another process's ticket uses it, so a probe of a ticket that has just
+// been released cannot recreate the file and make it look alive. A missing
+// file yields an error that satisfies errors.Is(err, os.ErrNotExist).
+func OpenExisting(path string) (*File, error) {
+	f, err := openExistingLockable(path)
+	if err != nil {
+		return nil, err
+	}
+	return &File{f: f}, nil
+}
+
 // TryLock attempts a non-blocking exclusive lock. It reports whether the lock
 // was taken. A false return with a nil error means somebody else holds it.
 func (l *File) TryLock() (bool, error) {
