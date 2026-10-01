@@ -83,6 +83,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		pt := &lanePart{key: key, q: q}
 		parts = append(parts, pt)
 		cfg, err := q.LoadConfig()
+		var ns *lane.NewerSchemaError
+		if errors.As(err, &ns) {
+			return exitWith(ExitState, "machine-state: %v", err)
+		}
 		if err != nil {
 			return exitWith(ExitState, "queue %q: %v", key, err)
 		}

@@ -234,6 +234,24 @@ func TestConfigRefusesControlCharacters(t *testing.T) {
 	}
 }
 
+// TestNewerConfigSchemaRefusesRuns: a config written by a newer incoda may
+// carry rules this binary does not know, so it fails closed.
+func TestNewerConfigSchemaRefusesRuns(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "newer", "--slots", "1"); code != 0 {
+		t.Fatalf("config: %d\n%s", code, out)
+	}
+	path := filepath.Join(state, "queues", "newer", "config.json")
+	if err := os.WriteFile(path, []byte(`{"schema":9,"slots":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "newer", "--", stamp, filepath.Join(t.TempDir(), "x"), "x", "1")
+	if code != 122 || !strings.Contains(out, "incoda: machine-state:") || !strings.Contains(out, "newer incoda") {
+		t.Fatalf("want exit 122 machine-state, got %d:\n%s", code, out)
+	}
+}
+
 // TestLogLineStaysOneLine: a command word with a newline must not split a
 // lane.log event into two lines.
 func TestLogLineStaysOneLine(t *testing.T) {

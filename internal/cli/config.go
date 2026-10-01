@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -69,33 +70,42 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	}
 	defer q.Close()
 
-	cfg, err := q.LoadConfig()
+	apply := func(cfg *lane.Config) bool {
+		changed := false
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "slots":
+				cfg.Slots = *slots
+			case "description":
+				cfg.Description = *desc
+			case "require-reason":
+				cfg.RequireReason = *requireReason
+			case "close":
+				cfg.Closed = *closeMsg
+			case "open":
+				cfg.Closed = ""
+			default:
+				return
+			}
+			changed = true
+		})
+		return changed
+	}
+	var cfg lane.Config
+	if apply(&lane.Config{}) {
+		cfg, err = q.UpdateConfig(func(c *lane.Config) error { apply(c); return nil })
+		if err == nil {
+			q.Logf("queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed))
+		}
+	} else {
+		cfg, err = q.LoadConfig()
+	}
+	var ns *lane.NewerSchemaError
+	if errors.As(err, &ns) {
+		return exitWith(ExitState, "machine-state: %v", err)
+	}
 	if err != nil {
 		return exitWith(ExitState, "queue %q: %v", key, err)
-	}
-	changed := false
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "slots":
-			cfg.Slots = *slots
-		case "description":
-			cfg.Description = *desc
-		case "require-reason":
-			cfg.RequireReason = *requireReason
-		case "close":
-			cfg.Closed = *closeMsg
-		case "open":
-			cfg.Closed = ""
-		default:
-			return
-		}
-		changed = true
-	})
-	if changed {
-		if err := q.SaveConfig(cfg); err != nil {
-			return exitWith(ExitState, "cannot write config for %q: %v", key, err)
-		}
-		q.Logf("queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed))
 	}
 
 	p := paletteFor(stdout, *noColor)
