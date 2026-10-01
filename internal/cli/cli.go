@@ -53,9 +53,11 @@ usage:
 The queue key comes from --queue or the INCODA_QUEUE environment variable.
 There is no default key: an unkeyed run is refused rather than silently
 sharing a lane with unrelated work. A comma-separated list holds every key
-named, taken in sorted order. A run exports INCODA_HELD to its child;
-a nested run on a key listed there passes through instead of queueing behind
-its own parent. INCODA_OWNER is the default for --owner.
+named, taken in sorted order. A run gives its child INCODA_HELD, the
+KEY=TICKET entries of the lanes it holds; a nested run on a key listed there
+passes through instead of queueing behind its own parent, once it has checked
+that the ticket is alive and held by its ancestor. INCODA_OWNER is the
+default for --owner.
 
 State is machine-local and per-user, and is NEVER derived from the working
 directory. Every caller of a key contends for the same lane no matter which

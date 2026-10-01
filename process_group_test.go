@@ -177,3 +177,26 @@ func TestKillReachesGrandchild(t *testing.T) {
 		t.Fatalf("grandchild pid %d survived the kill: the child was not in its own process group", ti.grandchild)
 	}
 }
+
+// TestNestedChildStaysInOuterGroup: a nested run whose outer incoda is alive
+// keeps its child in the outer group, so the outer tree kill reaches it.
+func TestNestedChildStaysInOuterGroup(t *testing.T) {
+	incoda, _ := binaries(t)
+	tree := treeBinary(t)
+	state := t.TempDir()
+	out := filepath.Join(t.TempDir(), "tree.txt")
+	cmd := exec.Command(incoda, "run", "--queue", "outer", "--quiet", "--",
+		incoda, "run", "--queue", "inner", "--quiet", "--", tree, out)
+	cmd.Env = laneEnv(state)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	ti := readTree(t, out)
+	defer func() { killTreeSafe(ti) }()
+	// The inner incoda is tree's parent and leads the group the outer run
+	// opened; tree must sit in that group, not in one of its own.
+	if ti.pgid != ti.ppid {
+		t.Fatalf("nested child should stay in the outer group (pgid %d) but has pgid %d", ti.ppid, ti.pgid)
+	}
+}

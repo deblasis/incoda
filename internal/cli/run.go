@@ -12,7 +12,10 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/child"
+	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/held"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -68,7 +71,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// wraps the whole recipe in run from outside. The parent says which
 	// keys it holds through INCODA_HELD, and a nested run on one of them
 	// rides the parent's ticket instead of queueing behind it.
-	held := heldKeys()
+	//
+	// Inherited lanes come from the environment incoda was started with.
+	// Each entry is probed: dead and malformed ones are dropped, live ones
+	// count for ordering and the process group (L), and only those held by
+	// a verified ancestor are passed through (P).
+	inherited := held.Verify(dir, startGetenv("INCODA_HELD"), procinfo.ParentChain())
+	reportDropped(dir, inherited, *quiet, stderr, p)
+	pass := inherited.PassKeys()
+	live := inherited.LiveKeys()
 	var parts, toTake []*lanePart
 	defer func() {
 		for _, pt := range parts {
@@ -100,7 +111,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if cfg.Slots > 0 && *slots >= 1 && *slots != cfg.Slots {
 			return usagef("%v", lane.NewSlotsDisagreement(key, cfg.Slots, *slots, *exclusive))
 		}
-		if held[key] {
+		if pass[key] {
 			if !*quiet {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", key)))
@@ -116,7 +127,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// other's key until --wait expires. It cannot be prevented from here
 	// (the parent's key is already held), so it is said out loud.
 	for _, pt := range toTake {
-		for h := range held {
+		for h := range live {
 			if pt.key < h && !*quiet {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Yellow(fmt.Sprintf("warning: taking %q while a parent incoda holds %q acquires out of sorted order; two nested runs shaped like this can wait on each other until --wait expires", pt.key, h)))
@@ -127,8 +138,8 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		// Every key is the parent's. Nothing to enroll, nothing to watch:
 		// a kill addressed to the parent takes this process with it.
 		res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
-			Env:      childEnv(startEnv, joinHeld(held, nil)),
-			OwnGroup: len(held) == 0,
+			Env:      childEnv(startEnv, held.Format(inherited.L)),
+			OwnGroup: len(inherited.L) == 0,
 		})
 		if runErr != nil {
 			return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
@@ -316,9 +327,16 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// The held keys reach a nested incoda through the child's environment
 	// only. Setting them on this process would make every later decision
 	// that reads the environment see the child's value.
+	//
+	// The child's INCODA_HELD is every live inherited entry plus this run's
+	// own tickets, set only in the child's environment.
+	own := make([]held.Entry, 0, len(toTake))
+	for _, pt := range toTake {
+		own = append(own, held.Entry{Key: pt.key, Ticket: pt.en.Name()})
+	}
 	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
-		Env:      childEnv(startEnv, joinHeld(held, keys)),
-		OwnGroup: len(held) == 0,
+		Env:      childEnv(startEnv, held.Format(held.Merge(inherited.L, own))),
+		OwnGroup: len(inherited.L) == 0,
 	})
 	close(stopWatch)
 	<-watchDone
@@ -401,33 +419,31 @@ func resolveKeys(explicit string) ([]string, error) {
 	return keys, nil
 }
 
-// heldKeys parses INCODA_HELD from the environment incoda was started with:
-// the comma-separated keys an ancestor incoda holds on this process's behalf.
-func heldKeys() map[string]bool {
-	held := map[string]bool{}
-	for _, k := range strings.Split(startGetenv("INCODA_HELD"), ",") {
-		if k = strings.TrimSpace(k); k != "" {
-			held[k] = true
+// reportDropped prints and logs every inherited entry that is not passed
+// through. A log line is written only to a lane that already exists, so a
+// bogus key in the environment never creates a directory.
+func reportDropped(dir string, r held.Result, quiet bool, stderr io.Writer, p colorize.Palette) {
+	for _, d := range r.Dropped {
+		name := d.Key
+		if name == "" {
+			name = d.Raw
 		}
+		why := string(d.Why)
+		if d.Live {
+			why += "; still counts for ordering"
+		}
+		if !quiet {
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+				p.Yellow(fmt.Sprintf("held-dropped: %s (%s)", textsafe.Escape(name), why)))
+		}
+		if d.Key == "" || !lane.Exists(dir, d.Key) {
+			continue
+		}
+		q, err := lane.Open(dir, d.Key)
+		if err != nil {
+			continue
+		}
+		q.Logf("queue=%s event=held-dropped pid=%d ticket=%s why=%s", d.Key, os.Getpid(), textsafe.LogValue(d.Ticket), d.Why)
+		q.Close()
 	}
-	return held
-}
-
-// joinHeld renders the inherited set plus this run's keys back into
-// INCODA_HELD form, sorted so the value is stable for anyone who logs or
-// compares it.
-func joinHeld(held map[string]bool, keys []string) string {
-	set := map[string]bool{}
-	for k := range held {
-		set[k] = true
-	}
-	for _, k := range keys {
-		set[k] = true
-	}
-	all := make([]string, 0, len(set))
-	for k := range set {
-		all = append(all, k)
-	}
-	sort.Strings(all)
-	return strings.Join(all, ",")
 }
