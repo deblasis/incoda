@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"time"
+
+	"github.com/deblasis/incoda/internal/atomicfile"
 )
 
 const configName = "config.json"
@@ -221,12 +221,7 @@ func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 		if err != nil {
 			return err
 		}
-		path := filepath.Join(q.Dir, configName)
-		tmp := path + ".tmp"
-		if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-			return err
-		}
-		if err := renameRetry(tmp, path); err != nil {
+		if err := atomicfile.Write(filepath.Join(q.Dir, configName), append(b, '\n'), 0o644); err != nil {
 			return err
 		}
 		out = c
@@ -243,20 +238,5 @@ func (q *Queue) SaveConfig(c Config) error {
 		cur.extra = extra
 		return nil
 	})
-	return err
-}
-
-// renameRetry renames, retrying on Windows where a reader holding the file
-// open makes the rename fail for a moment.
-func renameRetry(from, to string) error {
-	var err error
-	for i := 0; i < 10; i++ {
-		if err = os.Rename(from, to); err == nil || runtime.GOOS != "windows" {
-			return err
-		}
-		if i < 9 {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
 	return err
 }
