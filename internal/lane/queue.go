@@ -595,6 +595,35 @@ func (q *Queue) ForceRelease(allowLive bool) (removed int, err error) {
 	return removed, err
 }
 
+// LockAll takes the registry lock of every queue in the order given;
+// callers pass them sorted by key, the lock order of spec 3.1. It returns
+// the function that releases them in reverse order. A registry rebuild
+// uses it to hold every lane still while it checks for tickets and
+// rewrites machine.json.
+func LockAll(qs []*Queue) (func(), error) {
+	var held []*Queue
+	unlock := func() {
+		for i := len(held) - 1; i >= 0; i-- {
+			_ = held[i].registry.Unlock()
+		}
+	}
+	for _, q := range qs {
+		if err := q.registry.Lock(); err != nil {
+			unlock()
+			return nil, fmt.Errorf("registry lock of %q: %w", q.Key, err)
+		}
+		held = append(held, q)
+	}
+	return unlock, nil
+}
+
+// LiveLocked lists the live tickets, reaping dead ones as any scan does.
+// The caller holds this queue's registry lock (LockAll).
+func (q *Queue) LiveLocked() ([]Entry, error) {
+	live, _, err := q.scanLocked(time.Now())
+	return live, err
+}
+
 // ListQueues returns the keys that have state under <stateDir>/lanes.
 func ListQueues(stateDir string) ([]string, error) { return ListIn(LanesDir(stateDir)) }
 

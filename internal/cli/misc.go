@@ -13,7 +13,10 @@ import (
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
+	"github.com/deblasis/incoda/internal/machine"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/sysinfo"
+	"github.com/deblasis/incoda/internal/textsafe"
 	"github.com/deblasis/incoda/internal/tui"
 )
 
@@ -179,8 +182,12 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 }
 
 func cmdDoctor(args []string, stdout, stderr io.Writer) error {
+	start := time.Now()
 	fs := newFlagSet("doctor", stderr)
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
+	rebuild := fs.String("rebuild-registry", "", "a human decision after machine.json was lost or broken: write a new one naming exactly these pools (comma-separated)")
+	wait := &waitValue{d: time.Minute}
+	fs.Var(wait, "wait", "with --rebuild-registry: how long to wait for machine.lock")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for doctor"}
 	}
@@ -222,13 +229,32 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "OS file locking is not usable: %v", err)
 	}
 
-	keys, err := lane.ListQueues(dir)
-	if err == nil {
-		sort.Strings(keys)
-		if len(keys) == 0 {
-			fmt.Fprintln(stdout, p.Dim("queues:    none yet"))
-		} else {
-			fmt.Fprintf(stdout, "%s %s\n", p.Dim("queues:   "), strings.Join(keys, ", "))
+	if *rebuild != "" {
+		var pools []string
+		for _, k := range strings.Split(*rebuild, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				pools = append(pools, k)
+			}
+		}
+		reg, err := machine.Rebuild(dir, pools, machine.Options{
+			Start: start, Wait: wait.d, Poll: 200 * time.Millisecond, Chain: procinfo.ParentChain(),
+			By: "incoda " + v, Stderr: stderr,
+		}, func(key, kind string) { fmt.Fprintf(stdout, "rebuild-registry: %s: %s\n", key, kind) })
+		if err != nil {
+			return machineExit(err)
+		}
+		fmt.Fprintf(stdout, "rebuild-registry: wrote machine.json (generation %d)\n", reg.Generation)
+	}
+
+	if view, err := machine.Inspect(dir); err == nil {
+		keys, err := lane.ListIn(view.Root)
+		if err == nil {
+			sort.Strings(keys)
+			if len(keys) == 0 {
+				fmt.Fprintln(stdout, p.Dim("queues:    none yet"))
+			} else {
+				fmt.Fprintf(stdout, "%s %s\n", p.Dim("queues:   "), strings.Join(keys, ", "))
+			}
 		}
 	}
 	if k := strings.TrimSpace(os.Getenv("INCODA_QUEUE")); k != "" {
@@ -240,7 +266,26 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "%s %s\n", p.Dim("INCODA_QUEUE:"), p.Dim("unset (run needs --queue)"))
 	}
+
+	h := machine.Diagnose(dir)
+	fmt.Fprintf(stdout, "%s %s\n", p.Dim("layout:   "), textsafe.Escape(h.Layout))
+	if h.Fence != "" {
+		fmt.Fprintf(stdout, "%s %s\n", p.Dim("fence:    "), h.Fence)
+	}
+	attention := h.Attention
+	if stateDirSource() == "INCODA_DIR" {
+		attention = append(attention, "INCODA_DIR is set: pools are per state directory, so a caller without it uses other pools")
+	}
+	for _, a := range attention {
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldYellow("attention:"), textsafe.Escape(a))
+	}
+	for _, pr := range h.Problems {
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldRed("problem:  "), textsafe.Escape(pr))
+	}
 	fmt.Fprintf(stdout, "%s\n", p.Dim(sysinfo.MachineLine(sysinfo.ReadMemory(), sysinfo.ReadCPU())))
+	if len(h.Problems) > 0 {
+		return exitWith(ExitState, "machine-state: %d problem(s) make runs fail closed; see the problem: lines above", len(h.Problems))
+	}
 	return nil
 }
 

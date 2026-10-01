@@ -173,3 +173,41 @@ func TestProbeLaneFindsLiveTicketsAndCreatesNothing(t *testing.T) {
 		t.Fatal("ProbeLane created a lane")
 	}
 }
+
+func TestLockAllAndLiveLocked(t *testing.T) {
+	root := t.TempDir()
+	a, err := OpenIn(root, "a", Create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := OpenIn(root, "b", Create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	en, err := a.Enroll(Ticket{Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	unlock, err := LockAll([]*Queue{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	la, err := a.LiveLocked()
+	if err != nil || len(la) != 1 {
+		t.Fatalf("a: %v %v", la, err)
+	}
+	lb, err := b.LiveLocked()
+	if err != nil || len(lb) != 0 {
+		t.Fatalf("b: %v %v", lb, err)
+	}
+	unlock()
+	// Released: an enrollment can take b's registry lock again.
+	enb, err := b.Enroll(Ticket{Command: []string{"y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enb.Release(0)
+}

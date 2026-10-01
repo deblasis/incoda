@@ -47,7 +47,7 @@ usage:
   incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--wait DUR]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
-  incoda doctor
+  incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]
   incoda version
 
 The queue key comes from --queue or the INCODA_QUEUE environment variable.
