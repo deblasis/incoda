@@ -155,3 +155,31 @@ func (t Ticket) CommandString() string {
 }
 
 func ticketPath(dir, name string) string { return filepath.Join(dir, name) }
+
+// ValidTicketName reports whether name is exactly a ticket file name as
+// ticketName writes it: digits, a dash, digits, ".ticket", nothing else. It
+// is checked before a name taken from the environment is joined into a path.
+func ValidTicketName(name string) bool {
+	if _, ok := parseTicketName(name); !ok {
+		return false
+	}
+	base := strings.TrimSuffix(name, ticketExt)
+	for _, r := range base {
+		if (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return strings.Count(base, "-") == 1
+}
+
+// TicketNamePID returns the pid embedded in a valid ticket name.
+func TicketNamePID(name string) (int, bool) {
+	if !ValidTicketName(name) {
+		return 0, false
+	}
+	ord, _ := parseTicketName(name)
+	return ord.pid, true
+}
+
+// TicketFilePath is the path of a ticket file inside a queue directory.
+func TicketFilePath(queueDir, name string) string { return ticketPath(queueDir, name) }

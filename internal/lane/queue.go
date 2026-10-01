@@ -67,6 +67,9 @@ func (q *Queue) Close() error {
 	return q.registry.Close()
 }
 
+// RegistryLockPath is the path of a queue directory's registry lock.
+func RegistryLockPath(queueDir string) string { return filepath.Join(queueDir, registryLockName) }
+
 func (q *Queue) withRegistry(fn func() error) error {
 	if err := q.registry.Lock(); err != nil {
 		return fmt.Errorf("registry lock: %w", err)
@@ -346,6 +349,10 @@ type Enrollment struct {
 
 // Ticket returns a copy of the enrolled ticket payload.
 func (e *Enrollment) Ticket() Ticket { return e.ticket }
+
+// Name is the enrolled ticket's file name, which INCODA_HELD carries so a
+// nested run can probe the exact ticket.
+func (e *Enrollment) Name() string { return e.name }
 
 // ErrTimeout is returned by Acquire when --wait elapses without a free slot.
 var ErrTimeout = errors.New("timed out waiting for a slot")
