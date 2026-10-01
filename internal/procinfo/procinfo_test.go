@@ -23,6 +23,21 @@ func TestParentChainStartsAtParent(t *testing.T) {
 	if pp, err := ParentPID(os.Getpid()); err != nil || pp != os.Getppid() {
 		t.Fatalf("ParentPID(self) = %d, %v", pp, err)
 	}
+	// Every process on darwin/linux descends from pid 1, so a clean walk
+	// must reach it and include it as the last entry.
+	if got := c.PIDs[len(c.PIDs)-1]; got != 1 {
+		t.Fatalf("chain %v should end at pid 1, ends at %d", c.PIDs, got)
+	}
+}
+
+func TestChainContainsPidOne(t *testing.T) {
+	c := Chain{PIDs: []int{42, 7, 1}}
+	if !c.Contains(1) {
+		t.Fatalf("Contains(1) should be true for %v", c.PIDs)
+	}
+	if c.Contains(2) {
+		t.Fatalf("Contains(2) should be false for %v", c.PIDs)
+	}
 }
 
 func TestParentPIDOfMissingProcess(t *testing.T) {

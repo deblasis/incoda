@@ -1,10 +1,14 @@
 package held
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/procinfo"
 )
 
@@ -55,7 +59,63 @@ func TestVerifyUnverifiableWhenChainBroken(t *testing.T) {
 	defer q.Close()
 	defer en.Release(0)
 	r := Verify(state, "uv="+en.Name(), procinfo.Chain{Err: procinfo.ErrUnsupported})
-	if len(r.L) != 1 || len(r.P) != 0 || r.Dropped[0].Why != Unverifiable {
+	if len(r.L) != 1 || len(r.P) != 0 || len(r.Dropped) != 1 || r.Dropped[0].Why != Unverifiable {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+// handTicket creates and locks a ticket file for key whose name embeds this
+// process's pid, writing payload as its JSON body, bypassing Enroll so the
+// payload can be made to disagree with the name. The caller must defer
+// tf.Close() to release the lock.
+func handTicket(t *testing.T, state, key string, payload []byte) (*lane.Queue, string, *lockfile.File) {
+	t.Helper()
+	q, err := lane.Open(state, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("%020d-%d.ticket", time.Now().UnixNano(), os.Getpid())
+	tf, err := lockfile.Open(lane.TicketFilePath(q.Dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := tf.TryLock()
+	if err != nil || !ok {
+		t.Fatalf("lock ticket: ok=%v err=%v", ok, err)
+	}
+	if err := tf.Truncate(payload); err != nil {
+		t.Fatal(err)
+	}
+	return q, name, tf
+}
+
+func TestVerifyPayloadPIDMismatchIsNotAncestor(t *testing.T) {
+	state := t.TempDir()
+	// The ticket name embeds this process's pid; the payload claims a
+	// different one. Verify must distrust the payload's pid rather than
+	// treat a ticket owned by this process (an ancestor) as a pass.
+	payload, err := json.Marshal(lane.Ticket{PID: 999999, Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, name, tf := handTicket(t, state, "mismatch", payload)
+	defer q.Close()
+	defer tf.Close()
+	chain := procinfo.Chain{PIDs: []int{os.Getpid()}}
+	r := Verify(state, "mismatch="+name, chain)
+	if len(r.L) != 1 || len(r.P) != 0 || len(r.Dropped) != 1 || r.Dropped[0].Why != NotAncestor || !r.Dropped[0].Live {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+func TestVerifyUnparseablePayloadIsUnverifiable(t *testing.T) {
+	state := t.TempDir()
+	q, name, tf := handTicket(t, state, "badjson", []byte("not json"))
+	defer q.Close()
+	defer tf.Close()
+	chain := procinfo.Chain{PIDs: []int{os.Getpid()}}
+	r := Verify(state, "badjson="+name, chain)
+	if len(r.L) != 1 || len(r.P) != 0 || len(r.Dropped) != 1 || r.Dropped[0].Why != Unverifiable || !r.Dropped[0].Live {
 		t.Fatalf("got %+v", r)
 	}
 }

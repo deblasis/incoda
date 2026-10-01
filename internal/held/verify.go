@@ -58,6 +58,12 @@ func keys(es []Entry) map[string]bool {
 // lock (the one Enroll and Release hold) and opens files without ever
 // creating them, so it can neither race a ticket into existence nor make a
 // released ticket look alive.
+//
+// The caller must not already hold any lane's registry lock: the probe
+// takes that lock with a blocking Lock call on a freshly opened handle, and
+// a second handle in the same process competing for the same flock (or, on
+// Windows, the same byte-range lock) would self-deadlock rather than see
+// its own earlier lock. Verify is meant to run before any lane is opened.
 func Verify(stateDir, raw string, chain procinfo.Chain) Result {
 	var r Result
 	entries, bad := Parse(raw)
