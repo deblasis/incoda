@@ -45,11 +45,17 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	// kill addresses the layout it finds and never creates a lane: before
+	// the upgrade the request goes under queues/<key>, the path older
+	// binaries poll (spec 3.2). It never migrates or takes machine.lock.
+	_, v, err := readState()
 	if err != nil {
 		return err
 	}
-	q, err := lane.Open(dir, key)
+	q, err := lane.OpenIn(v.Root, key, lane.Existing)
+	if errors.Is(err, os.ErrNotExist) {
+		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
+	}
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
 	}

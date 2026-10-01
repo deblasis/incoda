@@ -38,7 +38,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		return usagef("--interval must be positive")
 	}
 	if !*once && !*plain && !*all && colorize.IsTerminal(stdout) {
-		dir, err := stateDir()
+		dir, _, err := readState()
 		if err != nil {
 			return err
 		}
@@ -73,6 +73,9 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 			clearScreen(stdout)
 		}
 		fmt.Fprintf(stdout, "%s  %s\n\n", p.Bold("incoda watch"), p.Dim(time.Now().Format("15:04:05")))
+		if rep.Banner != "" {
+			fmt.Fprintf(stdout, "%s\n\n", p.Yellow("incoda: "+rep.Banner))
+		}
 		renderReport(stdout, p, rep)
 		if *once {
 			return nil
@@ -94,12 +97,13 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for queues"}
 	}
-	dir, err := stateDir()
+	dir, v, err := readState()
 	if err != nil {
 		return err
 	}
+	printBanner(stderr, v.Banner)
 	p := paletteFor(stdout, *noColor)
-	keys, err := lane.ListQueues(dir)
+	keys, err := lane.ListIn(v.Root)
 	if err != nil {
 		return exitWith(ExitState, "cannot list queues: %v", err)
 	}
@@ -109,8 +113,12 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, p.Dim("no queues have state on this machine yet"))
 		return nil
 	}
+	mode := lane.Existing
+	if !v.Migrated {
+		mode = lane.ReadOnly
+	}
 	for _, k := range keys {
-		q, err := lane.Open(dir, k)
+		q, err := lane.OpenIn(v.Root, k, mode)
 		if err != nil {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
 			continue
@@ -148,15 +156,15 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	_, v, err := readState()
 	if err != nil {
 		return err
 	}
-	if !lane.Exists(dir, key) {
+	if !lane.ExistsIn(v.Root, key) {
 		fmt.Fprintf(stdout, "queue %q has no state on this machine; nothing to release\n", key)
 		return nil
 	}
-	q, err := lane.Open(dir, key)
+	q, err := lane.OpenIn(v.Root, key, lane.Existing)
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
 	}

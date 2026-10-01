@@ -37,6 +37,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if !*asJSON {
+		printBanner(stderr, rep.Banner)
+	}
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -57,26 +60,21 @@ func paletteFor(w io.Writer, noColor bool) colorize.Palette {
 }
 
 func buildReport(queueFlag string, all bool, events int) (*Report, error) {
-	dir, err := stateDir()
+	dir, err := lane.StateDir()
 	if err != nil {
-		return nil, err
+		return nil, exitWith(ExitState, "cannot resolve state directory: %v", err)
 	}
 	var keys []string
-	if all {
-		keys, err = report.Keys(dir)
-		if err != nil {
-			return nil, exitWith(ExitState, "%v", err)
-		}
-	} else {
+	if !all {
 		key, err := resolveKey(queueFlag)
 		if err != nil {
 			return nil, err
 		}
 		keys = []string{key}
 	}
-	rep, err := report.Build(dir, Version, keys, events)
+	rep, err := report.Build(dir, Version, keys, all, events)
 	if err != nil {
-		return nil, exitWith(ExitState, "%v", err)
+		return nil, machineExit(err)
 	}
 	return rep, nil
 }

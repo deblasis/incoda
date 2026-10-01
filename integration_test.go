@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1004,20 +1003,4 @@ func asExitError(err error, target **exec.ExitError) bool {
 		return true
 	}
 	return false
-}
-
-// TestStateLivesUnderLanes: a run keeps its lane under lanes/ and never
-// creates queues/, the path older releases use.
-func TestStateLivesUnderLanes(t *testing.T) {
-	incoda, stamp := binaries(t)
-	state := t.TempDir()
-	if out, code := runIncoda(t, incoda, state, "run", "--queue", "lay", "--quiet", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1"); code != 0 {
-		t.Fatalf("run: exit %d\n%s", code, out)
-	}
-	if _, err := os.Stat(filepath.Join(laneDir(state, "lay"), "lane.log")); err != nil {
-		t.Fatalf("lane.log not under lanes/: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(state, "queues")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("this binary must never create queues/: %v", err)
-	}
 }

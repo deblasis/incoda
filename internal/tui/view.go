@@ -36,7 +36,12 @@ func (m Model) render() string {
 	default:
 		body = m.renderQueue(w)
 	}
-	top := lipgloss.JoinVertical(lipgloss.Left, m.renderHeader(w), m.renderGauge(w), "", body)
+	rows := []string{m.renderHeader(w)}
+	if b := m.renderBanner(w); b != "" {
+		rows = append(rows, b)
+	}
+	rows = append(rows, m.renderGauge(w), "", body)
+	top := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	bottom := m.renderBottom(w)
 	// Fill so the help line sits on the last row whatever the body height.
 	gap := m.height - lipgloss.Height(top) - lipgloss.Height(bottom)
@@ -62,6 +67,15 @@ func (m Model) renderHeader(w int) string {
 		gap = 1
 	}
 	return left + "  " + mid + strings.Repeat(" ", gap) + right
+}
+
+// renderBanner is the banner of a state directory not upgraded yet (spec
+// 3.2): watch shows the old layout read only and says so.
+func (m Model) renderBanner(w int) string {
+	if m.rep == nil || m.rep.Banner == "" {
+		return ""
+	}
+	return m.st.accent.Render(trunc("incoda: "+m.rep.Banner, w))
 }
 
 // renderGauge is the memory readout as a bar, plus a simple CPU percentage

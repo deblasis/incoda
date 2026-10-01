@@ -44,7 +44,7 @@ usage:
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once | --plain]
   incoda queues
-  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open]
+  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--wait DUR]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
   incoda doctor
@@ -66,11 +66,19 @@ directory: $INCODA_DIR, then %LOCALAPPDATA%\incoda (Windows),
 ~/Library/Application Support/incoda (macOS),
 $XDG_STATE_HOME/incoda or ~/.local/state/incoda (Linux).
 
+Lanes live in <state>/lanes/. The first run or config on a state directory
+used by an older incoda upgrades it once: it waits for that incoda's runs
+to finish, then makes <state>/queues a file that stops older binaries
+(exit 122) and registers the machine-wide pools builds, computer-use, tests
+and vm in <state>/machine.json. status, watch and queues never upgrade.
+
 exit codes:
   <child>  run passes the command's own exit status through unchanged
-  120      usage error (bad flags, missing/invalid queue key, refused force-release)
-  121      --wait elapsed while still queued
-  122      state directory or OS file locking unusable
+  120      usage error (bad flags, missing/invalid queue key, refused force-release),
+           or a refusal such as upgrade-blocked
+  121      --wait elapsed while still queued, waiting for machine.lock, or
+           waiting for older incoda runs before the state upgrade
+  122      state directory, machine.json or OS file locking unusable
   123      lane acquired but the command could not be started
   124      the run was killed through the lane (incoda kill); stderr says by whom and why
   125      kill: the participant did not acknowledge in time (rerun with --force)

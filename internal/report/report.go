@@ -5,13 +5,16 @@
 package report
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
 
@@ -30,6 +33,10 @@ type Report struct {
 	Memory         sysinfo.Memory `json:"memory"`
 	CPU            sysinfo.CPU    `json:"cpu"`
 	Queues         []Queue        `json:"queues"`
+	// Banner is the read-only banner of a layout not upgraded yet (spec
+	// 3.2). It is display text, not part of the JSON report; plan 5 adds
+	// the layout fields to status --json.
+	Banner string `json:"-"`
 }
 
 // Queue is one queue inside a Report.
@@ -54,48 +61,63 @@ func StateDirSource() string {
 	return "platform default"
 }
 
-// Keys lists every queue with state under dir, sorted.
-func Keys(dir string) ([]string, error) {
-	keys, err := lane.ListQueues(dir)
+// Build observes the named queues, or every queue with state when all is
+// set, in the layout machine.Inspect finds: lanes/ once migrated, the old
+// queues/ read only before (spec 3.2), so a status on a layout not upgraded
+// yet creates and reaps nothing. A key with no state is reported as free,
+// because a never-used queue is simply free. A broken or lost registry is
+// returned as its *machine.StateError so the caller fails closed.
+func Build(stateDir, version string, keys []string, all bool, events int) (*Report, error) {
+	v, err := machine.Inspect(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot list queues: %w", err)
+		return nil, err
 	}
-	sort.Strings(keys)
-	return keys, nil
-}
-
-// Build observes the named queues under dir. A key with no state is reported
-// as free rather than as an error, because a never-used queue is simply free.
-func Build(dir, version string, keys []string, events int) (*Report, error) {
+	if all {
+		keys, err = lane.ListIn(v.Root)
+		if err != nil {
+			return nil, fmt.Errorf("cannot list queues: %w", err)
+		}
+		sort.Strings(keys)
+	}
+	mode := lane.Existing
+	if !v.Migrated {
+		mode = lane.ReadOnly
+	}
 	host, _ := os.Hostname()
 	rep := &Report{
 		Schema:         1,
 		Version:        version,
-		StateDir:       dir,
+		StateDir:       stateDir,
 		StateDirSource: StateDirSource(),
 		Host:           host,
 		Time:           time.Now().Format(time.RFC3339),
 		Memory:         sysinfo.ReadMemory(),
 		CPU:            sysinfo.ReadCPU(),
 		Queues:         []Queue{},
+		Banner:         v.Banner,
 	}
 	for _, key := range keys {
 		qr := Queue{
 			Key:     key,
-			Dir:     lane.LaneDir(dir, key),
-			Exists:  lane.Exists(dir, key),
+			Dir:     filepath.Join(v.Root, key),
+			Exists:  lane.ExistsIn(v.Root, key),
 			Holders: []lane.Entry{},
 			Waiting: []lane.Entry{},
+		}
+		var q *lane.Queue
+		if qr.Exists {
+			q, err = lane.OpenIn(v.Root, key, mode)
+			if errors.Is(err, os.ErrNotExist) {
+				qr.Exists = false
+			} else if err != nil {
+				return nil, err
+			}
 		}
 		if !qr.Exists {
 			qr.EffectiveSlots = 1
 			qr.Free = true
 			rep.Queues = append(rep.Queues, qr)
 			continue
-		}
-		q, err := lane.Open(dir, key)
-		if err != nil {
-			return nil, err
 		}
 		snap, err := q.Observe(events)
 		q.Close()

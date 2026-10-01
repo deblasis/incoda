@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/proc"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
@@ -47,8 +48,19 @@ func NewLaneKiller(dir string) LaneKiller {
 	return LaneKiller{Dir: dir, By: name, ByPID: os.Getpid()}
 }
 
+// open finds key's lane in the layout the state directory has now (lanes/
+// once migrated, queues/ before) without creating anything: a kill
+// addresses the layout it finds (spec 3.2).
+func (k LaneKiller) open(key string) (*lane.Queue, error) {
+	v, err := machine.Inspect(k.Dir)
+	if err != nil {
+		return nil, err
+	}
+	return lane.OpenIn(v.Root, key, lane.Existing)
+}
+
 func (k LaneKiller) Request(key string, pid int, reason string) error {
-	q, err := lane.Open(k.Dir, key)
+	q, err := k.open(key)
 	if err != nil {
 		return err
 	}
@@ -58,7 +70,7 @@ func (k LaneKiller) Request(key string, pid int, reason string) error {
 }
 
 func (k LaneKiller) Gone(key string, pid int, wait time.Duration) (bool, error) {
-	q, err := lane.Open(k.Dir, key)
+	q, err := k.open(key)
 	if err != nil {
 		return false, err
 	}
@@ -70,7 +82,7 @@ func (k LaneKiller) Force(key string, pid int, reason string) error {
 	if err := proc.Terminate(pid, killedExit); err != nil {
 		return err
 	}
-	q, err := lane.Open(k.Dir, key)
+	q, err := k.open(key)
 	if err != nil {
 		return err
 	}

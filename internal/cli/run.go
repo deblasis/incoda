@@ -29,6 +29,9 @@ type lanePart struct {
 }
 
 func cmdRun(args []string, _, stderr io.Writer) error {
+	// One --wait budget, measured from the start of the command, covers
+	// the machine.lock and migration waits and every lane (spec 2.4).
+	start := time.Now()
 	fs := newFlagSet("run", stderr)
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
 	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
@@ -59,7 +62,8 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	chain := procinfo.ParentChain()
+	dir, err := mutatingState(start, wait.d, *poll, chain, stderr)
 	if err != nil {
 		return err
 	}
@@ -76,7 +80,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// Each entry is probed: dead and malformed ones are dropped, live ones
 	// count for ordering and the process group (L), and only those held by
 	// a verified ancestor are passed through (P).
-	inherited := held.Verify(dir, startGetenv("INCODA_HELD"), procinfo.ParentChain())
+	inherited := held.Verify(dir, startGetenv("INCODA_HELD"), chain)
 	reportDropped(dir, inherited, *quiet, stderr, p)
 	pass := inherited.PassKeys()
 	live := inherited.LiveKeys()
@@ -180,8 +184,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// Keys are taken one at a time in sorted order (resolveKeys sorted
 	// them). Every multi-key caller orders the same way, so two of them can
 	// never each hold what the other waits for: the classic lock-ordering
-	// argument, and the whole reason a list is allowed at all.
-	start := time.Now()
+	// argument, and the whole reason a list is allowed at all. The budget
+	// started with the command, so machine.lock and migration waits above
+	// have already spent part of it.
 	for _, pt := range toTake {
 		en, err := pt.q.Enroll(lane.Ticket{
 			Slots:     *slots,

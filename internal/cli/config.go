@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -17,6 +19,7 @@ import (
 // them and prints the result. The key is positional so that the common
 // shape reads as a sentence: `incoda config wintty-build --slots 2`.
 func cmdConfig(args []string, stdout, stderr io.Writer) error {
+	start := time.Now()
 	explicit := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		explicit, args = args[0], args[1:]
@@ -29,8 +32,10 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	closeMsg := fs.String("close", "", "refuse every run with this message, for a retired key that should name its replacements")
 	open := fs.Bool("open", false, "clear a --close")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
+	wait := &waitValue{d: time.Minute}
+	fs.Var(wait, "wait", "how long to wait for machine.lock and a state upgrade: a Go duration (1m) or bare seconds; negative waits forever")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda config KEY [--slots N] [--description TEXT] [--require-reason[=false]] [--close MSG | --open]\n\n")
+		fmt.Fprintf(stderr, "usage: incoda config KEY [--slots N] [--description TEXT] [--require-reason[=false]] [--close MSG | --open] [--wait DUR]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -60,7 +65,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	dir, err := mutatingState(start, wait.d, 200*time.Millisecond, procinfo.ParentChain(), stderr)
 	if err != nil {
 		return err
 	}
