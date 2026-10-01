@@ -87,6 +87,30 @@ func gone(pid int, d time.Duration) bool {
 	}
 }
 
+// killPid signals pid if it is positive. A zero or negative pid is a tree
+// that never got reported, not something to signal.
+func killPid(pid int) {
+	if pid > 0 {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+// killTreeSafe tears a reported tree down for test cleanup. It only signals
+// the process group when pgid is confirmed to be the child's own (pgid ==
+// pid and positive): a kill(-pgid) run against any other value, including
+// the exact bug this file guards against, where the child never left its
+// parent's group, would signal a foreign group. In that case the group is
+// shared with whatever started the test binary itself, so it falls back to
+// signalling the reported pids individually instead.
+func killTreeSafe(ti treeInfo) {
+	if ti.pgid > 0 && ti.pgid == ti.pid {
+		_ = syscall.Kill(-ti.pgid, syscall.SIGKILL)
+		return
+	}
+	killPid(ti.pid)
+	killPid(ti.grandchild)
+}
+
 // TestTopLevelChildOwnsItsGroup: a top-level run puts its child in a new
 // process group, so the child's pgid is its own pid.
 func TestTopLevelChildOwnsItsGroup(t *testing.T) {
@@ -103,7 +127,7 @@ func TestTopLevelChildOwnsItsGroup(t *testing.T) {
 	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
 
 	ti := readTree(t, out)
-	defer func() { _ = syscall.Kill(-ti.pgid, syscall.SIGKILL) }()
+	defer func() { killTreeSafe(ti) }()
 	if ti.pgid != ti.pid {
 		t.Fatalf("a top-level run's child must lead its own process group: pid %d pgid %d", ti.pid, ti.pgid)
 	}
@@ -122,14 +146,28 @@ func TestKillReachesGrandchild(t *testing.T) {
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// If the test fails before the kill step below reaps the holder itself
+	// (readTree times out, the kill command fails), this cleans it up. Once
+	// the kill step has called holder.Wait() itself, holderWaited skips this:
+	// a second Wait on the same *exec.Cmd is an error, not a safety net.
+	holderWaited := false
+	defer func() {
+		if holderWaited {
+			return
+		}
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	}()
 	ti := readTree(t, out)
-	defer func() { _ = syscall.Kill(ti.grandchild, syscall.SIGKILL) }()
+	defer func() { killPid(ti.grandchild) }()
 
 	msg, code := runIncoda(t, incoda, state, "kill", "--queue", "pgk", "--pid", strconv.Itoa(holder.Process.Pid), "--reason", "test")
 	if code != 0 {
 		t.Fatalf("kill: exit %d\n%s", code, msg)
 	}
-	if got := exitCodeOf(holder.Wait()); got != 124 {
+	waitErr := holder.Wait()
+	holderWaited = true
+	if got := exitCodeOf(waitErr); got != 124 {
 		t.Fatalf("killed holder exits 124, got %d", got)
 	}
 	if !gone(ti.pid, 5*time.Second) {

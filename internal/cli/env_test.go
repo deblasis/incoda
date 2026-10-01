@@ -46,6 +46,7 @@ func TestRunLeavesOwnEnvironmentAlone(t *testing.T) {
 		t.Skip("uses /usr/bin/true")
 	}
 	t.Setenv("INCODA_DIR", t.TempDir())
+	t.Setenv("INCODA_HELD", "")
 	os.Unsetenv("INCODA_HELD")
 	if code := Main([]string{"run", "--queue", "envq", "--quiet", "--", "true"}, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("run exited %d", code)

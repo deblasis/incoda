@@ -68,7 +68,7 @@ func laneEnv(stateDir string) []string {
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		switch strings.ToUpper(k) {
-		case "INCODA_DIR", "INCODA_QUEUE":
+		case "INCODA_DIR", "INCODA_QUEUE", "INCODA_HELD":
 			continue
 		}
 		env = append(env, kv)
