@@ -457,3 +457,79 @@ func TestChanged(t *testing.T) {
 		t.Fatalf("a linked pool that stops resolving fails closed: %v", err)
 	}
 }
+
+// TestChangedEscapesLinkText: pool names in a replan reason come from
+// config.json as stored, so control bytes reach the terminal escaped.
+func TestChangedEscapesLinkText(t *testing.T) {
+	state, reg := machineDir(t, map[string]string{
+		"p-gate": `{"schema":2,"pools":["builds","tests"]}`,
+	})
+	p, err := Make(state, reg, Request{Named: []string{"p-gate"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"schema":2,"pools":["tests","a\u001b[31m\nb"]}`
+	if err := os.WriteFile(filepath.Join(lane.LaneDir(state, "p-gate"), "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	why, err := p.Changed(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `the link of "p-gate" changed: builds,tests -> a\x1b[31m\x0ab,tests`; why != want {
+		t.Fatalf("want %q, got %q", want, why)
+	}
+	if strings.ContainsAny(why, "\x1b\n") {
+		t.Fatalf("raw control byte in %q", why)
+	}
+}
+
+// TestChangedResolvesEveryLinkedPool: with --pool, a linked pool outside
+// the subset that stops resolving still fails closed at a verify point,
+// with the plan-time text.
+func TestChangedResolvesEveryLinkedPool(t *testing.T) {
+	for _, c := range []struct {
+		name, reg, cfg, want string
+	}{
+		{"unreadable config", "", "{", `machine-state: queue "p-gate" links "builds": `},
+		{"left the registry", `{"schema":1,"layout":2,"generation":4,"pools":["computer-use","tests","vm"]}`, "",
+			`machine-state: queue "p-gate" links "builds": it is not a pool on this machine`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, reg := machineDir(t, map[string]string{
+				"p-gate": `{"schema":2,"pools":["builds","tests"]}`,
+			})
+			p, err := Make(state, reg, Request{Named: []string{"p-gate"}, Pool: []string{"tests"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.reg != "" {
+				if err := os.WriteFile(machine.RegistryPath(state), []byte(c.reg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.cfg != "" {
+				if err := os.MkdirAll(lane.LaneDir(state, "builds"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(lane.LaneDir(state, "builds"), "config.json"), []byte(c.cfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var se *machine.StateError
+			if _, err := p.Changed(state); !errors.As(err, &se) || !strings.HasPrefix(se.Msg, c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+// TestReadRegistryGone: a machine.json that disappeared after planning
+// fails closed with the machine-state text.
+func TestReadRegistryGone(t *testing.T) {
+	_, err := ReadRegistry(t.TempDir())
+	var se *machine.StateError
+	if !errors.As(err, &se) || se.Msg != "machine-state: machine.json: it disappeared while this run was planning; run incoda doctor" {
+		t.Fatalf("got %v", err)
+	}
+}

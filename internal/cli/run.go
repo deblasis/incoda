@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -473,7 +474,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		for i := len(toTake) - 1; i >= 0; i-- {
 			pt := toTake[i]
 			if pt.en != nil {
-				pt.q.Logf("queue=%s event=replan pid=%d why=%s", pt.key, os.Getpid(), textsafe.LogValue(why))
+				// why is already escaped (Changed escapes what came from
+				// state); quoting it is what LogValue would make of the
+				// raw text, without escaping it a second time.
+				pt.q.Logf("queue=%s event=replan pid=%d why=%s", pt.key, os.Getpid(), strconv.Quote(why))
 				pt.en.Release(ExitOK)
 			}
 			pt.q.Close()
@@ -488,7 +492,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				"the plan changed and the --wait budget of %s is spent. Check `incoda status`. Do NOT bypass the lane; surface the wait and coordinate instead",
 				wait.d)
 		}
-		if reg, err = machine.ReadRegistry(dir); err != nil {
+		if reg, err = runplan.ReadRegistry(dir); err != nil {
 			return machineExit(err)
 		}
 	}

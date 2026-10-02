@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -242,5 +243,41 @@ func TestReplanSharesTheWaitBudget(t *testing.T) {
 	}
 	if !strings.Contains(laneLog(dir, "f-gate"), "event=replan pid=") {
 		t.Fatalf("no replan logged:\n%s", laneLog(dir, "f-gate"))
+	}
+}
+
+// TestReplanLineEscapesPoolNames: a link rewritten by hand with control
+// bytes in a pool name prints its replan line escaped, and nothing raw
+// reaches the terminal.
+func TestReplanLineEscapesPoolNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /usr/bin/true")
+	}
+	dir := t.TempDir()
+	t.Setenv("INCODA_DIR", dir)
+	if code := Main([]string{"config", "e-gate", "--pool", "tests"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("link: %d", code)
+	}
+	saved := atVerify
+	defer func() { atVerify = saved }()
+	atVerify = func(dir, key string) {
+		if key != "e-gate" {
+			return
+		}
+		body := `{"schema":2,"pools":["a\u001b[31m\nb"]}`
+		if err := os.WriteFile(filepath.Join(lane.LaneDir(dir, "e-gate"), "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stderr bytes.Buffer
+	code := Main([]string{"run", "--queue", "e-gate", "--", "true"}, io.Discard, &stderr)
+	if code != ExitState || !strings.Contains(stderr.String(), `incoda: replan: the link of "e-gate" changed: tests -> a\x1b[31m\x0ab`+"\n") {
+		t.Fatalf("want 122 and the escaped replan line, got %d:\n%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "\x1b") {
+		t.Fatalf("raw ESC on stderr: %q", stderr.String())
+	}
+	if !strings.Contains(laneLog(dir, "e-gate"), `why="the link of \"e-gate\" changed: tests -> a\\x1b[31m\\x0ab"`) {
+		t.Fatalf("lane.log:\n%s", laneLog(dir, "e-gate"))
 	}
 }

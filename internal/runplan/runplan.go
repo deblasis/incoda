@@ -322,10 +322,7 @@ func reasonRefusal(l Lane) *machine.Refusal {
 // Every pool the plan reaches through a link must still resolve; one that
 // does not fails closed with machine-state, as at plan time.
 func (p *Plan) Changed(stateDir string) (string, error) {
-	reg, err := machine.ReadRegistry(stateDir)
-	if errors.Is(err, machine.ErrNoRegistry) {
-		return "", &machine.StateError{Msg: "machine-state: machine.json: it disappeared while this run was planning; run incoda doctor"}
-	}
+	reg, err := ReadRegistry(stateDir)
 	if err != nil {
 		return "", err
 	}
@@ -344,26 +341,43 @@ func (p *Plan) Changed(stateDir string) (string, error) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	links := make(map[string][]string, len(keys))
 	for _, k := range keys {
 		cfg, err := readConfig(stateDir, k)
 		if err != nil {
 			return "", err
 		}
 		was, now := p.Links[k], machine.SortedSet(cfg.Pools)
+		links[k] = now
 		if machine.SameSet(was, now) {
 			continue
 		}
 		if p.Pool != nil && len(was) > 0 && len(now) > 0 && machine.Subset(p.Pool, now) {
 			continue
 		}
-		return fmt.Sprintf("the link of %q changed: %s -> %s", k, machine.SetText(was), machine.SetText(now)), nil
+		// Pool names here come from config.json as stored, not validated
+		// keys: they are escaped before they reach a terminal.
+		return fmt.Sprintf("the link of %q changed: %s -> %s", k,
+			textsafe.Escape(machine.SetText(was)), textsafe.Escape(machine.SetText(now))), nil
 	}
-	for _, l := range p.Lanes {
-		if l.Pool && len(l.Via) > 0 {
-			if _, err := resolvePool(stateDir, reg, l.Via[0], l.Key); err != nil {
+	// Every pool of every named key's link must still resolve, as at plan
+	// time, including linked pools outside the run's --pool subset.
+	for _, k := range keys {
+		for _, pool := range links[k] {
+			if _, err := resolvePool(stateDir, reg, k, pool); err != nil {
 				return "", err
 			}
 		}
 	}
 	return "", nil
+}
+
+// ReadRegistry reads machine.json for a run that has already planned: a
+// machine.json that disappeared since fails closed with machine-state.
+func ReadRegistry(stateDir string) (*machine.Registry, error) {
+	reg, err := machine.ReadRegistry(stateDir)
+	if errors.Is(err, machine.ErrNoRegistry) {
+		return nil, &machine.StateError{Msg: "machine-state: machine.json: it disappeared while this run was planning; run incoda doctor"}
+	}
+	return reg, err
 }
