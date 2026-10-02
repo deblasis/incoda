@@ -17,16 +17,18 @@ import (
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
+	"github.com/deblasis/incoda/internal/runplan"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
-// lanePart is one key of a run: its queue handle and, once enrolled, the
-// ticket. A single-key run is the list with one element.
+// lanePart is one lane of a run: its place in the plan, its queue handle
+// and, once enrolled, the ticket. A single-key run without links is the
+// list with one element.
 type lanePart struct {
+	l   runplan.Lane
 	key string
 	q   *lane.Queue
 	en  *lane.Enrollment
-	cfg lane.Config
 }
 
 func cmdRun(args []string, _, stderr io.Writer) error {
@@ -69,13 +71,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return err
 	}
 
-	// Every queue is opened and its config checked before any ticket
-	// exists, so a closed or reason-requiring key refuses with nothing to
-	// undo. Keys already held by a parent incoda are skipped (re-entrancy):
-	// a recipe that takes its own lane must not deadlock when an agent
-	// wraps the whole recipe in run from outside. The parent says which
-	// keys it holds through INCODA_HELD, and a nested run on one of them
-	// rides the parent's ticket instead of queueing behind it.
+	// The plan (runplan) is the lane set in its total order, with every
+	// rule checked before any ticket exists and before any lane is opened,
+	// so a closed or reason-requiring lane refuses with nothing to undo and
+	// a typo leaves nothing behind. Lanes already held by a parent incoda
+	// are skipped (re-entrancy): a recipe that takes its own lane must not
+	// deadlock when an agent wraps the whole recipe in run from outside.
+	// The parent says which lanes it holds through INCODA_HELD, and a
+	// nested run on one of them rides the parent's ticket instead of
+	// queueing behind it.
 	//
 	// Inherited lanes come from the environment incoda was started with.
 	// Each entry is probed: dead and malformed ones are dropped, live ones
@@ -85,14 +89,28 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	reportDropped(dir, inherited, *quiet, stderr, p)
 	pass := inherited.PassKeys()
 	live := inherited.LiveKeys()
+	plan, err := runplan.Make(dir, reg, runplan.Request{
+		Named: keys, Slots: *slots, Exclusive: *exclusive, Reason: *reason, Held: pass,
+	})
+	if err != nil {
+		return machineExit(err)
+	}
 	var parts, toTake []*lanePart
 	defer func() {
 		for _, pt := range parts {
 			pt.q.Close()
 		}
 	}()
-	for _, key := range keys {
-		q, err := lane.Open(dir, key)
+	for _, l := range plan.Lanes {
+		if pass[l.Key] {
+			if !*quiet {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+					p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", l.Key)))
+			}
+			lane.AppendLog(lane.LaneDir(dir, l.Key), "queue=%s event=reenter pid=%d cmd=%s", l.Key, os.Getpid(), textsafe.LogValue(lane.Ticket{Command: argv}.CommandString()))
+			continue
+		}
+		q, err := lane.Open(dir, l.Key)
 		if err != nil {
 			return exitWith(ExitState, "%v", err)
 		}
@@ -100,44 +118,18 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		// budget: a stopped incoda keeping a registry lock costs this run
 		// its budget, never more.
 		q.SetBudget(start, wait.d)
-		pt := &lanePart{key: key, q: q}
+		pt := &lanePart{l: l, key: l.Key, q: q}
 		parts = append(parts, pt)
-		cfg, err := q.LoadConfig()
-		var ns *lane.NewerSchemaError
-		if errors.As(err, &ns) {
-			return exitWith(ExitState, "machine-state: %v", err)
-		}
-		if err != nil {
-			return exitWith(ExitState, "queue %q: %v", key, err)
-		}
-		pt.cfg = cfg
-		if cfg.Closed != "" {
-			return usagef("queue %q is closed: %s", key, textsafe.Escape(cfg.Closed))
-		}
-		if cfg.RequireReason && strings.TrimSpace(*reason) == "" {
-			return usagef("queue %q requires --reason: say what this job is so status can answer \"whose is that and why\"", key)
-		}
-		if cfg.Slots > 0 && *slots >= 1 && *slots != cfg.Slots {
-			return usagef("%v", lane.NewSlotsDisagreement(key, cfg.Slots, *slots, *exclusive))
-		}
-		if pass[key] {
-			if !*quiet {
-				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-					p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", key)))
-			}
-			q.Logf("queue=%s event=reenter pid=%d cmd=%s", key, os.Getpid(), textsafe.LogValue(lane.Ticket{Command: argv}.CommandString()))
-			continue
-		}
 		toTake = append(toTake, pt)
 	}
-	// The sorted-order argument that makes multi-key runs deadlock-free
-	// stops at a nested run: a parent holding "b" whose recipe now takes "a"
-	// is acquiring out of order, and two such parents can each wait on the
-	// other's key until --wait expires. It cannot be prevented from here
-	// (the parent's key is already held), so it is said out loud.
+	// The total order that makes multi-lane runs deadlock-free stops at a
+	// nested run: a parent holding "b" whose recipe now takes "a" is
+	// acquiring out of order, and two such parents can each wait on the
+	// other's lane until --wait expires. It cannot be prevented from here
+	// (the parent's lane is already held), so it is said out loud.
 	for _, pt := range toTake {
 		for h := range live {
-			if pt.key < h && !*quiet {
+			if runplan.Less(pt.l, runplan.Lane{Key: h, Pool: reg.IsPool(h)}) && !*quiet {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Yellow(fmt.Sprintf("warning: taking %q while a parent incoda holds %q acquires out of sorted order; two nested runs shaped like this can wait on each other until --wait expires", pt.key, h)))
 			}
@@ -186,12 +178,14 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), interruptSignals()...)
 	defer stop()
 
-	// Keys are taken one at a time in sorted order (resolveKeys sorted
-	// them). Every multi-key caller orders the same way, so two of them can
-	// never each hold what the other waits for: the classic lock-ordering
-	// argument, and the whole reason a list is allowed at all. The budget
-	// started with the command, so machine.lock and migration waits above
-	// have already spent part of it.
+	// Lanes are taken one at a time in the plan's total order: project
+	// lanes sorted by key, then pools sorted by key (spec 2.4). Every run
+	// orders the same way, so two of them can never each hold what the
+	// other waits for: the classic lock-ordering argument. A lane is
+	// enrolled only once the one before it is held; enrolling them all and
+	// then waiting would let a waiting ticket block later arrivals. The
+	// budget started with the command, so machine.lock and migration waits
+	// above have already spent part of it.
 	for _, pt := range toTake {
 		// Enroll's wait for the registry lock ends on an interrupt too, and
 		// says once why it waits when another process keeps that lock (a
@@ -207,15 +201,25 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 				p.Yellow(fmt.Sprintf("queue %q: registry lock held by another process; waiting (%s)", pt.key, textsafe.Escape(limit))))
 		}
-		en, err := pt.q.EnrollContext(ctx, lane.Ticket{
-			Slots:     *slots,
-			Exclusive: *exclusive,
+		t := lane.Ticket{
+			// --exclusive holds a lane the run names; it does not
+			// propagate to the pools a link brings (spec 2.4).
+			Exclusive: *exclusive && (pt.l.Named || !pt.l.Pool),
 			Command:   argv,
 			Reason:    *reason,
 			Owner:     *owner,
 			Hostname:  host,
 			Dir:       cwd,
-		}, busy)
+			Via:       pt.l.Via,
+			Wait:      wait.raw,
+		}
+		if !pt.l.Pool {
+			// --slots applies to named project lanes only. A pool ticket
+			// carries the pool's configured count; the plan has already
+			// refused a --slots that disagrees with a named pool.
+			t.Slots = *slots
+		}
+		en, err := pt.q.EnrollContext(ctx, t, busy)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				rc = ExitInterrupt
@@ -255,6 +259,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 		}
 		key := pt.key
+		role := pt.l.Role()
 		// On a pool, unpooled runs of an older incoda (strays and orphan
 		// records, spec 2.3) hold slots too. Each poll rescans them,
 		// deletes stray lanes that have fully died, and refuses at once
@@ -327,9 +332,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				if ahead < 0 {
 					ahead = len(live)
 				}
+				// A pool's busy line names its role (spec 5.1); a project
+				// lane's line is unchanged.
+				rolePart := ""
+				if role != "" {
+					rolePart = role + "; "
+				}
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-					p.Yellow(fmt.Sprintf("queue %q busy (%d slot(s), %d ahead of you), waited %s%s",
-						key, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))))
+					p.Yellow(fmt.Sprintf("queue %q busy (%s%d slot(s), %d ahead of you), waited %s%s",
+						key, rolePart, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))))
 				for i, e := range live {
 					if i >= effSlots {
 						break
@@ -340,7 +351,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 						continue
 					}
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
-						p.Dim(fmt.Sprintf("holder pid %d in %s: %s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()))))
+						p.Dim(fmt.Sprintf("holder pid %d in %s: %s%s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()), viaText(e.Ticket.Via))))
 				}
 				for _, u := range unpooled {
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"), p.Dim(u.Line()))
@@ -371,9 +382,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			if errors.Is(acqErr, lane.ErrTimeout) {
 				rc = ExitTimeout
 				pt.q.Logf("queue=%s event=giveup pid=%d waited=%s", key, os.Getpid(), wait.d)
+				named := fmt.Sprintf("queue %q", key)
+				if role != "" {
+					named += " (" + role + ")"
+				}
 				return exitWith(ExitTimeout,
-					"queue %q still busy after %s. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead",
-					key, wait.d, key)
+					"%s still busy after %s. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead",
+					named, wait.d, pt.l.StatusKey())
 			}
 			rc = ExitState
 			return exitWith(ExitState, "%v", acqErr)
@@ -385,15 +400,18 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// config floors the effective width regardless. On a queue with
 			// no configured count the minimum still rules.
 			inForce := "the smallest value is in force"
-			if pt.cfg.Slots > 0 {
-				inForce = fmt.Sprintf("the configured %d is in force", pt.cfg.Slots)
+			if pt.l.Cfg.Slots > 0 {
+				inForce = fmt.Sprintf("the configured %d is in force", pt.l.Cfg.Slots)
 			}
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 				p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; %s", key, inForce)))
 		}
 		if !*quiet {
-			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-				p.Green(fmt.Sprintf("acquired queue %q (pid %d)", key, os.Getpid())))
+			what := fmt.Sprintf("acquired queue %q (pid %d)", key, os.Getpid())
+			if role != "" {
+				what = fmt.Sprintf("acquired queue %q (%s; pid %d)", key, role, os.Getpid())
+			}
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Green(what))
 		}
 	}
 
@@ -465,6 +483,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return &exitCode{code: res.Code}
 	}
 	return nil
+}
+
+// viaText is the " via <keys>" a holder line of a pool ticket ends with
+// (spec 5.1); empty for a ticket taken directly.
+func viaText(via []string) string {
+	if len(via) == 0 {
+		return ""
+	}
+	return " via " + strings.Join(via, ",")
 }
 
 // waitingCheck is the per-poll config check of a waiting run: closed while

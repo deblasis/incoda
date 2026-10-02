@@ -38,6 +38,12 @@ type Ticket struct {
 	Owner    string `json:"owner,omitempty"`
 	Hostname string `json:"hostname"`
 	Dir      string `json:"cwd"`
+	// Via are, on a pool ticket, the run's named project keys that link to
+	// the pool (spec 2.7); empty when the run names the pool directly.
+	// Status and watch group pool holders by it.
+	Via []string `json:"via,omitempty"`
+	// Wait is the run's --wait as given; empty when it was not given.
+	Wait string `json:"wait,omitempty"`
 }
 
 // attribution is the k=v block every lifecycle line (enqueue/acquire/release)

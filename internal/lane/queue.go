@@ -564,6 +564,9 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	if en.ticket.Exclusive {
 		extra += " exclusive=true"
 	}
+	if len(en.ticket.Via) > 0 {
+		extra += " via=" + strings.Join(en.ticket.Via, ",")
+	}
 	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), textsafe.LogValue(en.ticket.CommandString()))
 	return en, nil
 }

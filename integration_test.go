@@ -912,10 +912,13 @@ func TestChildProcessTreeDiesWithIncoda(t *testing.T) {
 // ---- helpers ----
 
 type ticketPayload struct {
-	PID     int      `json:"pid"`
-	Slots   int      `json:"slots"`
-	Command []string `json:"command"`
-	Dir     string   `json:"cwd"`
+	PID       int      `json:"pid"`
+	Slots     int      `json:"slots"`
+	Exclusive bool     `json:"exclusive"`
+	Command   []string `json:"command"`
+	Dir       string   `json:"cwd"`
+	Via       []string `json:"via"`
+	Wait      string   `json:"wait"`
 }
 
 type entry struct {

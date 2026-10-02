@@ -200,6 +200,9 @@ func stateDir() (string, error) {
 type waitValue struct {
 	d   time.Duration
 	set bool
+	// raw is the value as given, recorded on tickets (spec 2.7) and
+	// repeated in printed fix lines.
+	raw string
 }
 
 func (w *waitValue) String() string {
@@ -214,6 +217,7 @@ func (w *waitValue) Set(s string) error {
 	if s == "" {
 		return errors.New("empty duration")
 	}
+	w.raw = s
 	if n, err := strconv.Atoi(s); err == nil {
 		if n < 0 {
 			w.d, w.set = -1, true
