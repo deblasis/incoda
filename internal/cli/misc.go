@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -224,6 +225,14 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for doctor"}
 	}
+	rebuildSet, waitSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		rebuildSet = rebuildSet || f.Name == "rebuild-registry"
+		waitSet = waitSet || f.Name == "wait"
+	})
+	if waitSet && !rebuildSet {
+		return usagef("doctor: --wait applies only to --rebuild-registry")
+	}
 	p := paletteFor(stdout, *noColor)
 
 	v, c, d := versionInfo()
@@ -254,7 +263,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "OS file locking is not usable: %v", err)
 	}
 
-	if *rebuild != "" {
+	if rebuildSet {
 		var pools []string
 		for _, k := range strings.Split(*rebuild, ",") {
 			if k = strings.TrimSpace(k); k != "" {
@@ -292,12 +301,39 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "%s %s\n", p.Dim("INCODA_QUEUE:"), p.Dim("unset (run needs --queue)"))
 	}
 
+	// doctor deletes stray lane directories whose tickets have all died
+	// (spec 2.3), but only on a migrated layout: during a migration
+	// strays/ belongs to M5 and M6.
+	cleanErr := ""
+	if view, err := machine.Inspect(dir); err == nil && view.Migrated {
+		if err := machine.CleanStrays(dir); err != nil {
+			cleanErr = "cannot clean strays/: " + textsafe.Escape(err.Error())
+		}
+	}
 	h := machine.Diagnose(dir)
 	fmt.Fprintf(stdout, "%s %s\n", p.Dim("layout:   "), textsafe.Escape(h.Layout))
 	if h.Fence != "" {
 		fmt.Fprintf(stdout, "%s %s\n", p.Dim("fence:    "), h.Fence)
 	}
-	attention := h.Attention
+	for _, list := range []struct {
+		label string
+		lines []string
+	}{{"strays:   ", h.Strays}, {"orphans:  ", h.Orphans}} {
+		if len(list.lines) == 0 {
+			fmt.Fprintf(stdout, "%s none\n", p.Dim(list.label))
+		}
+		for _, l := range list.lines {
+			fmt.Fprintf(stdout, "%s %s\n", p.Dim(list.label), l)
+		}
+	}
+	pathLines, pathAttention := machine.PathVersionLines(startGetenv("PATH"), "", v)
+	for _, l := range pathLines {
+		fmt.Fprintf(stdout, "%s %s\n", p.Dim("on PATH:  "), l)
+	}
+	attention := append(h.Attention, pathAttention...)
+	if cleanErr != "" {
+		attention = append(attention, cleanErr)
+	}
 	if stateDirSource() == "INCODA_DIR" {
 		attention = append(attention, "INCODA_DIR is set: it is a MACHINE-level override, not a per-project one; it splits pools across state directories, so a caller without it set uses a different state directory, forms separate lanes, and stops serialising against this one")
 	}

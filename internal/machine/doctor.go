@@ -3,15 +3,18 @@ package machine
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
-// Health is doctor's reading of the layout: the parts of spec 5.5 that
-// exist with layout 2. PATH versions, strays, orphan records and stopped
-// holders are added by plan 2b.
+// Health is doctor's reading of the state directory (spec 5.5): the
+// layout, the fence, strays/, orphan records, live unpooled holders and
+// stopped holders. PATH versions are read by PathVersionLines.
 //
 // Every string in Problems and Attention is already escaped for display
 // (textsafe.Escape applied once, here, to whatever came from state, a file
@@ -22,6 +25,10 @@ type Health struct {
 	Layout string
 	// Fence is "present" or "missing" on a migrated layout, else empty.
 	Fence string
+	// Strays describes each lane directory left under strays/; Orphans
+	// each record under orphans/. Both are empty when there are none.
+	Strays  []string
+	Orphans []string
 	// Problems make runs fail closed: doctor exits 122.
 	Problems []string
 	// Attention items are printed; doctor still exits 0.
@@ -50,6 +57,7 @@ func Diagnose(stateDir string) Health {
 			h.Problems = append(h.Problems, fmt.Sprintf("fence missing: %s is not a regular file, so an older incoda can run outside the pools; the next run or config re-places it", textsafe.Escape(lane.QueuesDir(stateDir))))
 		}
 		h.Attention = append(h.Attention, unreadableConfigs(stateDir)...)
+		describeHolders(stateDir, &h, lane.LanesDir(stateDir), true)
 	case !errors.Is(err, ErrNoRegistry):
 		h.Layout = "2 (machine.json unusable)"
 		h.Problems = append(h.Problems, strings.TrimPrefix(err.Error(), "machine-state: "))
@@ -57,15 +65,23 @@ func Diagnose(stateDir string) Health {
 		switch row := st.row(); row {
 		case RowRegistryLost:
 			h.Layout = "2 (machine.json missing)"
-			h.Problems = append(h.Problems, "machine.json: missing while lanes/ exists; nothing re-creates it on its own. A human decides which lanes are pools and runs: incoda doctor --rebuild-registry builds,computer-use,tests,vm")
+			keys, _ := lane.ListQueues(stateDir)
+			sort.Strings(keys)
+			lanes := "none"
+			if len(keys) > 0 {
+				lanes = strings.Join(keys, ", ")
+			}
+			h.Problems = append(h.Problems, fmt.Sprintf("machine.json: missing while lanes/ exists; nothing re-creates it on its own. Lanes: %s. A human decides which of them are pools and runs: incoda doctor --rebuild-registry POOL,POOL", lanes))
 		case RowNotStarted:
 			if st.Queues == aDir {
 				h.Layout = "1 (queues/)"
 				h.Attention = append(h.Attention, banner(stateDir))
+				describeHolders(stateDir, &h, lane.QueuesDir(stateDir), false)
 			} else {
 				h.Layout = "none yet (the next mutating incoda command creates layout 2)"
 			}
 		default:
+			describeHolders(stateDir, &h, unmigratedRoot(stateDir, st), false)
 			h.Layout = "upgrade unfinished"
 			if _, ok := migrationNote(stateDir); ok {
 				h.Problems = append(h.Problems, fmt.Sprintf("migration in progress (%s): %s", row, banner(stateDir)))
@@ -88,4 +104,64 @@ func unreadableConfigs(stateDir string) []string {
 		}
 	}
 	return out
+}
+
+// describeHolders fills in strays/, orphans/, the live unpooled holders
+// (on a migrated layout) and every live ticket holder in the stopped state
+// (spec 5.5). root is where the lanes are now. It only reads.
+func describeHolders(stateDir string, h *Health, root string, migrated bool) {
+	batches, _ := lane.ListIn(StraysDir(stateDir))
+	sort.Strings(batches)
+	for _, b := range batches {
+		keys, _ := lane.ListIn(filepath.Join(StraysDir(stateDir), b))
+		for _, k := range keys {
+			live, err := lane.ProbeLane(filepath.Join(StraysDir(stateDir), b, k))
+			if err != nil {
+				h.Strays = append(h.Strays, fmt.Sprintf("%s/%s: cannot probe (%s)", b, k, esc(err)))
+				continue
+			}
+			h.Strays = append(h.Strays, fmt.Sprintf("%s/%s: %d live ticket(s)", b, k, len(live)))
+		}
+	}
+	recs, bad, _ := ReadOrphans(stateDir)
+	for _, o := range recs {
+		state := "its job has exited; incoda force-release --queue " + o.Key + " deletes the record"
+		if o.Live() {
+			state = "its job still runs (pids " + o.pidList() + ")"
+		}
+		h.Orphans = append(h.Orphans, fmt.Sprintf("%s: key %s, older incoda pid %d: %s", textsafe.Escape(o.File), o.Key, o.PID, state))
+	}
+	for _, b := range bad {
+		h.Orphans = append(h.Orphans, fmt.Sprintf("%s: unreadable (%s); delete it once you have checked that its job is gone", textsafe.Escape(b.File), esc(b.Err)))
+	}
+	var holders []Holder
+	if migrated {
+		us, err := ScanUnpooled(stateDir, false)
+		if err != nil {
+			h.Attention = append(h.Attention, fmt.Sprintf("cannot scan for unpooled runs: %s", esc(err)))
+		}
+		for _, u := range us {
+			h.Attention = append(h.Attention, fmt.Sprintf("%s (%s): %s; new runs on its pools wait for it", u.Line(), u.Where, u.Command))
+			if u.Where != "orphans" {
+				holders = append(holders, Holder{Key: u.Key, PID: u.PID})
+			}
+		}
+	}
+	keys, _ := lane.ListIn(root)
+	for _, k := range keys {
+		live, _ := lane.ProbeLane(filepath.Join(root, k))
+		for _, p := range live {
+			holders = append(holders, Holder{Key: k, PID: p.PID()})
+		}
+	}
+	seen := map[int]bool{}
+	for _, hd := range holders {
+		if seen[hd.PID] {
+			continue
+		}
+		seen[hd.PID] = true
+		if s, err := procinfo.Stopped(hd.PID); err == nil && s {
+			h.Attention = append(h.Attention, StoppedLines(hd.Key, hd.PID)...)
+		}
+	}
 }

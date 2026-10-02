@@ -32,6 +32,26 @@ func checkPath(o Options) {
 // empty PATH entry is the current directory, as exec.LookPath reads it.
 // Nothing is executed.
 func OtherIncodas(path, self string) []string {
+	var out []string
+	for _, e := range IncodasOnPath(path, self) {
+		if !e.Self {
+			out = append(out, e.Path)
+		}
+	}
+	return out
+}
+
+// PathIncoda is one incoda found on PATH.
+type PathIncoda struct {
+	Path string
+	// Self is set when it is the same file as this binary.
+	Self bool
+}
+
+// IncodasOnPath lists, in PATH order, every executable regular file named
+// incoda (incoda.exe on Windows) in a PATH directory, marking the one that
+// is this binary. Nothing is executed.
+func IncodasOnPath(path, self string) []PathIncoda {
 	if self == "" {
 		self, _ = os.Executable()
 	}
@@ -44,7 +64,7 @@ func OtherIncodas(path, self string) []string {
 		name = "incoda.exe"
 	}
 	seen := map[string]bool{}
-	var out []string
+	var out []PathIncoda
 	for _, dir := range filepath.SplitList(path) {
 		if dir == "" {
 			dir = "."
@@ -62,10 +82,7 @@ func OtherIncodas(path, self string) []string {
 		if err != nil || !fi.Mode().IsRegular() || (runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0) {
 			continue
 		}
-		if selfInfo != nil && os.SameFile(fi, selfInfo) {
-			continue
-		}
-		out = append(out, p)
+		out = append(out, PathIncoda{Path: p, Self: selfInfo != nil && os.SameFile(fi, selfInfo)})
 	}
 	return out
 }

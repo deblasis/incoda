@@ -539,6 +539,11 @@ func TestStoppedHolderShownAndRecoveredByRerun(t *testing.T) {
 	if code != 0 || !strings.HasSuffix(out, want) {
 		t.Fatalf("want %q at the end of status, got %d:\n%s", want, code, out)
 	}
+	out, code = doctor(t, incoda, state)
+	if code != 0 || !strings.Contains(out, "attention: "+strings.Split(want, "\n")[0]+"\n") ||
+		!strings.Contains(out, "attention:   or resume it instead: kill -CONT "+p+"\n") {
+		t.Fatalf("doctor must flag the stopped holder, got %d:\n%s", code, out)
+	}
 	out, code = runIncoda(t, incoda, state, "kill", "--queue", "stp", "--pid", p, "--reason", "resume interrupted kill", "--wait", "0", "--force")
 	if code != 0 {
 		t.Fatalf("the rerun must recover: %d\n%s", code, out)

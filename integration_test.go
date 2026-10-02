@@ -829,7 +829,7 @@ func TestDoctorAndVersionAndQueues(t *testing.T) {
 	state := t.TempDir()
 
 	cmd := exec.Command(incoda, "doctor")
-	cmd.Env = laneEnv(state)
+	cmd.Env = doctorEnv(state, t.TempDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("doctor failed: %v\n%s", err, out)

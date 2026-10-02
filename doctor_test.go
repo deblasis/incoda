@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -10,9 +11,35 @@ import (
 	"github.com/deblasis/incoda/internal/machine"
 )
 
+// doctorEnv is laneEnv with PATH set to path. doctor runs every incoda it
+// finds on PATH (its version probe), so no test may let it see the PATH
+// the tests run with.
+func doctorEnv(state, path string) []string {
+	var env []string
+	for _, kv := range laneEnv(state) {
+		if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "PATH") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "PATH="+path)
+}
+
+// doctor runs incoda doctor with an empty PATH.
 func doctor(t *testing.T, incoda, state string, args ...string) (string, int) {
 	t.Helper()
-	return runIncoda(t, incoda, state, append([]string{"doctor", "--no-color"}, args...)...)
+	return doctorWithPath(t, incoda, state, t.TempDir(), args...)
+}
+
+func doctorWithPath(t *testing.T, incoda, state, path string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(incoda, append([]string{"doctor", "--no-color"}, args...)...)
+	cmd.Env = doctorEnv(state, path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), exitCodeOf(err)
+	}
+	return string(out), 0
 }
 
 func mustContain(t *testing.T, out string, wants ...string) {
@@ -133,7 +160,7 @@ func TestDoctorReportsTheLayout(t *testing.T) {
 		if code != 122 {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
-		mustContain(t, out, "problem:   machine.json: missing while lanes/ exists; nothing re-creates it on its own. A human decides which lanes are pools and runs: incoda doctor --rebuild-registry builds,computer-use,tests,vm\n")
+		mustContain(t, out, "problem:   machine.json: missing while lanes/ exists; nothing re-creates it on its own. Lanes: alpha, bad, builds, cap-gate, computer-use, old, tests, vm. A human decides which of them are pools and runs: incoda doctor --rebuild-registry POOL,POOL\n")
 	})
 }
 
@@ -195,5 +222,57 @@ func TestDoctorEscapesProblemsOnce(t *testing.T) {
 	}
 	if strings.Contains(out, `a\\\\b`) {
 		t.Fatalf("the backslash was escaped twice:\n%s", out)
+	}
+}
+
+func TestDoctorRefusesBadFlagCombinations(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := doctor(t, incoda, state, "--rebuild-registry="); code != 120 ||
+		!strings.Contains(out, "incoda: rebuild-registry: name at least one pool, for example builds,computer-use,tests,vm\n") {
+		t.Fatalf("an empty --rebuild-registry is refused: %d\n%s", code, out)
+	}
+	if out, code := doctor(t, incoda, state, "--wait", "5s"); code != 120 ||
+		!strings.Contains(out, "incoda: doctor: --wait applies only to --rebuild-registry\n") {
+		t.Fatalf("--wait alone is refused: %d\n%s", code, out)
+	}
+}
+
+// TestDoctorReportsStraysOrphansAndUnpooledHolders: doctor deletes the
+// stray lanes whose tickets all died, lists what is left and every orphan
+// record, and names the live unpooled holders as attention items.
+func TestDoctorReportsStraysOrphansAndUnpooledHolders(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "seed"); code != 0 {
+		t.Fatalf("migrate: %d\n%s", code, out)
+	}
+	holdOldTicket(t, filepath.Join(machine.StraysDir(state), "1"), "builds", 999999, "zig", "build")
+	holdOldTicket(t, filepath.Join(machine.StraysDir(state), "2"), "done", 999997, "x")()
+	if err := os.MkdirAll(machine.OrphansDir(state), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machine.OrphansDir(state), "999990-1.orphan"),
+		[]byte(`{"key":"tests","pid":999990,"descendants":[],"groups":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machine.OrphansDir(state), "junk.orphan"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := doctor(t, incoda, state)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	mustContain(t, out,
+		"strays:    1/builds: 1 live ticket(s)\n",
+		"orphans:   999990-1.orphan: key tests, older incoda pid 999990: its job has exited; incoda force-release --queue tests deletes the record\n",
+		"orphans:   junk.orphan: unreadable (",
+		"attention: unpooled run by an older incoda: pid 999999, key builds (strays/1): zig build; new runs on its pools wait for it\n",
+		"on PATH:   none\n")
+	if strings.Contains(out, "2/done") {
+		t.Fatalf("doctor deletes a fully dead stray lane before reporting:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(machine.StraysDir(state), "2")); !os.IsNotExist(err) {
+		t.Fatal("the dead stray batch must be gone")
 	}
 }
