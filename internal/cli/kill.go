@@ -108,7 +108,21 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 			"pid %d has not acknowledged after %s. It may be an incoda from before kill existed, or wedged. "+
 				"Rerun with --force to terminate it; the kernel frees the lane when it dies", *pid, *wait)
 	}
-	if err := proc.Terminate(*pid, ExitKilled); err != nil {
+	// Open the process first (on Windows the handle pins it, so the pid
+	// cannot name another process from here on), then check it still holds
+	// a ticket, and only then terminate it through that handle.
+	h, err := proc.Open(*pid)
+	if err == nil {
+		defer h.Close()
+	}
+	if gone, gerr := q.WaitGone(*pid, 0, 100*time.Millisecond); gerr == nil && gone {
+		fmt.Fprintf(stdout, "%s\n", p.Green(fmt.Sprintf("pid %d released the lane", *pid)))
+		return nil
+	}
+	if err != nil {
+		return exitWith(ExitState, "cannot terminate pid %d: %v", *pid, err)
+	}
+	if err := h.Terminate(ExitKilled); err != nil {
 		return exitWith(ExitState, "cannot terminate pid %d: %v", *pid, err)
 	}
 	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, *pid, textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))

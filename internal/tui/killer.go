@@ -120,14 +120,26 @@ func (k LaneKiller) Force(key string, pid int, reason string) error {
 	if t.Old() {
 		return k.killOld(t, reason)
 	}
-	if err := proc.Terminate(pid, killedExit); err != nil {
-		return err
-	}
 	q, err := lane.OpenIn(t.Root, key, lane.Existing)
 	if err != nil {
 		return err
 	}
 	defer q.Close()
+	// Pin the process before the last check (a handle on Windows), then
+	// terminate it through the handle only if it still holds a ticket.
+	h, err := proc.Open(pid)
+	if err == nil {
+		defer h.Close()
+	}
+	if gone, gerr := q.WaitGone(pid, 0, 100*time.Millisecond); gerr == nil && gone {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := h.Terminate(killedExit); err != nil {
+		return err
+	}
 	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, pid, textsafe.LogValue(k.By), textsafe.LogValue(reason))
 	return nil
 }
