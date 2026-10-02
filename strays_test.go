@@ -80,8 +80,8 @@ func TestFenceDeletionWithALiveStrayIsCounted(t *testing.T) {
 }
 
 // TestUnknownStrayKeyCountsOnEveryPool: an unpooled run on a key that is
-// no lane of the new layout counts on every pool, and on nothing else: a
-// project key does not wait for it.
+// no lane of the new layout counts on every pool, so a run on a linked
+// project lane waits for it through its pool too.
 func TestUnknownStrayKeyCountsOnEveryPool(t *testing.T) {
 	incoda, stamp := binaries(t)
 	o, state := startOldRunAfterFenceDeletion(t, "v0.6.0", "oldjob", stamp, filepath.Join(t.TempDir(), "old.txt"), "old", "30000")
@@ -95,8 +95,10 @@ func TestUnknownStrayKeyCountsOnEveryPool(t *testing.T) {
 			t.Fatalf("pool %s: want exit 121 naming the unpooled run, got %d:\n%s", pool, code, out)
 		}
 	}
-	if out, code := runIncoda(t, incoda, state, "run", "--queue", "proj", "--wait", "0", "--", stamp, filepath.Join(t.TempDir(), "q.txt"), "q", "1"); code != 0 {
-		t.Fatalf("a project key is not charged: %d\n%s", code, out)
+	mustRun(t, incoda, state, 0, "config", "proj", "--pool", "tests")
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "proj", "--wait", "300ms", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "q.txt"), "q", "1")
+	if code != 121 || !strings.Contains(out, fmt.Sprintf("unpooled run by an older incoda: pid %d, key oldjob", o.Process.Pid)) {
+		t.Fatalf("a linked project run waits for it through its pool: %d\n%s", code, out)
 	}
 }
 

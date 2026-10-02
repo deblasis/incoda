@@ -154,6 +154,7 @@ func TestConcurrentConfigFirstLinksNeverEscalate(t *testing.T) {
 func TestQueueConfigSuppliesSlots(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "cfgslots")
 	stamps := t.TempDir()
 
 	if out, code := runIncoda(t, incoda, state, "config", "cfgslots", "--slots", "2", "--description", "CPU and RAM"); code != 0 {
@@ -224,6 +225,7 @@ func (r report) EffectiveSlots() int {
 func TestClosedQueueRefusesRuns(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "old")
 	stamps := t.TempDir()
 
 	msg := "retired: use wintty-build for builds and wintty-desktop for harnesses"
@@ -302,6 +304,7 @@ func TestClosedWhileWaiting(t *testing.T) {
 func TestRequireReason(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "strict")
 	stamps := t.TempDir()
 
 	if out, code := runIncoda(t, incoda, state, "config", "strict", "--require-reason"); code != 0 {
@@ -323,6 +326,7 @@ func TestRequireReason(t *testing.T) {
 func TestMultiKeyAcquiresEveryQueue(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "mk-a", "mk-b")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "mk-b,mk-a", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -363,6 +367,7 @@ func TestMultiKeyAcquiresEveryQueue(t *testing.T) {
 func TestExclusiveRunWaitsForAnEmptyQueue(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "excl")
 	stamps := t.TempDir()
 	if out, code := runIncoda(t, incoda, state, "config", "excl", "--slots", "2"); code != 0 {
 		t.Fatalf("config: %s", out)
@@ -444,6 +449,7 @@ func TestNewerConfigSchemaRefusesRuns(t *testing.T) {
 func TestLogLineStaysOneLine(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "oneline")
 	marker := filepath.Join(t.TempDir(), "m.txt")
 	if out, code := runIncoda(t, incoda, state, "run", "--queue", "oneline", "--quiet", "--", stamp, marker, "a\nb", "1"); code != 0 {
 		t.Fatalf("run: exit %d\n%s", code, out)

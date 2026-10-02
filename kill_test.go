@@ -36,6 +36,7 @@ func startHolder(t *testing.T, incoda, stamp, state, key, label string, holdMS i
 func TestKillHolderCooperatively(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kill")
 
 	holder, holderErr := startHolder(t, incoda, stamp, state, "kill", "victim", 30000, "50ms")
 	waitFor(t, incoda, state, "kill", func(q queueReport) bool { return len(q.Holders) == 1 })
@@ -72,6 +73,7 @@ func TestKillHolderCooperatively(t *testing.T) {
 func TestKillWaiterCancelsIt(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kw")
 
 	holder, _ := startHolder(t, incoda, stamp, state, "kw", "h", 4000, "50ms")
 	defer func() { _ = holder.Wait() }()
@@ -115,6 +117,7 @@ func TestKillRefusals(t *testing.T) {
 func TestKillDuringMultiKeyWait(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "mk2-a", "mk2-b")
 
 	blocker, _ := startHolder(t, incoda, stamp, state, "mk2-b", "blocker", 30000, "50ms")
 	defer func() { _ = blocker.Process.Kill(); _ = blocker.Wait() }()
@@ -154,6 +157,7 @@ func TestKillDuringMultiKeyWait(t *testing.T) {
 func TestKillForceTerminates(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kf")
 
 	// A holder polling every 10 s stands in for one that never answers: it
 	// cannot notice the request before the killer gives up on it, so the
@@ -191,6 +195,7 @@ func TestKillForceTerminates(t *testing.T) {
 func TestKillReasonEscaped(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "killesc")
 
 	holder, holderErr := startHolder(t, incoda, stamp, state, "killesc", "victim", 30000, "50ms")
 	waitFor(t, incoda, state, "killesc", func(q queueReport) bool { return len(q.Holders) == 1 })

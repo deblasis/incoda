@@ -175,7 +175,9 @@ func TestMigrationWaitsForAnOldRun(t *testing.T) {
 			defer func() { _ = o.Process.Kill(); _ = o.Wait() }()
 			waitForTicket(t, filepath.Join(state, "queues", "oldq"))
 
-			out, code := runIncoda(t, incoda, state, "run", "--queue", "newq", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(stamps, "new.txt"), "new", "10")
+			// A pool, so the run needs no link: it is the command that
+			// migrates.
+			out, code := runIncoda(t, incoda, state, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(stamps, "new.txt"), "new", "10")
 			if code != 0 {
 				t.Fatalf("new run: exit %d\n%s", code, out)
 			}
@@ -221,7 +223,8 @@ func TestMigrationWaitsForAnOldRunThatSlipsIn(t *testing.T) {
 	}
 
 	pause := filepath.Join(t.TempDir(), "go")
-	m := exec.Command(bin, "run", "--queue", "newq", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(stamps, "new.txt"), "new", "10")
+	// A pool, so the run needs no link: it is the command that migrates.
+	m := exec.Command(bin, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(stamps, "new.txt"), "new", "10")
 	m.Env = append(laneEnv(state), "INCODA_TEST_PAUSE_AT=M3", "INCODA_TEST_PAUSE_FILE="+pause)
 	var mErr syncBuffer
 	m.Stderr = &mErr
@@ -283,7 +286,8 @@ func TestBlockedWaiterExitsUpgradeBlocked(t *testing.T) {
 	defer func() { _ = o.Process.Kill(); _ = o.Wait() }()
 	waitForTicket(t, filepath.Join(state, "queues", "outer"))
 
-	out, code := runIncoda(t, incoda, state, "run", "--queue", "m", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "m.txt"), "m", "10")
+	// A pool, so the run needs no link: it is the command that migrates.
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "m.txt"), "m", "10")
 	if code != 0 {
 		t.Fatalf("the migrator must finish once the old run ends: %d\n%s", code, out)
 	}

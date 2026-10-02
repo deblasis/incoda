@@ -117,6 +117,7 @@ func TestTopLevelChildOwnsItsGroup(t *testing.T) {
 	incoda, _ := binaries(t)
 	tree := treeBinary(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "pg")
 	out := filepath.Join(t.TempDir(), "tree.txt")
 
 	holder := exec.Command(incoda, "run", "--queue", "pg", "--quiet", "--poll", "50ms", "--", tree, out)
@@ -139,6 +140,7 @@ func TestKillReachesGrandchild(t *testing.T) {
 	incoda, _ := binaries(t)
 	tree := treeBinary(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "pgk")
 	out := filepath.Join(t.TempDir(), "tree.txt")
 
 	holder := exec.Command(incoda, "run", "--queue", "pgk", "--quiet", "--poll", "50ms", "--", tree, out)
@@ -184,6 +186,7 @@ func TestNestedChildStaysInOuterGroup(t *testing.T) {
 	incoda, _ := binaries(t)
 	tree := treeBinary(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "inner", "outer")
 	out := filepath.Join(t.TempDir(), "tree.txt")
 	cmd := exec.Command(incoda, "run", "--queue", "outer", "--quiet", "--",
 		incoda, "run", "--queue", "inner", "--quiet", "--", tree, out)

@@ -158,6 +158,7 @@ func maxOverlap(ivs []interval) (int, [][2]string) {
 func TestMutualExclusionAcrossDifferentWorkingDirectories(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "shared")
 	stamps := t.TempDir()
 
 	const n = 5
@@ -234,6 +235,7 @@ func TestMutualExclusionAcrossDifferentWorkingDirectories(t *testing.T) {
 func TestSlotsAllowExactlyN(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "twolane")
 	stamps := t.TempDir()
 
 	const n = 6
@@ -288,6 +290,7 @@ func TestSlotsAllowExactlyN(t *testing.T) {
 func TestConfiguredSlotsAreHonored(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "cfglane")
 	stamps := t.TempDir()
 
 	const n = 6
@@ -355,6 +358,7 @@ func TestConfiguredSlotsAreHonored(t *testing.T) {
 func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "cfgref")
 	stamps := t.TempDir()
 
 	cfg := exec.Command(incoda, "config", "cfgref", "--slots", "3")
@@ -403,6 +407,7 @@ func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
 func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "racea", "raceb")
 	stamps := t.TempDir()
 
 	// racea,raceb both start at slots 1 so the pre-check passes.
@@ -507,6 +512,7 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 func TestHardKilledHolderFreesTheLane(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "crash")
 	stamps := t.TempDir()
 
 	victim := exec.Command(incoda, "run", "--queue", "crash", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -571,6 +577,7 @@ func TestHardKilledHolderFreesTheLane(t *testing.T) {
 func TestFIFOOrder(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fifo")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "fifo", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -647,6 +654,7 @@ func TestFIFOOrder(t *testing.T) {
 func TestWaitTimeoutExitCode(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "busy")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "busy", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -693,6 +701,7 @@ func TestWaitTimeoutExitCode(t *testing.T) {
 func TestExitCodePassthrough(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "codes")
 	stamps := t.TempDir()
 
 	for _, want := range []int{0, 1, 7, 42} {
@@ -792,6 +801,7 @@ func TestStatusOnNeverUsedQueue(t *testing.T) {
 func TestForceReleaseRefusesLiveHolderFromCLI(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fr")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "fr", "--wait", "60s", "--poll", "50ms", "--quiet",

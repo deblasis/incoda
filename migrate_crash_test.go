@@ -218,7 +218,9 @@ func TestFenceRacesSendANewQueuesDirToStrays(t *testing.T) {
 				seedOldLayout(t, state)
 			}
 			pause := filepath.Join(t.TempDir(), "go")
-			cmd := exec.Command(bin, "run", "--queue", "newq", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
+			// A pool, so the run needs no link: it is the command that
+			// migrates. The seeded builds lane requires a reason.
+			cmd := exec.Command(bin, "run", "--queue", "builds", "--reason", "fence race", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
 			cmd.Env = append(laneEnv(state), "INCODA_TEST_NO_EXCHANGE=1", "INCODA_TEST_PAUSE_AT="+tc.pauseAt, "INCODA_TEST_PAUSE_FILE="+pause)
 			var errBuf syncBuffer
 			cmd.Stderr = &errBuf

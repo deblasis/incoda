@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/textsafe"
@@ -35,6 +36,12 @@ type Request struct {
 	// re-checked: the ancestor's ticket was admitted under its rules
 	// (spec 4.5).
 	Held map[string]bool
+	// Fix is the caller's own run line for printed fix lines: every flag
+	// it gave except --queue and --pool, its argv, and its directory as
+	// Dir and Here. Queue and Pool are set by each refusal. WaitGiven says
+	// whether --wait was among the flags.
+	Fix       fixline.Run
+	WaitGiven bool
 }
 
 // Lane is one lane of a plan.
@@ -92,6 +99,8 @@ func Less(a, b Lane) bool {
 	return a.Key < b.Key
 }
 
+func sortLanes(ls []Lane) { sort.Slice(ls, func(i, j int) bool { return Less(ls[i], ls[j]) }) }
+
 // Make computes the plan for req against reg and the lanes' configs.
 func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 	p := &Plan{Generation: reg.Generation, Links: map[string][]string{}}
@@ -111,6 +120,22 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 			return nil, closedRefusal(*l)
 		}
 		lanes[k] = l
+	}
+
+	// A project lane with no link refuses the run before any ticket, with
+	// its suggestion and the line that makes it (spec 4.1).
+	var unlinked []string
+	projects := 0
+	for _, k := range named {
+		if l := lanes[k]; !l.Pool {
+			projects++
+			if len(l.Cfg.Pools) == 0 {
+				unlinked = append(unlinked, k)
+			}
+		}
+	}
+	if len(unlinked) > 0 {
+		return nil, unlinkedRefusal(stateDir, reg, req, unlinked, projects)
 	}
 
 	// Each named project key brings its linked pools. Every one must
@@ -135,7 +160,7 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 	for _, l := range lanes {
 		p.Lanes = append(p.Lanes, *l)
 	}
-	sort.Slice(p.Lanes, func(i, j int) bool { return Less(p.Lanes[i], p.Lanes[j]) })
+	sortLanes(p.Lanes)
 
 	for _, l := range p.Lanes {
 		if l.Pool && !l.Named && req.Held[l.Key] {

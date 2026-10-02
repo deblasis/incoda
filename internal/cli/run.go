@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/child"
 	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/held"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
@@ -89,8 +91,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	reportDropped(dir, inherited, *quiet, stderr, p)
 	pass := inherited.PassKeys()
 	live := inherited.LiveKeys()
+	here, _ := os.Getwd()
 	plan, err := runplan.Make(dir, reg, runplan.Request{
 		Named: keys, Slots: *slots, Exclusive: *exclusive, Reason: *reason, Held: pass,
+		Fix:       fixline.Run{Flags: carriedFlags(fs, wait), Argv: argv, Dir: here, Here: here},
+		WaitGiven: wait.set,
 	})
 	if err != nil {
 		return machineExit(err)
@@ -152,7 +157,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}
 
 	host, _ := os.Hostname()
-	cwd, _ := os.Getwd()
+	cwd := here
 
 	// From here on every ticket must be released on every exit path, in
 	// reverse acquisition order. The OS lock covers the paths we cannot
@@ -483,6 +488,25 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return &exitCode{code: res.Code}
 	}
 	return nil
+}
+
+// carriedFlags is every flag the caller gave except --queue and --pool, in
+// flag-name order, as a printed fix line repeats them (spec 2.6); --wait
+// keeps the text it was given.
+func carriedFlags(fs *flag.FlagSet, wait *waitValue) []fixline.Flag {
+	var out []fixline.Flag
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "queue", "pool", "pools":
+			return
+		case "wait":
+			out = append(out, fixline.Flag{Name: "wait", Value: wait.raw})
+			return
+		}
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		out = append(out, fixline.Flag{Name: f.Name, Value: f.Value.String(), Bool: ok && b.IsBoolFlag()})
+	})
+	return out
 }
 
 // viaText is the " via <keys>" a holder line of a pool ticket ends with

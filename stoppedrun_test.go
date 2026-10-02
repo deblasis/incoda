@@ -22,6 +22,7 @@ func TestStoppedRunOfThisBinaryGetsTheResumeLineOnly(t *testing.T) {
 	runnerSentinel(t)
 	incoda, _ := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "jc")
 	started := filepath.Join(t.TempDir(), "started")
 	c := exec.Command(incoda, "run", "--queue", "jc", "--poll", "50ms", "--quiet", "--", "sh", "-c", `touch "$0"; sleep 3`, started)
 	c.Env = laneEnv(state)

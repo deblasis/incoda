@@ -255,7 +255,8 @@ func TestKillAfterTheFenceDuringTheUpgrade(t *testing.T) {
 		t.Fatalf("seed the old layout: %d\n%s", code, out)
 	}
 	pause := filepath.Join(t.TempDir(), "go")
-	m := exec.Command(bin, "run", "--queue", "newq", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "new.txt"), "new", "10")
+	// A pool, so the run needs no link: it is the command that migrates.
+	m := exec.Command(bin, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "new.txt"), "new", "10")
 	m.Env = append(laneEnv(state), "INCODA_TEST_PAUSE_AT=M3", "INCODA_TEST_PAUSE_FILE="+pause)
 	var mErr syncBuffer
 	m.Stderr = &mErr

@@ -48,7 +48,8 @@ func TestRunLeavesOwnEnvironmentAlone(t *testing.T) {
 	t.Setenv("INCODA_DIR", t.TempDir())
 	t.Setenv("INCODA_HELD", "")
 	os.Unsetenv("INCODA_HELD")
-	if code := Main([]string{"run", "--queue", "envq", "--quiet", "--", "true"}, io.Discard, io.Discard); code != 0 {
+	// A pool: it runs without a link on a fresh state directory.
+	if code := Main([]string{"run", "--queue", "builds", "--quiet", "--", "true"}, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("run exited %d", code)
 	}
 	if v, ok := os.LookupEnv("INCODA_HELD"); ok {

@@ -15,6 +15,7 @@ import (
 func TestReentrantRunPassesThrough(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "other", "re")
 	stamps := t.TempDir()
 	marker := filepath.Join(stamps, "inner.txt")
 
@@ -61,6 +62,7 @@ func TestReentrantRunPassesThrough(t *testing.T) {
 func TestReleaseRecordsJobStats(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "acct")
 	stamps := t.TempDir()
 
 	cmd := exec.Command(incoda, "run", "--queue", "acct", "--quiet", "--owner", "test-session",

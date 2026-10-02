@@ -27,6 +27,7 @@ func runWithHeld(t *testing.T, incoda, state, held string, args ...string) (stri
 func TestDeadHeldEntryIsDropped(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "hd")
 	marker := filepath.Join(t.TempDir(), "m.txt")
 	// The lane must exist for the drop to be logged in it: a bogus key in
 	// the environment never creates a lane directory.
@@ -54,6 +55,7 @@ func TestDeadHeldEntryIsDropped(t *testing.T) {
 func TestBareHeldKeyIsMalformed(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "hk")
 	out, code := runWithHeld(t, incoda, state, "hk",
 		"run", "--queue", "hk", "--", stamp, filepath.Join(t.TempDir(), "m"), "m", "1")
 	if code != 0 || !strings.Contains(out, "incoda: held-dropped: hk (malformed)") {
@@ -70,6 +72,7 @@ func TestLiveNonAncestorEntryDoesNotPassThrough(t *testing.T) {
 	}
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "na")
 	holder, _ := startHolder(t, incoda, stamp, state, "na", "holder", 20000, "50ms")
 	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
 	waitFor(t, incoda, state, "na", func(q queueReport) bool { return len(q.Holders) == 1 })

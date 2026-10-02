@@ -210,14 +210,15 @@ func TestFirstMutatingCommandMigrates(t *testing.T) {
 func TestFreshDirMigratesOnFirstRun(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
-	out, code := runIncoda(t, incoda, state, "run", "--queue", "lay", "--quiet", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
+	// A pool runs from the moment the migration commits (spec 2.1).
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "builds", "--quiet", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
 	if code != 0 {
 		t.Fatalf("run: exit %d\n%s", code, out)
 	}
 	if !strings.Contains(out, "incoda: migrated: pools builds, computer-use, tests, vm; 0 queues need a link before they run again\n") {
 		t.Fatalf("missing the migrated line:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(laneDir(state, "lay"), "lane.log")); err != nil {
+	if _, err := os.Stat(filepath.Join(laneDir(state, "builds"), "lane.log")); err != nil {
 		t.Fatalf("lane.log not under lanes/: %v", err)
 	}
 	assertLayout2(t, state, false)
@@ -301,6 +302,7 @@ func TestRunReplacesAMissingFence(t *testing.T) {
 	if out, code := runIncoda(t, incoda, state, "config", "x"); code != 0 {
 		t.Fatalf("config: %d\n%s", code, out)
 	}
+	linkTestKeys(t, incoda, state, "y")
 	q := filepath.Join(state, "queues")
 	if err := os.Remove(q); err != nil {
 		t.Fatal(err)
@@ -444,7 +446,8 @@ func TestMigrationWaitsForALiveOldTicket(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 	release := holdOldTicket(t, filepath.Join(state, "queues"), "held", 999999, "zig", "build")
-	cmd := exec.Command(incoda, "run", "--queue", "newq", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
+	// A pool, so the run needs no link: it is the command that migrates.
+	cmd := exec.Command(incoda, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "s"), "s", "1")
 	cmd.Env = laneEnv(state)
 	var errBuf syncBuffer
 	cmd.Stderr = &errBuf

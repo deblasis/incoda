@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,4 +111,43 @@ func TestPoolRulesBindLinkedRuns(t *testing.T) {
 	}
 	mustRun(t, incoda, state, 0, "run", "--queue", "kf-build", "--reason", "nightly", "--quiet",
 		"--", stamp, filepath.Join(t.TempDir(), "z.txt"), "z", "10")
+}
+
+// TestUnlinkedRunIsRefusedAndLeavesNothingBehind: a project lane with no
+// link refuses every run with exit 120 before any ticket (spec 4.1), with
+// the suggestion and the line that makes it; the check reads config.json
+// without opening the lane, so a typo leaves no directory behind. A closed
+// lane is refused for being closed first.
+func TestUnlinkedRunIsRefusedAndLeavesNothingBehind(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "seed")
+	marker := filepath.Join(t.TempDir(), "m.txt")
+	out := mustRun(t, incoda, state, 120, "run", "--queue", "wintty-gate", "--reason", "wintty gate", "--", stamp, marker, "m", "1")
+	if !strings.HasPrefix(out, "incoda: unlinked: wintty-gate\nincoda: queue \"wintty-gate\" is not linked to any pool;") ||
+		!strings.Contains(out, "incoda: suggested: tests (name matches *-gate)\n") ||
+		!strings.Contains(out, "incoda: if the suggestion does not fit, ask the user; they run: incoda link wintty-gate\n") {
+		t.Fatalf("unlinked refusal:\n%s", out)
+	}
+	want := fmt.Sprintf("incoda:   incoda run --queue wintty-gate --pool tests --reason 'wintty gate' -- '%s' '%s' 'm' '1'\n", stamp, marker)
+	if runtime.GOOS != "windows" && !strings.Contains(out, want) {
+		t.Fatalf("missing the run line with the suggestion %q in:\n%s", want, out)
+	}
+	out = mustRun(t, incoda, state, 120, "run", "--queue", "typo-kee", "--", stamp, marker, "m", "1")
+	if !strings.Contains(out, "incoda: suggested: none (no name pattern matches)\nincoda: ask the user which pools this queue's jobs use; they run: incoda link typo-kee\n") {
+		t.Fatalf("no suggestion:\n%s", out)
+	}
+	for _, k := range []string{"wintty-gate", "typo-kee"} {
+		if _, err := os.Stat(laneDir(state, k)); !os.IsNotExist(err) {
+			t.Fatalf("a refused run on %s left its lane behind", k)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the command must not have run")
+	}
+	mustRun(t, incoda, state, 0, "config", "old-gate", "--close", "retired: use new-gate")
+	out = mustRun(t, incoda, state, 120, "run", "--queue", "old-gate", "--", stamp, marker, "m", "1")
+	if !strings.HasPrefix(out, `incoda: queue "old-gate" is closed: retired: use new-gate`) || strings.Contains(out, "unlinked") {
+		t.Fatalf("closed comes first:\n%s", out)
+	}
 }
