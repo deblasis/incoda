@@ -159,13 +159,18 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, v, err := readState()
+	dir, v, err := readState()
 	if err != nil {
 		return err
 	}
 	if !lane.ExistsIn(v.Root, key) {
 		fmt.Fprintf(stdout, "queue %q has no state on this machine; nothing to release\n", key)
 		return nil
+	}
+	if *live && !v.Migrated {
+		if err := upgradePending(v, key); err != nil {
+			return err
+		}
 	}
 	q, err := lane.OpenIn(v.Root, key, lane.Existing)
 	if err != nil {
@@ -178,7 +183,35 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 	}
 	q.Logf("queue=%s event=force-release removed=%d live=%v by_pid=%d", key, removed, *live, os.Getpid())
 	fmt.Fprintf(stdout, "queue %q: removed %d ticket(s)\n", key, removed)
+	if !*live {
+		// Records of old-holder kills whose job has fully exited (spec
+		// 3.2): they hold nothing, so plain force-release clears them.
+		if n, err := machine.SweepOrphans(dir, key); err == nil && n > 0 {
+			fmt.Fprintf(stdout, "queue %q: removed %d stale orphan record(s)\n", key, n)
+		}
+	}
 	return nil
+}
+
+// upgradePending refuses force-release --live while machine.json is absent
+// (spec 3.2): deleting a live ticket of an older incoda would empty the
+// upgrade's idle check while that job keeps running, so the upgrade would
+// overlap it. It prints one stop line per live ticket instead (kill ends
+// an older incoda with its whole job). With no live ticket it refuses
+// nothing.
+func upgradePending(v machine.View, key string) error {
+	live, err := lane.ProbeLane(filepath.Join(v.Root, key))
+	if err != nil {
+		return exitWith(ExitState, "cannot probe queue %q: %s", key, textsafe.Escape(err.Error()))
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	lines := []string{"upgrade-pending: force-release --live would hide a running job from the upgrade; ask the user before stopping another session's job; they can run:"}
+	for _, p := range live {
+		lines = append(lines, "  "+machine.KillLine(key, p.PID(), machine.UpgradeReason, false))
+	}
+	return exitWith(ExitUsage, "%s", strings.Join(lines, "\nincoda: "))
 }
 
 func cmdDoctor(args []string, stdout, stderr io.Writer) error {
