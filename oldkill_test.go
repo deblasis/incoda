@@ -513,3 +513,35 @@ func TestKillFailedRecordWriteResumesEverything(t *testing.T) {
 		t.Fatalf("everything kill stopped must be resumed: pid %v/%v child %v/%v", alive(pid), stopped(pid), alive(child), stopped(child))
 	}
 }
+
+// TestStoppedHolderShownAndRecoveredByRerun: a kill that dies inside its
+// window (here at the kill-stopped crash point) leaves the old incoda and
+// its job stopped, still holding the lane. status flags it with the exact
+// rerun line, and rerunning kill --force ends it.
+func TestStoppedHolderShownAndRecoveredByRerun(t *testing.T) {
+	runnerSentinel(t)
+	incoda, _ := binaries(t)
+	bin := crashBinary(t)
+	state := t.TempDir()
+	_, pid, child, _ := oldHolder(t, state, filepath.Join(state, "queues"), "stp")
+	p := strconv.Itoa(pid)
+	out, code := runWithEnv(t, bin, state, []string{"INCODA_TEST_CRASH_AT=kill-stopped"},
+		"kill", "--queue", "stp", "--pid", p, "--reason", "test", "--wait", "0", "--force")
+	if code != 97 {
+		t.Fatalf("the crash binary must die inside the window: %d\n%s", code, out)
+	}
+	if !stopped(pid) || !stopped(child) {
+		t.Fatal("the interrupted kill leaves the old incoda and its job stopped")
+	}
+	out, code = runIncoda(t, incoda, state, "status", "--queue", "stp", "--no-color")
+	want := "stopped holder: pid " + p + "; a kill was interrupted; rerun: incoda kill --queue stp --pid " + p + " --reason 'resume interrupted kill' --force\n" +
+		"  or resume it instead: kill -CONT " + p + "\n"
+	if code != 0 || !strings.HasSuffix(out, want) {
+		t.Fatalf("want %q at the end of status, got %d:\n%s", want, code, out)
+	}
+	out, code = runIncoda(t, incoda, state, "kill", "--queue", "stp", "--pid", p, "--reason", "resume interrupted kill", "--wait", "0", "--force")
+	if code != 0 {
+		t.Fatalf("the rerun must recover: %d\n%s", code, out)
+	}
+	waitGone(t, "the stopped job", pid, child)
+}

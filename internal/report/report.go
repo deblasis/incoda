@@ -37,6 +37,10 @@ type Report struct {
 	// 3.2). It is display text, not part of the JSON report; plan 5 adds
 	// the layout fields to status --json.
 	Banner string `json:"-"`
+	// Warnings are the lines plain status adds at the end (spec 5.3):
+	// unpooled runs of an older incoda, a missing fence, stopped holders.
+	// Display text, not part of the JSON report.
+	Warnings []string `json:"-"`
 }
 
 // Queue is one queue inside a Report.
@@ -133,5 +137,12 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 		qr.Free = len(snap.Holders) == 0
 		rep.Queues = append(rep.Queues, qr)
 	}
+	var holders []machine.Holder
+	for _, qr := range rep.Queues {
+		for _, e := range append(append([]lane.Entry(nil), qr.Holders...), qr.Waiting...) {
+			holders = append(holders, machine.Holder{Key: qr.Key, PID: e.Ticket.PID})
+		}
+	}
+	rep.Warnings = machine.StatusWarnings(stateDir, v, holders)
 	return rep, nil
 }

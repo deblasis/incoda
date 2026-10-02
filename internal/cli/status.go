@@ -94,6 +94,14 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 		renderQueue(w, p, qr)
 	}
 	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
+	// Warnings go after every existing line, so scrapers of the lines
+	// above see them unchanged (spec 5.3).
+	if len(rep.Warnings) > 0 {
+		fmt.Fprintln(w)
+		for _, l := range rep.Warnings {
+			fmt.Fprintln(w, p.Yellow(l))
+		}
+	}
 }
 
 func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
