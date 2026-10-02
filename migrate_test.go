@@ -320,12 +320,10 @@ func TestRunReplacesAMissingFence(t *testing.T) {
 	if !machine.FencePlaced(state) {
 		t.Fatal("run must re-place the fence")
 	}
-	batches, _ := os.ReadDir(machine.StraysDir(state))
-	if len(batches) != 1 {
-		t.Fatalf("want one strays batch, got %v", batches)
-	}
-	if _, err := os.Stat(filepath.Join(machine.StraysDir(state), batches[0].Name(), "stale")); err != nil {
-		t.Fatal(err)
+	// The stale queues/ went to strays/ and, holding no live ticket, was
+	// deleted by the same re-fence (spec 2.3).
+	if batches, _ := os.ReadDir(machine.StraysDir(state)); len(batches) != 0 {
+		t.Fatalf("a dead stray lane must not linger, got %v", batches)
 	}
 	if b, _ := os.ReadFile(machine.MachineLogPath(state)); !strings.Contains(string(b), "event=refence") {
 		t.Fatalf("machine.log:\n%s", b)

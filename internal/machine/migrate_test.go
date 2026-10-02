@@ -216,9 +216,16 @@ func TestEnsureRefencesAMigratedLayout(t *testing.T) {
 	if err := os.Remove(lane.QueuesDir(state)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(lane.QueuesDir(state), "stale"), 0o755); err != nil {
+	// An older incoda ran on builds after the fence was deleted and is
+	// gone (a dead ticket and its log); another one still runs on busy.
+	if err := os.MkdirAll(filepath.Join(lane.QueuesDir(state), "builds"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(lane.QueuesDir(state), "builds", "lane.log"), []byte("old fragment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	holdTicket(t, lane.QueuesDir(state), "builds", 999995, "done")()
+	holdTicket(t, lane.QueuesDir(state), "busy", 999996, "make")
 	// Inspect reports the missing fence and changes nothing.
 	v, err := Inspect(state)
 	if err != nil || !v.Migrated || !v.FenceMissing {
@@ -237,8 +244,16 @@ func TestEnsureRefencesAMigratedLayout(t *testing.T) {
 	if len(batches) != 1 {
 		t.Fatalf("want the queues/ dir in one strays batch, got %v", batches)
 	}
-	if _, err := os.Stat(filepath.Join(StraysDir(state), batches[0].Name(), "stale")); err != nil {
+	// The re-fence deletes the dead stray lane and passes its log on; the
+	// live one stays, for acquisitions to count.
+	if _, err := os.Stat(filepath.Join(StraysDir(state), batches[0].Name(), "busy")); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(StraysDir(state), batches[0].Name(), "builds")); !os.IsNotExist(err) {
+		t.Fatal("the dead stray lane must be deleted")
+	}
+	if b, _ := os.ReadFile(lane.LogPath(lane.LaneDir(state, "builds"))); !strings.Contains(string(b), "old fragment") {
+		t.Fatalf("lanes/builds/lane.log:\n%s", b)
 	}
 	log, _ := os.ReadFile(MachineLogPath(state))
 	if !strings.Contains(string(log), "event=refence pid=") || !strings.Contains(string(log), "strays="+batches[0].Name()) {

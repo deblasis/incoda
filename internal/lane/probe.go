@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 
 	"github.com/deblasis/incoda/internal/lockfile"
 )
@@ -129,4 +130,63 @@ func probeLocked(laneDir, name string) Probed {
 		p.PayloadErr = err
 	}
 	return p
+}
+
+// RemoveIfIdle deletes laneDir when no ticket in it is live, deciding
+// under one hold of its registry lock with the same probe as ProbeLane
+// (a ticket whose probe fails counts as live). Before deleting it hands
+// the directory's lane.log path to keepLog. It reports whether it deleted
+// the directory; a directory that is already gone is not an error.
+//
+// It is meant for stray lane directories (spec 2.3): nobody enrolls there,
+// because older binaries address queues/<K>, which the fence makes
+// ENOTDIR, so no ticket can appear between the probe and the delete. The
+// registry lock file goes last, after the hold ends, because Windows
+// cannot delete a directory while a handle inside it is open.
+func RemoveIfIdle(laneDir string, keepLog func(logPath string)) (bool, error) {
+	reg, err := lockfile.OpenExisting(RegistryLockPath(laneDir))
+	if errors.Is(err, os.ErrNotExist) {
+		// No registry lock: older binaries create it before any ticket,
+		// so no ticket here was ever live.
+		if fi, serr := os.Stat(laneDir); serr != nil || !fi.IsDir() {
+			return false, nil
+		}
+		keepLog(LogPath(laneDir))
+		return true, os.RemoveAll(laneDir)
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := reg.Lock(); err != nil {
+		reg.Close()
+		return false, err
+	}
+	entries, err := os.ReadDir(laneDir)
+	if err != nil {
+		reg.Close()
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, de := range entries {
+		if de.IsDir() {
+			continue
+		}
+		if _, ok := parseTicketName(de.Name()); !ok {
+			continue
+		}
+		if p := probeLocked(laneDir, de.Name()); p.Live || p.ProbeErr != nil {
+			reg.Close()
+			return false, nil
+		}
+	}
+	keepLog(LogPath(laneDir))
+	for _, de := range entries {
+		if de.Name() != registryLockName {
+			_ = os.RemoveAll(filepath.Join(laneDir, de.Name()))
+		}
+	}
+	reg.Close()
+	return true, os.RemoveAll(laneDir)
 }

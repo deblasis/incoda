@@ -98,6 +98,12 @@ func runMigration(stateDir string, lk *Lock, o Options) (*Registry, error) {
 				if err := refenceWaiting(stateDir, lk, o, &w); err != nil {
 					return nil, err
 				}
+				// A re-fence on a migrated layout deletes every stray
+				// lane whose tickets are all dead (spec 2.3); live ones
+				// stay and are counted by acquisitions.
+				if err := CleanStrays(stateDir); err != nil {
+					return nil, stateErrorf("cannot clean strays/: %s", esc(err))
+				}
 			}
 			return reg, nil
 		}
@@ -326,8 +332,8 @@ func finishMigration(stateDir string, lk *Lock, o Options) (*Registry, error) {
 }
 
 // refence re-places the fence with the race rule and logs event=refence to
-// machine.log, naming the strays it made. Counting and cleaning strays is
-// plan 2b.
+// machine.log, naming the strays it made. Callers on a migrated layout then
+// run CleanStrays; during a migration M5 and M6 own strays/.
 func refence(stateDir string) error {
 	moved, err := placeFence(stateDir)
 	if err != nil {

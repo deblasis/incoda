@@ -15,6 +15,7 @@ import (
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/held"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
@@ -63,7 +64,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return err
 	}
 	chain := procinfo.ParentChain()
-	dir, err := mutatingState(start, wait.d, *poll, chain, stderr)
+	dir, reg, err := mutatingState(start, wait.d, *poll, chain, stderr)
 	if err != nil {
 		return err
 	}
@@ -221,6 +222,31 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 		}
 		key := pt.key
+		// On a pool, unpooled runs of an older incoda (strays and orphan
+		// records, spec 2.3) hold slots too. Each poll rescans them,
+		// deletes stray lanes that have fully died, and refuses at once
+		// when one of them is this run's own ancestor: waiting for it
+		// would never end.
+		var unpooled []machine.Unpooled
+		var countUnpooled func() (int, error)
+		if reg.IsPool(key) {
+			countUnpooled = func() (int, error) {
+				all, err := machine.ScanUnpooled(dir, true)
+				if err != nil {
+					return 0, &machine.StateError{Msg: "machine-state: cannot scan for unpooled runs: " + textsafe.Escape(err.Error())}
+				}
+				mine := machine.ChargedTo(dir, reg, key, all)
+				if !chain.Skip {
+					for _, u := range mine {
+						if chain.Contains(u.PID) {
+							return 0, machine.UpgradeBlocked(u.PID, u.Key)
+						}
+					}
+				}
+				unpooled = mine
+				return len(mine), nil
+			}
+		}
 		acqErr := en.Acquire(ctx, lane.AcquireOptions{
 			Wait:   budget,
 			Poll:   *poll,
@@ -239,6 +265,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				}
 				return lane.KillRequest{}, false
 			},
+			Unpooled: countUnpooled,
 			OnWait: func(pos, effSlots int, live []lane.Entry, waited time.Duration) {
 				if *quiet {
 					return
@@ -254,8 +281,16 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					if i >= effSlots {
 						break
 					}
+					if e.File == en.Name() {
+						// Held off only by unpooled runs: this run's own
+						// ticket is inside the slot count.
+						continue
+					}
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
 						p.Dim(fmt.Sprintf("holder pid %d in %s: %s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()))))
+				}
+				for _, u := range unpooled {
+					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"), p.Dim(u.Line()))
 				}
 			},
 		})
@@ -270,6 +305,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				logKill(toTake, killed.Request)
 				return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
 					key, textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
+			}
+			var rf *machine.Refusal
+			var se *machine.StateError
+			if errors.As(acqErr, &rf) || errors.As(acqErr, &se) {
+				rc = ExitUsage
+				if se != nil {
+					rc = ExitState
+				}
+				return machineExit(acqErr)
 			}
 			if errors.Is(acqErr, lane.ErrTimeout) {
 				rc = ExitTimeout

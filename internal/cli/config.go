@@ -65,7 +65,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := mutatingState(start, wait.d, 200*time.Millisecond, procinfo.ParentChain(), stderr)
+	dir, _, err := mutatingState(start, wait.d, 200*time.Millisecond, procinfo.ParentChain(), stderr)
 	if err != nil {
 		return err
 	}

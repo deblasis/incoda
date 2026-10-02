@@ -23,6 +23,13 @@ type AcquireOptions struct {
 	// it already holds: a kill addressed to one of those must end the wait
 	// on the next one, not sit unread until every key is held.
 	Killed func() (KillRequest, bool)
+	// Unpooled, when set, is called on every poll after the position. It
+	// returns how many of this lane's slots are held by holders that have
+	// no ticket here: unpooled runs of an older incoda counted on a pool
+	// (spec 2.3). They hold ahead of every waiter, so this run is admitted
+	// only when its position plus that count is below the slot count. An
+	// error ends the wait and is returned as is.
+	Unpooled func() (int, error)
 }
 
 // Acquire blocks until this enrollment holds a slot, the wait budget runs out,
@@ -61,7 +68,13 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 		if err != nil {
 			return err
 		}
-		if idx >= 0 && idx < slots {
+		extra := 0
+		if opt.Unpooled != nil {
+			if extra, err = opt.Unpooled(); err != nil {
+				return err
+			}
+		}
+		if idx >= 0 && idx+extra < slots {
 			e.MarkAcquired()
 			return nil
 		}

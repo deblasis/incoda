@@ -32,20 +32,21 @@ func readState() (string, machine.View, error) {
 // that takes a ticket or writes config, then migrates it or re-places a
 // missing fence (machine.Ensure), before the caller holds any ticket.
 // start and wait are the command's --wait budget, which this spends first.
-func mutatingState(start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, error) {
+// It returns the registry the command runs under.
+func mutatingState(start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, *machine.Registry, error) {
 	d, err := stateDir()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	v, _, _ := versionInfo()
-	_, err = machine.Ensure(d, machine.Options{
+	reg, err := machine.Ensure(d, machine.Options{
 		Start: start, Wait: wait, Poll: poll, Chain: chain,
 		By: "incoda " + v, Stderr: stderr, Path: startGetenv("PATH"),
 	})
 	if err != nil {
-		return "", machineExit(err)
+		return "", nil, machineExit(err)
 	}
-	return d, nil
+	return d, reg, nil
 }
 
 // machineExit maps the machine package's errors to exit codes: 122 for
