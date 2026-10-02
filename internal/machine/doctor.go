@@ -172,7 +172,8 @@ func describeHolders(stateDir string, h *Health, root string, migrated bool, dea
 		}
 		seen[hd.PID] = true
 		if s, err := procinfo.Stopped(hd.PID); err == nil && s {
-			h.Attention = append(h.Attention, StoppedLines(hd.Key, hd.PID)...)
+			v := View{Root: root, Migrated: migrated}
+			h.Attention = append(h.Attention, stoppedHolderLines(stateDir, v, hd, deadline)...)
 		}
 	}
 }
