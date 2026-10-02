@@ -48,8 +48,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: 30 * time.Minute}
 	fs.Var(wait, "wait", "max time to queue: a Go duration (30m) or bare seconds (1800); 0 fails immediately, negative waits forever")
+	pool := &poolsValue{}
+	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
+	fs.Var(pool, "pools", "alias of --pool")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -92,11 +95,17 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	pass := inherited.PassKeys()
 	live := inherited.LiveKeys()
 	here, _ := os.Getwd()
-	plan, err := runplan.Make(dir, reg, runplan.Request{
+	req := runplan.Request{
 		Named: keys, Slots: *slots, Exclusive: *exclusive, Reason: *reason, Held: pass,
 		Fix:       fixline.Run{Flags: carriedFlags(fs, wait), Argv: argv, Dir: here, Here: here},
 		WaitGiven: wait.set,
-	})
+	}
+	if pool.set {
+		req.Pool = pool.keys
+	}
+	plan, err := planWithFirstLinks(dir, reg, req, machine.Options{
+		Start: start, Wait: wait.d, Poll: *poll, Chain: chain, Stderr: stderr,
+	}, *quiet, stderr, p)
 	if err != nil {
 		return machineExit(err)
 	}
@@ -489,6 +498,58 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}
 	return nil
 }
+
+// planWithFirstLinks plans the run and, when its --pool set equals an
+// unlinked key's suggestion, writes that first link (spec 4.2) and plans
+// again. Each first link is a compare-and-set under machine.lock, then the
+// key's registry lock, before any ticket: still unlinked, it is written
+// and logged event=link by=run and the run says linked:; already linked to
+// the same set (another run won the race), the run goes on; linked to a
+// different set, it refuses with link-conflict.
+func planWithFirstLinks(dir string, reg *machine.Registry, req runplan.Request, o machine.Options, quiet bool, stderr io.Writer, p colorize.Palette) (*runplan.Plan, error) {
+	for {
+		plan, err := runplan.Make(dir, reg, req)
+		if err != nil {
+			return nil, err
+		}
+		if len(plan.FirstLinks) == 0 {
+			if !quiet {
+				for _, n := range plan.Notes {
+					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Dim(n))
+				}
+			}
+			return plan, nil
+		}
+		for _, fl := range plan.FirstLinks {
+			beforeFirstLink(dir, fl.Key)
+			res, err := machine.WriteLink(dir, fl.Key, "run", o, func(_ *machine.Registry, c *lane.Config) error {
+				switch {
+				case len(c.Pools) == 0:
+					c.Pools, c.QuietMachine = fl.Pools, c.QuietMachine || fl.Quiet
+					return nil
+				case machine.SameSet(c.Pools, fl.Pools):
+					return lane.ErrNoChange
+				}
+				by := "another process"
+				if pid, ok := machine.LastLinker(dir, fl.Key); ok {
+					by = fmt.Sprintf("pid %d", pid)
+				}
+				return &machine.Refusal{Msg: fmt.Sprintf("link-conflict: %q was just linked to %s by %s; rerun without --pool", fl.Key, machine.SetText(c.Pools), by)}
+			})
+			if err != nil {
+				return nil, err
+			}
+			if res.Changed {
+				// Printed even with --quiet: it records a stored change.
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Green(fmt.Sprintf("linked: %s (stored; every later run on %s takes these pools)",
+					machine.LinkedLine(fl.Key, res.New.Pools, res.New.QuietMachine), fl.Key)))
+			}
+		}
+	}
+}
+
+// beforeFirstLink is a seam for tests; production never changes it.
+var beforeFirstLink = func(dir, key string) {}
 
 // carriedFlags is every flag the caller gave except --queue and --pool, in
 // flag-name order, as a printed fix line repeats them (spec 2.6); --wait

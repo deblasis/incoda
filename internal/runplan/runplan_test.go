@@ -271,3 +271,89 @@ func TestSuggest(t *testing.T) {
 		t.Fatalf("a suggestion naming a missing pool is not usable: %+v", s)
 	}
 }
+
+// TestPoolFlag: --pool takes a subset of each named project key's link;
+// on an unlinked key only the suggestion becomes a first link; anything
+// else is refused before anything is written (spec 4.2).
+func TestPoolFlag(t *testing.T) {
+	if fixline.Native() != fixline.POSIX {
+		t.Skip("the expected lines are POSIX sh")
+	}
+	configs := map[string]string{
+		"polymatto": `{"schema":2,"pools":["builds","computer-use","tests"]}`,
+		"kf-gate":   `{"schema":2,"pools":["tests"]}`,
+	}
+	for k, v := range spec4Pools {
+		configs[k] = v
+	}
+	state, reg := machineDir(t, configs)
+	fix := fixline.Run{Flags: []fixline.Flag{{Name: "reason", Value: "prod build"}}, Argv: []string{"pnpm", "build"}, Dir: "/src", Here: "/src"}
+	req := func(named []string, pool ...string) Request {
+		return Request{Named: named, Pool: pool, Reason: "prod build", Fix: fix}
+	}
+	p, err := Make(state, reg, req([]string{"polymatto"}, "tests"))
+	if err != nil || keysOf(p) != "polymatto tests(pool, via polymatto)" || len(p.FirstLinks) != 0 {
+		t.Fatalf("a subset of the link: %v %v", keysOf(p), err)
+	}
+	p, err = Make(state, reg, req([]string{"polymatto", "builds"}, "tests"))
+	if err != nil || keysOf(p) != "polymatto builds(pool) tests(pool, via polymatto)" || strings.Join(p.Notes, "|") != `--pool ignored for pool key "builds"` {
+		t.Fatalf("a named pool next to a project key ignores --pool: %v %v %v", keysOf(p), p.Notes, err)
+	}
+	p, err = Make(state, reg, req([]string{"cap-e2e"}, "tests", "computer-use"))
+	if err != nil || len(p.FirstLinks) != 1 || p.FirstLinks[0].Key != "cap-e2e" || strings.Join(p.FirstLinks[0].Pools, ",") != "computer-use,tests" ||
+		keysOf(p) != "cap-e2e computer-use(pool, via cap-e2e) tests(pool, via cap-e2e)" {
+		t.Fatalf("a first link equal to the suggestion: %v %+v %v", keysOf(p), p.FirstLinks, err)
+	}
+	if p, err := Make(state, reg, req([]string{"kf-measure"}, "tests")); err != nil || !p.FirstLinks[0].Quiet {
+		t.Fatalf("the first link carries quiet_machine with its suggestion: %+v %v", p, err)
+	}
+	for _, c := range []struct {
+		name string
+		req  Request
+		want string
+	}{
+		{"not part of the link", req([]string{"polymatto"}, "vm"), `incoda: pool-mismatch: "polymatto" is linked to builds,computer-use,tests; --pool vm is not part of it
+incoda: to also hold vm for this run only, name it next to the queue (no link change):
+incoda:   incoda run --queue polymatto,vm --reason 'prod build' -- 'pnpm' 'build'
+incoda: changing the link is the user's call; ask them.
+`},
+		{"partly part of the link", req([]string{"polymatto"}, "tests", "vm"), `incoda: pool-mismatch: "polymatto" is linked to builds,computer-use,tests; --pool vm is not part of it
+incoda: to also hold vm for this run only, name it next to the queue (no link change):
+incoda:   incoda run --queue polymatto,vm --pool tests --reason 'prod build' -- 'pnpm' 'build'
+incoda: changing the link is the user's call; ask them.
+`},
+		{"a pool named in --queue and in --pool prints once", Request{Named: []string{"polymatto", "vm"}, Pool: []string{"vm"}, Reason: "prod build", Fix: fix}, `incoda: pool-mismatch: "polymatto" is linked to builds,computer-use,tests; --pool vm is not part of it
+incoda: to also hold vm for this run only, name it next to the queue (no link change):
+incoda:   incoda run --queue polymatto,vm --reason 'prod build' -- 'pnpm' 'build'
+incoda: changing the link is the user's call; ask them.
+`},
+		{"no project key", req([]string{"builds"}, "tests"), `incoda: pool-mismatch: --pool needs a project key; "builds" is a pool
+incoda: rerun without --pool:
+incoda:   incoda run --queue builds --reason 'prod build' -- 'pnpm' 'build'
+`},
+		{"not a pool", req([]string{"polymatto"}, "printer"), `incoda: pool-mismatch: "printer" is not a pool on this machine (pools: builds, computer-use, tests, vm)
+`},
+		{"first link other than the suggestion", req([]string{"cap-e2e"}, "tests"), `incoda: link-needs-user: "cap-e2e" suggests computer-use,tests; a first link from run must equal it
+incoda: run it with the suggestion instead (stored; every later run on this queue takes these pools):
+incoda:   incoda run --queue cap-e2e --pool computer-use,tests --reason 'prod build' -- 'pnpm' 'build'
+incoda: ask the user for anything else; they run: incoda link cap-e2e
+`},
+		{"first link without a suggestion", req([]string{"polymatto-x"}, "tests"), `incoda: link-needs-user: "polymatto-x" has no suggested pools; ask the user; they run: incoda link polymatto-x
+`},
+		{"one key refused refuses the run", req([]string{"cap-gate", "polymatto"}, "vm"), `incoda: link-needs-user: "cap-gate" suggests tests; a first link from run must equal it
+incoda: run it with the suggestion instead (stored; every later run on this queue takes these pools):
+incoda:   incoda run --queue cap-gate,polymatto --pool tests --reason 'prod build' -- 'pnpm' 'build'
+incoda: ask the user for anything else; they run: incoda link cap-gate
+`},
+	} {
+		_, err := Make(state, reg, c.req)
+		var rf *machine.Refusal
+		if !errors.As(err, &rf) {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if got := "incoda: " + rf.Msg + "\n"; got != c.want {
+			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
+		}
+	}
+}

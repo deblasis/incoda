@@ -227,3 +227,64 @@ func unlinkedRefusal(stateDir string, reg *machine.Registry, req Request, keys [
 	}
 	return refusal(append(lines, "if a suggestion does not fit, ask the user; they run: "+strings.Join(links, ", ")))
 }
+
+// linkNeedsUser refuses a --pool first link on an unlinked key that is not
+// its suggestion (spec 4.2): run makes a first link only when the set
+// equals the suggestion; anything else is the user's.
+func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key string, s Suggestion) *machine.Refusal {
+	switch {
+	case s.Pattern == "":
+		return refusal([]string{fmt.Sprintf("link-needs-user: %q has no suggested pools; ask the user; they run: incoda link %s", key, key)})
+	case !s.Usable:
+		return refusal([]string{fmt.Sprintf("link-needs-user: %q has no usable suggestion (%s); ask the user; they run: incoda link %s", key, s.Why, key)})
+	}
+	lines := []string{
+		fmt.Sprintf("link-needs-user: %q suggests %s; a first link from run must equal it", key, strings.Join(s.Pools, ",")),
+		"run it with the suggestion instead (stored; every later run on this queue takes these pools):",
+	}
+	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, s.QuietMachine)
+	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
+	if s.QuietMachine && !req.WaitGiven {
+		lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
+	}
+	return refusal(append(lines, "ask the user for anything else; they run: incoda link "+key))
+}
+
+// poolMismatch refuses a --pool set that is not part of key's link (spec
+// 4.2). The fix holds the extra pools for this run only, by naming them
+// next to the queue, and keeps the part of the set the link allows.
+func poolMismatch(stateDir string, reg *machine.Registry, req Request, key string, link []string) *machine.Refusal {
+	in := map[string]bool{}
+	for _, k := range link {
+		in[k] = true
+	}
+	var extra, keep []string
+	for _, k := range req.Pool {
+		if in[k] {
+			keep = append(keep, k)
+		} else {
+			extra = append(extra, k)
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("pool-mismatch: %q is linked to %s; --pool %s is not part of it", key, strings.Join(link, ","), strings.Join(extra, ",")),
+		fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change):", strings.Join(extra, ",")),
+	}
+	// A pool both named in --queue and in extra goes into the line once.
+	queue := namedOrder(reg, machine.SortedSet(append(append([]string(nil), req.Named...), extra...)))
+	run, why := fixFor(stateDir, reg, req, queue, keep, false)
+	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
+	return refusal(append(lines, "changing the link is the user's call; ask them."))
+}
+
+// noProjectRefusal refuses --pool on a run that names only pools (spec
+// 4.2).
+func noProjectRefusal(stateDir string, reg *machine.Registry, req Request, pools []string) *machine.Refusal {
+	what := fmt.Sprintf("%q is a pool", pools[0])
+	if len(pools) > 1 {
+		what = quoted(pools) + " are pools"
+	}
+	lines := []string{fmt.Sprintf("pool-mismatch: --pool needs a project key; %s", what), "rerun without --pool:"}
+	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, false)
+	return refusal(append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...))
+}

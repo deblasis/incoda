@@ -151,3 +151,91 @@ func TestUnlinkedRunIsRefusedAndLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("closed comes first:\n%s", out)
 	}
 }
+
+// TestRunPoolMakesTheFirstLinkOnlyToTheSuggestion: the line the unlinked
+// refusal prints, run as printed, links the key to its suggestion (a
+// compare-and-set, logged by=run, announced linked:) and runs; later runs
+// take the link without --pool. A --pool set other than the suggestion is
+// refused link-needs-user and writes nothing. Concurrent first links to
+// the same set all run (spec 4.2, 9).
+func TestRunPoolMakesTheFirstLinkOnlyToTheSuggestion(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "seed")
+	out := mustRun(t, incoda, state, 120, "run", "--queue", "cap-e2e", "--pool", "tests", "--", stamp, filepath.Join(t.TempDir(), "a.txt"), "a", "1")
+	if !strings.HasPrefix(out, `incoda: link-needs-user: "cap-e2e" suggests computer-use,tests; a first link from run must equal it`) {
+		t.Fatalf("link-needs-user:\n%s", out)
+	}
+	if _, err := os.Stat(laneDir(state, "cap-e2e")); !os.IsNotExist(err) {
+		t.Fatal("a refused first link writes nothing")
+	}
+	out = mustRun(t, incoda, state, 0, "run", "--queue", "cap-e2e", "--pool", "computer-use,tests", "--", stamp, filepath.Join(t.TempDir(), "b.txt"), "b", "1")
+	if !strings.Contains(out, "incoda: linked: cap-e2e -> computer-use,tests (stored; every later run on cap-e2e takes these pools)\n") {
+		t.Fatalf("linked line:\n%s", out)
+	}
+	inOrder(t, out, `acquired queue "cap-e2e" (pid `, `acquired queue "computer-use" (pool, via cap-e2e; pid `, `acquired queue "tests" (pool, via cap-e2e; pid `)
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "cap-e2e"), "lane.log"))
+	if !strings.Contains(string(log), " event=link pid=") || !strings.Contains(string(log), " by=run old= new=computer-use,tests") {
+		t.Fatalf("lane.log:\n%s", log)
+	}
+	out = mustRun(t, incoda, state, 0, "run", "--queue", "cap-e2e", "--", stamp, filepath.Join(t.TempDir(), "c.txt"), "c", "1")
+	inOrder(t, out, `acquired queue "computer-use" (pool, via cap-e2e; pid `, `acquired queue "tests" (pool, via cap-e2e; pid `)
+
+	// Agents racing the same printed line: every run succeeds and exactly
+	// one of them writes the link.
+	done := make(chan string, 4)
+	for i := 0; i < 4; i++ {
+		go func(i int) {
+			o, code := runIncoda(t, incoda, state, "run", "--queue", "race-gate", "--pool", "tests", "--wait", "60s", "--poll", "50ms",
+				"--", stamp, filepath.Join(t.TempDir(), "r.txt"), "r", "50")
+			if code != 0 {
+				o = "FAILED " + o
+			}
+			done <- o
+		}(i)
+	}
+	linked := 0
+	for i := 0; i < 4; i++ {
+		o := <-done
+		if strings.HasPrefix(o, "FAILED ") {
+			t.Fatalf("a racing first link failed:\n%s", o)
+		}
+		linked += strings.Count(o, "incoda: linked: race-gate -> tests")
+	}
+	if linked != 1 {
+		t.Fatalf("%d runs wrote the link, want exactly 1", linked)
+	}
+}
+
+// TestPrintedUnlinkedLineRunsAsPrinted: the run line of the unlinked
+// refusal, pasted into sh with this test's own incoda first on PATH, makes
+// the first link and runs the command with its exact arguments.
+func TestPrintedUnlinkedLineRunsAsPrinted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the printed line is PowerShell there")
+	}
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "it's here.txt")
+	out := mustRun(t, incoda, state, 120, "run", "--queue", "wintty-gate", "--reason", "wintty's gate", "--", stamp, marker, "a b", "1")
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "incoda:   incoda run ") {
+			line = strings.TrimPrefix(l, "incoda:   ")
+		}
+	}
+	if line == "" {
+		t.Fatalf("no run line:\n%s", out)
+	}
+	sh := exec.Command("/bin/sh", "-c", line)
+	// PATH holds this test's build first and system directories only, so
+	// no incoda installed on the machine can answer.
+	sh.Env = append(laneEnv(state), "PATH="+filepath.Dir(incoda)+":/usr/bin:/bin")
+	b, err := sh.CombinedOutput()
+	if err != nil || !strings.Contains(string(b), "incoda: linked: wintty-gate -> tests") {
+		t.Fatalf("the printed line %s: %v\n%s", line, err, b)
+	}
+	if iv, ok := readInterval(t, marker); !ok || iv.label != "a b" {
+		t.Fatalf("the command ran with its exact arguments: %+v %v", iv, ok)
+	}
+}

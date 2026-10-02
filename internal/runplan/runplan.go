@@ -36,6 +36,9 @@ type Request struct {
 	// re-checked: the ancestor's ticket was admitted under its rules
 	// (spec 4.5).
 	Held map[string]bool
+	// Pool is the --pool set (alias --pools), sorted; nil when not given.
+	// It applies to every named project key (spec 4.2).
+	Pool []string
 	// Fix is the caller's own run line for printed fix lines: every flag
 	// it gave except --queue and --pool, its argv, and its directory as
 	// Dir and Here. Queue and Pool are set by each refusal. WaitGiven says
@@ -88,6 +91,23 @@ type Plan struct {
 	// Links is each named project key's link (its pools, sorted) as read
 	// at plan time; an unlinked key maps to nil.
 	Links map[string][]string
+	// Pool is the request's --pool set, kept for the verify points.
+	Pool []string
+	// FirstLinks are the first links the run makes before any ticket (a
+	// --pool set equal to an unlinked key's suggestion, spec 4.2). The
+	// plan's lanes already take those pools; the caller writes the links
+	// and plans again.
+	FirstLinks []FirstLink
+	// Notes are informational lines for the caller to print.
+	Notes []string
+}
+
+// FirstLink is a link run writes: Key gets Pools, and quiet_machine when
+// the suggestion carries it.
+type FirstLink struct {
+	Key   string
+	Pools []string
+	Quiet bool
 }
 
 // Less is the total order of spec 2.4: project lanes before pools, each
@@ -103,7 +123,7 @@ func sortLanes(ls []Lane) { sort.Slice(ls, func(i, j int) bool { return Less(ls[
 
 // Make computes the plan for req against reg and the lanes' configs.
 func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
-	p := &Plan{Generation: reg.Generation, Links: map[string][]string{}}
+	p := &Plan{Generation: reg.Generation, Links: map[string][]string{}, Pool: req.Pool}
 	lanes := map[string]*Lane{}
 	named := append([]string(nil), req.Named...)
 	sort.Strings(named)
@@ -122,33 +142,69 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 		lanes[k] = l
 	}
 
-	// A project lane with no link refuses the run before any ticket, with
-	// its suggestion and the line that makes it (spec 4.1).
-	var unlinked []string
-	projects := 0
+	var unlinked, projects, pools []string
 	for _, k := range named {
-		if l := lanes[k]; !l.Pool {
-			projects++
+		if l := lanes[k]; l.Pool {
+			pools = append(pools, k)
+		} else {
+			projects = append(projects, k)
 			if len(l.Cfg.Pools) == 0 {
 				unlinked = append(unlinked, k)
 			}
 		}
 	}
-	if len(unlinked) > 0 {
-		return nil, unlinkedRefusal(stateDir, reg, req, unlinked, projects)
+
+	// --pool is a set of registered pools for the named project keys
+	// (spec 4.2).
+	if req.Pool != nil {
+		if bad := reg.NotPools(req.Pool); len(bad) > 0 {
+			return nil, machine.NotAPool(reg, bad)
+		}
+		if len(projects) == 0 {
+			return nil, noProjectRefusal(stateDir, reg, req, pools)
+		}
+		for _, k := range pools {
+			p.Notes = append(p.Notes, fmt.Sprintf("--pool ignored for pool key %q", k))
+		}
 	}
 
-	// Each named project key brings its linked pools. Every one must
-	// resolve to a registered pool with a readable config: the lane set
-	// never shrinks silently (spec 2.5).
-	for _, k := range named {
+	// A project lane with no link refuses the run before any ticket, with
+	// its suggestion and the line that makes it (spec 4.1). With --pool,
+	// only a set equal to the suggestion becomes its first link (4.2).
+	if len(unlinked) > 0 && req.Pool == nil {
+		return nil, unlinkedRefusal(stateDir, reg, req, unlinked, len(projects))
+	}
+
+	// Each named project key brings its linked pools (with --pool, only
+	// that subset). Every linked pool must resolve to a registered pool
+	// with a readable config: the lane set never shrinks silently (spec
+	// 2.5). If any key is refused, the whole run is refused before
+	// anything is written.
+	for _, k := range projects {
 		l := lanes[k]
-		if l.Pool {
-			continue
-		}
 		link := machine.SortedSet(l.Cfg.Pools)
 		p.Links[k] = link
+		use := link
+		switch {
+		case len(link) == 0:
+			s := Suggest(reg, k)
+			if !s.Usable || !machine.SameSet(s.Pools, req.Pool) {
+				return nil, linkNeedsUser(stateDir, reg, req, k, s)
+			}
+			p.FirstLinks = append(p.FirstLinks, FirstLink{Key: k, Pools: s.Pools, Quiet: s.QuietMachine})
+			use = req.Pool
+		case req.Pool != nil:
+			if !machine.Subset(req.Pool, link) {
+				return nil, poolMismatch(stateDir, reg, req, k, link)
+			}
+			use = req.Pool
+		}
 		for _, pool := range link {
+			if _, err := resolvePool(stateDir, reg, k, pool); err != nil {
+				return nil, err
+			}
+		}
+		for _, pool := range use {
 			pl, err := linkedPool(stateDir, reg, lanes, k, pool)
 			if err != nil {
 				return nil, err
@@ -196,16 +252,26 @@ func linkedPool(stateDir string, reg *machine.Registry, lanes map[string]*Lane, 
 	if pl := lanes[pool]; pl != nil {
 		return pl, nil
 	}
-	if !reg.IsPool(pool) {
-		return nil, linkStateError(project, pool, "it is not a pool on this machine")
-	}
-	cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, pool))
+	cfg, err := resolvePool(stateDir, reg, project, pool)
 	if err != nil {
-		return nil, linkStateError(project, pool, textsafe.Escape(err.Error()))
+		return nil, err
 	}
 	pl := &Lane{Key: pool, Pool: true, Cfg: cfg}
 	lanes[pool] = pl
 	return pl, nil
+}
+
+// resolvePool reads the config of a pool project links, failing closed
+// when pool is not registered or its config cannot be read.
+func resolvePool(stateDir string, reg *machine.Registry, project, pool string) (lane.Config, error) {
+	if !reg.IsPool(pool) {
+		return lane.Config{}, linkStateError(project, pool, "it is not a pool on this machine")
+	}
+	cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, pool))
+	if err != nil {
+		return lane.Config{}, linkStateError(project, pool, textsafe.Escape(err.Error()))
+	}
+	return cfg, nil
 }
 
 func linkStateError(project, pool, reason string) *machine.StateError {
