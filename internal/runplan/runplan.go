@@ -104,11 +104,7 @@ type Plan struct {
 
 // FirstLink is a link run writes: Key gets Pools, and quiet_machine when
 // the suggestion carries it.
-type FirstLink struct {
-	Key   string
-	Pools []string
-	Quiet bool
-}
+type FirstLink = machine.FirstLink
 
 // Less is the total order of spec 2.4: project lanes before pools, each
 // group by key in byte order.
@@ -189,13 +185,13 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 		case len(link) == 0:
 			s := Suggest(reg, k)
 			if !s.Usable || !machine.SameSet(s.Pools, req.Pool) {
-				return nil, linkNeedsUser(stateDir, reg, req, k, s)
+				return nil, linkNeedsUser(stateDir, reg, req, k, s, unlinked, len(projects))
 			}
 			p.FirstLinks = append(p.FirstLinks, FirstLink{Key: k, Pools: s.Pools, Quiet: s.QuietMachine})
 			use = req.Pool
 		case req.Pool != nil:
 			if !machine.Subset(req.Pool, link) {
-				return nil, poolMismatch(stateDir, reg, req, k, link)
+				return nil, poolMismatch(stateDir, reg, req, k, link, unlinked, len(projects))
 			}
 			use = req.Pool
 		}

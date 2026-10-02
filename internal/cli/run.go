@@ -501,11 +501,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 
 // planWithFirstLinks plans the run and, when its --pool set equals an
 // unlinked key's suggestion, writes that first link (spec 4.2) and plans
-// again. Each first link is a compare-and-set under machine.lock, then the
-// key's registry lock, before any ticket: still unlinked, it is written
-// and logged event=link by=run and the run says linked:; already linked to
-// the same set (another run won the race), the run goes on; linked to a
-// different set, it refuses with link-conflict.
+// again. All first links of one run are written under one machine.lock
+// hold, each a compare-and-set under its key's registry lock, before any
+// ticket (machine.WriteFirstLinks): still unlinked, a key is written and
+// logged event=link by=run and the run says linked:; already linked to the
+// same set (another run won the race), the run goes on; any key linked to
+// a different set refuses the run with link-conflict and nothing is
+// written.
 func planWithFirstLinks(dir string, reg *machine.Registry, req runplan.Request, o machine.Options, quiet bool, stderr io.Writer, p colorize.Palette) (*runplan.Plan, error) {
 	for {
 		plan, err := runplan.Make(dir, reg, req)
@@ -522,27 +524,20 @@ func planWithFirstLinks(dir string, reg *machine.Registry, req runplan.Request, 
 		}
 		for _, fl := range plan.FirstLinks {
 			beforeFirstLink(dir, fl.Key)
-			res, err := machine.WriteLink(dir, fl.Key, "run", o, func(_ *machine.Registry, c *lane.Config) error {
-				switch {
-				case len(c.Pools) == 0:
-					c.Pools, c.QuietMachine = fl.Pools, c.QuietMachine || fl.Quiet
-					return nil
-				case machine.SameSet(c.Pools, fl.Pools):
-					return lane.ErrNoChange
-				}
-				by := "another process"
-				if pid, ok := machine.LastLinker(dir, fl.Key); ok {
-					by = fmt.Sprintf("pid %d", pid)
-				}
-				return &machine.Refusal{Msg: fmt.Sprintf("link-conflict: %q was just linked to %s by %s; rerun without --pool", fl.Key, machine.SetText(c.Pools), by)}
-			})
-			if err != nil {
-				return nil, err
-			}
+		}
+		// A rival link with the same pools but a different quiet_machine is
+		// accepted: only a user write (link, config) can produce it, the
+		// user's choice wins, and the replan reads the stored value.
+		results, err := machine.WriteFirstLinks(dir, "run", o, plan.FirstLinks)
+		if err != nil {
+			return nil, err
+		}
+		for i, res := range results {
 			if res.Changed {
+				key := plan.FirstLinks[i].Key
 				// Printed even with --quiet: it records a stored change.
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Green(fmt.Sprintf("linked: %s (stored; every later run on %s takes these pools)",
-					machine.LinkedLine(fl.Key, res.New.Pools, res.New.QuietMachine), fl.Key)))
+					machine.LinkedLine(key, res.New.Pools, res.New.QuietMachine), key)))
 			}
 		}
 	}

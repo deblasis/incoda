@@ -341,9 +341,35 @@ incoda: ask the user for anything else; they run: incoda link cap-e2e
 		{"first link without a suggestion", req([]string{"polymatto-x"}, "tests"), `incoda: link-needs-user: "polymatto-x" has no suggested pools; ask the user; they run: incoda link polymatto-x
 `},
 		{"one key refused refuses the run", req([]string{"cap-gate", "polymatto"}, "vm"), `incoda: link-needs-user: "cap-gate" suggests tests; a first link from run must equal it
-incoda: run it with the suggestion instead (stored; every later run on this queue takes these pools):
-incoda:   incoda run --queue cap-gate,polymatto --pool tests --reason 'prod build' -- 'pnpm' 'build'
+incoda: link it to the suggestion instead (stored; every later run on this queue takes these pools), then run without --pool, which applies to every named project queue:
+incoda:   incoda config cap-gate --pool tests
+incoda:   incoda run --queue cap-gate,polymatto --reason 'prod build' -- 'pnpm' 'build'
 incoda: ask the user for anything else; they run: incoda link cap-gate
+`},
+		// Two unlinked keys with different suggestions: a printed --pool
+		// would be refused for one of them, so each gets its config line
+		// and the run line has no --pool.
+		{"several unlinked keys", req([]string{"cap-gate", "cap-e2e"}, "tests"), `incoda: link-needs-user: "cap-e2e" suggests computer-use,tests; a first link from run must equal it
+incoda: link them to the suggestions instead (stored; every later run on these queues takes these pools), then run without --pool, which applies to every named project queue:
+incoda:   incoda config cap-e2e --pool computer-use,tests
+incoda:   incoda config cap-gate --pool tests
+incoda:   incoda run --queue cap-e2e,cap-gate --reason 'prod build' -- 'pnpm' 'build'
+incoda: ask the user for anything else; they run: incoda link cap-e2e
+`},
+		{"several unlinked keys, one without a suggestion", req([]string{"cap-e2e", "polymatto-x"}, "tests"), `incoda: link-needs-user: "cap-e2e" suggests computer-use,tests; a first link from run must equal it
+incoda: no runnable line: "polymatto-x" has no usable suggestion (no name pattern matches); ask the user; they run: incoda link cap-e2e, incoda link polymatto-x
+`},
+		{"pool-mismatch with another project key", req([]string{"polymatto", "kf-gate"}, "vm"), `incoda: pool-mismatch: "kf-gate" is linked to tests; --pool vm is not part of it
+incoda: to also hold vm for this run only, name it next to the queue (no link change; without --pool, which applies to every named project queue):
+incoda:   incoda run --queue kf-gate,polymatto,vm --reason 'prod build' -- 'pnpm' 'build'
+incoda: changing the link is the user's call; ask them.
+`},
+		{"pool-mismatch next to an unlinked key", req([]string{"kf-gate", "wintty-gate"}, "vm"), `incoda: pool-mismatch: "kf-gate" is linked to tests; --pool vm is not part of it
+incoda: link wintty-gate to its suggestion first (stored; every later run on this queue takes these pools):
+incoda:   incoda config wintty-gate --pool tests
+incoda: to also hold vm for this run only, name it next to the queue (no link change; without --pool, which applies to every named project queue):
+incoda:   incoda run --queue kf-gate,wintty-gate,vm --reason 'prod build' -- 'pnpm' 'build'
+incoda: changing the link is the user's call; ask them.
 `},
 	} {
 		_, err := Make(state, reg, c.req)

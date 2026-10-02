@@ -230,18 +230,38 @@ func unlinkedRefusal(stateDir string, reg *machine.Registry, req Request, keys [
 
 // linkNeedsUser refuses a --pool first link on an unlinked key that is not
 // its suggestion (spec 4.2): run makes a first link only when the set
-// equals the suggestion; anything else is the user's.
-func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key string, s Suggestion) *machine.Refusal {
+// equals the suggestion; anything else is the user's. unlinked are the
+// run's unlinked named project keys and projects counts its named project
+// keys: with several, a printed --pool would apply to every one of them
+// and could be refused again, so the fix links each unlinked key with
+// config and runs without --pool (as the unlinked refusal does).
+func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key string, s Suggestion, unlinked []string, projects int) *machine.Refusal {
 	switch {
 	case s.Pattern == "":
 		return refusal([]string{fmt.Sprintf("link-needs-user: %q has no suggested pools; ask the user; they run: incoda link %s", key, key)})
 	case !s.Usable:
 		return refusal([]string{fmt.Sprintf("link-needs-user: %q has no usable suggestion (%s); ask the user; they run: incoda link %s", key, s.Why, key)})
 	}
-	lines := []string{
-		fmt.Sprintf("link-needs-user: %q suggests %s; a first link from run must equal it", key, strings.Join(s.Pools, ",")),
-		"run it with the suggestion instead (stored; every later run on this queue takes these pools):",
+	lines := []string{fmt.Sprintf("link-needs-user: %q suggests %s; a first link from run must equal it", key, strings.Join(s.Pools, ","))}
+	if projects > 1 {
+		cfg, quiet, ok := configFirst(reg, unlinked)
+		if !ok {
+			return refusal(append(lines, cfg...))
+		}
+		lead := "link it to the suggestion instead (stored; every later run on this queue takes these pools)"
+		if len(unlinked) > 1 {
+			lead = "link them to the suggestions instead (stored; every later run on these queues takes these pools)"
+		}
+		lines = append(lines, lead+", then run without --pool, which applies to every named project queue:")
+		lines = append(lines, cfg...)
+		run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, quiet)
+		lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
+		if quiet && !req.WaitGiven {
+			lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
+		}
+		return refusal(append(lines, "ask the user for anything else; they run: incoda link "+key))
 	}
+	lines = append(lines, "run it with the suggestion instead (stored; every later run on this queue takes these pools):")
 	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, s.QuietMachine)
 	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
 	if s.QuietMachine && !req.WaitGiven {
@@ -250,10 +270,33 @@ func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key stri
 	return refusal(append(lines, "ask the user for anything else; they run: incoda link "+key))
 }
 
+// configFirst is the config line of each unlinked key, which links it to
+// its suggestion, and whether any suggestion carries quiet_machine. When a
+// key has no usable suggestion there is no runnable line: ok is false and
+// the one line returned asks the user to link every unlinked key.
+func configFirst(reg *machine.Registry, unlinked []string) (lines []string, quiet, ok bool) {
+	sh := fixline.Native()
+	for _, k := range unlinked {
+		s := Suggest(reg, k)
+		if !s.Usable {
+			links := make([]string, len(unlinked))
+			for i, u := range unlinked {
+				links[i] = "incoda link " + u
+			}
+			return []string{fmt.Sprintf("no runnable line: %q has no usable suggestion (%s); ask the user; they run: %s", k, s.Why, strings.Join(links, ", "))}, false, false
+		}
+		lines = append(lines, "  "+configLine(sh, k, s))
+		quiet = quiet || s.QuietMachine
+	}
+	return lines, quiet, true
+}
+
 // poolMismatch refuses a --pool set that is not part of key's link (spec
 // 4.2). The fix holds the extra pools for this run only, by naming them
-// next to the queue, and keeps the part of the set the link allows.
-func poolMismatch(stateDir string, reg *machine.Registry, req Request, key string, link []string) *machine.Refusal {
+// next to the queue, and keeps the part of the set the link allows. With
+// several named project keys a --pool would apply to all of them, so the
+// line has none, and each unlinked key is linked to its suggestion first.
+func poolMismatch(stateDir string, reg *machine.Registry, req Request, key string, link, unlinked []string, projects int) *machine.Refusal {
 	in := map[string]bool{}
 	for _, k := range link {
 		in[k] = true
@@ -266,14 +309,33 @@ func poolMismatch(stateDir string, reg *machine.Registry, req Request, key strin
 			extra = append(extra, k)
 		}
 	}
-	lines := []string{
-		fmt.Sprintf("pool-mismatch: %q is linked to %s; --pool %s is not part of it", key, strings.Join(link, ","), strings.Join(extra, ",")),
-		fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change):", strings.Join(extra, ",")),
+	lines := []string{fmt.Sprintf("pool-mismatch: %q is linked to %s; --pool %s is not part of it", key, strings.Join(link, ","), strings.Join(extra, ","))}
+	hold := fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change):", strings.Join(extra, ","))
+	quiet := false
+	if projects > 1 {
+		keep = nil
+		hold = fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change; without --pool, which applies to every named project queue):", strings.Join(extra, ","))
+		if len(unlinked) > 0 {
+			cfg, q, ok := configFirst(reg, unlinked)
+			if !ok {
+				return refusal(append(append(lines, cfg...), "changing the link is the user's call; ask them."))
+			}
+			lead := fmt.Sprintf("link %s to its suggestion first (stored; every later run on this queue takes these pools):", unlinked[0])
+			if len(unlinked) > 1 {
+				lead = fmt.Sprintf("link %s to their suggestions first (stored; every later run on these queues takes these pools):", strings.Join(unlinked, ", "))
+			}
+			lines = append(append(lines, lead), cfg...)
+			quiet = q
+		}
 	}
+	lines = append(lines, hold)
 	// A pool both named in --queue and in extra goes into the line once.
 	queue := namedOrder(reg, machine.SortedSet(append(append([]string(nil), req.Named...), extra...)))
-	run, why := fixFor(stateDir, reg, req, queue, keep, false)
+	run, why := fixFor(stateDir, reg, req, queue, keep, quiet)
 	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
+	if quiet && !req.WaitGiven {
+		lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
+	}
 	return refusal(append(lines, "changing the link is the user's call; ask them."))
 }
 
