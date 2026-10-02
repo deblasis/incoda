@@ -390,7 +390,14 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	for {
 		plan, err := planWithFirstLinks(dir, reg, req, machine.Options{
 			Start: start, Wait: wait.d, Poll: *poll, Chain: chain, Stderr: stderr,
+			// A first link's wait for machine.lock ends on an interrupt,
+			// as every queueing wait of a run does.
+			Ctx: ctx,
 		}, *quiet, stderr, p)
+		if errors.Is(err, machine.ErrInterrupted) {
+			rc = ExitInterrupt
+			return exitWith(ExitInterrupt, "interrupted while queueing for machine.lock")
+		}
 		if err != nil {
 			return machineExit(err)
 		}

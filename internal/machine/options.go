@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -27,6 +28,9 @@ type Options struct {
 	// binary, "" for os.Executable.
 	Path string
 	Exe  string
+	// Ctx, when set, lets an interrupt end a machine.lock wait
+	// (ErrInterrupted); nil waits as before.
+	Ctx context.Context
 }
 
 func (o Options) poll() time.Duration {
@@ -44,7 +48,7 @@ func (o Options) stderr() io.Writer {
 }
 
 func (o Options) lockOptions(op string) LockOptions {
-	return LockOptions{Op: op, Start: o.Start, Wait: o.Wait, Poll: o.Poll, Chain: o.Chain, Stderr: o.Stderr}
+	return LockOptions{Op: op, Start: o.Start, Wait: o.Wait, Poll: o.Poll, Chain: o.Chain, Stderr: o.Stderr, Ctx: o.Ctx}
 }
 
 // budgetDeadline is when the --wait budget ends; the zero time means never.

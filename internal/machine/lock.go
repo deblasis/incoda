@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -49,7 +50,15 @@ type LockOptions struct {
 	// upgrade-blocked at once (Unix; Windows chains are Skip).
 	Chain  procinfo.Chain
 	Stderr io.Writer
+	// Ctx, when set, ends the wait early: once it is done AcquireLock
+	// returns ErrInterrupted between polls. Nil waits as before.
+	Ctx context.Context
 }
+
+// ErrInterrupted is AcquireLock's error when LockOptions.Ctx ended the
+// wait (an interrupt or a termination signal) before machine.lock was
+// taken. Nothing is held or written then.
+var ErrInterrupted = errors.New("interrupted while waiting for machine.lock")
 
 // lockDeadline is when a machine.lock wait gives up: the end of the --wait
 // budget, but never less than minLockWait from now. The zero time means
@@ -73,7 +82,8 @@ func lockDeadline(start time.Time, wait time.Duration, now time.Time) time.Time 
 // the holder's note on every poll, prints "waiting for machine.lock: ..."
 // after its first failed poll and then every 60s, and refuses with
 // upgrade-blocked when a blocker in the note is its own ancestor. On budget
-// expiry it returns a Timeout: machine-lock-timeout.
+// expiry it returns a Timeout: machine-lock-timeout. When o.Ctx ends first
+// it returns ErrInterrupted.
 func AcquireLock(stateDir string, o LockOptions) (*Lock, error) {
 	stderr := o.Stderr
 	if stderr == nil {
@@ -88,8 +98,16 @@ func AcquireLock(stateDir string, o LockOptions) (*Lock, error) {
 		return nil, stateErrorf("cannot open %s: %s", textsafe.Escape(LockPath(stateDir)), esc(err))
 	}
 	deadline := lockDeadline(o.Start, o.Wait, time.Now())
+	var done <-chan struct{}
+	if o.Ctx != nil {
+		done = o.Ctx.Done()
+	}
 	var printedAt time.Time
 	for attempt := 0; ; attempt++ {
+		if o.Ctx != nil && o.Ctx.Err() != nil {
+			f.Close()
+			return nil, ErrInterrupted
+		}
 		ok, err := f.TryLock()
 		if err != nil {
 			f.Close()
@@ -121,7 +139,14 @@ func AcquireLock(stateDir string, o LockOptions) (*Lock, error) {
 			fmt.Fprintf(stderr, "incoda: %s\n", waitingLine(note, noted))
 			printedAt = now
 		}
-		time.Sleep(poll)
+		t := time.NewTimer(poll)
+		select {
+		case <-done:
+			t.Stop()
+			f.Close()
+			return nil, ErrInterrupted
+		case <-t.C:
+		}
 	}
 }
 

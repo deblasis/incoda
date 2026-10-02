@@ -2,6 +2,7 @@ package machine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -152,4 +153,29 @@ func TestAcquireLockGetsTheLockOnceFreed(t *testing.T) {
 		t.Fatal(err)
 	}
 	lk.Release()
+}
+
+// TestAcquireLockEndsWhenItsContextDoes: a cancelled Ctx ends a
+// machine.lock wait between polls with ErrInterrupted, long before the
+// budget; without a Ctx the wait is unchanged.
+func TestAcquireLockEndsWhenItsContextDoes(t *testing.T) {
+	state := t.TempDir()
+	holder, err := AcquireLock(state, LockOptions{Op: "link", Start: time.Now(), Wait: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	_, err = AcquireLock(state, LockOptions{Op: "link", Start: start, Wait: time.Minute, Poll: 50 * time.Millisecond, Ctx: ctx})
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("want ErrInterrupted, got %v", err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("the interrupted wait took %v", el)
+	}
+	if _, err := AcquireLock(state, LockOptions{Op: "link", Start: time.Now(), Wait: time.Minute, Ctx: ctx}); !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("an already cancelled Ctx ends the wait at once: %v", err)
+	}
 }

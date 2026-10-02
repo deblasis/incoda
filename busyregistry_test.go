@@ -44,8 +44,15 @@ func holdRegistryElsewhere(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	holdLockElsewhere(t, lane.RegistryLockPath(dir))
+}
+
+// holdLockElsewhere starts a helper process that holds the lock of the
+// file at path until the test ends, and waits until it holds it.
+func holdLockElsewhere(t *testing.T, path string) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
-	cmd.Env = append(os.Environ(), "INCODA_TEST_HOLD_LOCK="+lane.RegistryLockPath(dir))
+	cmd.Env = append(os.Environ(), "INCODA_TEST_HOLD_LOCK="+path)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
