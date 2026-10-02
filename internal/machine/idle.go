@@ -162,7 +162,7 @@ func blockerLines(bs []Blocker, ph phase) []string {
 	var stops []string
 	for _, b := range bs {
 		if !b.Orphan {
-			stops = append(stops, "  "+killLine(b, ph))
+			stops = append(stops, "  "+killLine(b))
 		}
 	}
 	if len(stops) > 0 {
@@ -172,13 +172,13 @@ func blockerLines(bs []Blocker, ph phase) []string {
 	return append(lines, "do not force-release them: the job keeps running and the upgrade would overlap it.")
 }
 
-// killLine is the stop line for one older run. After the fence (M5) the old
-// holder can no longer see kill requests, so the line carries --force
-// (spec 3.2; what kill does with it is plan 2b).
-func killLine(b Blocker, ph phase) string {
-	s := fmt.Sprintf("incoda kill --queue %s --pid %d --reason 'incoda upgrade'", b.Key, b.PID)
-	if ph == phaseM5 {
-		s += " --force"
-	}
-	return s
+// killLine is the stop line for one older run, before the fence (M2) and
+// after it (M5) alike: kill ends an older incoda with its whole job by the
+// old-holder kill of spec 3.2, with or without --force.
+func killLine(b Blocker) string {
+	return KillLine(b.Key, b.PID, UpgradeReason, false)
 }
+
+// UpgradeReason is the --reason of every stop line the upgrade prints
+// (spec 3.2, 3.3).
+const UpgradeReason = "incoda upgrade"

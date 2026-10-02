@@ -197,7 +197,7 @@ func TestReleaseBuildIgnoresCrashpoints(t *testing.T) {
 // creates queues/ and takes a ticket there inside the window before the
 // fence is placed (the rename fallback, and the empty-dir path). The race
 // rule moves that queues/ to strays/, the fence goes in, M5 waits for the
-// live stray ticket with the --force stop line, and M6 merges it into lanes/.
+// live stray ticket with its stop line, and M6 merges it into lanes/.
 func TestFenceRacesSendANewQueuesDirToStrays(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows cannot rename a directory with an open file inside; there the migration waits for that run before placing the fence (TestPlaceFenceNotIdleWhereADirectoryCannotMove)")
@@ -231,7 +231,7 @@ func TestFenceRacesSendANewQueuesDirToStrays(t *testing.T) {
 			if err := os.WriteFile(pause, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			waitForText(t, &errBuf, "incoda:   incoda kill --queue late --pid 999998 --reason 'incoda upgrade' --force\n")
+			waitForText(t, &errBuf, "incoda:   incoda kill --queue late --pid 999998 --reason 'incoda upgrade'\n")
 			if !machine.FencePlaced(state) {
 				t.Fatal("the fence must be in place while M5 waits")
 			}

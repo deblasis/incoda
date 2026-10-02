@@ -575,7 +575,8 @@ func TestCommitRefencesWhenTheFenceVanishedDuringM5(t *testing.T) {
 		t.Fatalf("fence checks before the commit: %d, want 2", checks)
 	}
 	if !strings.Contains(out, "incoda: upgrade-wait: state upgrade waits for 1 run(s) by an older incoda:\n") ||
-		!strings.Contains(out, "slipped pid 999999: zig build") || !strings.Contains(out, "--force") {
+		!strings.Contains(out, "slipped pid 999999: zig build") ||
+		!strings.Contains(out, "incoda kill --queue slipped --pid 999999 --reason 'incoda upgrade'\n") {
 		t.Fatalf("output:\n%s", out)
 	}
 	assertMigrated(t, state, true)

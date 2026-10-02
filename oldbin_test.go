@@ -205,7 +205,7 @@ func TestMigrationWaitsForAnOldRun(t *testing.T) {
 
 // TestMigrationWaitsForAnOldRunThatSlipsIn (M5): an older incoda starts a
 // run after the idle check and before the fence; the swap carries its
-// ticket into lanes/, and the migration waits for it with the --force
+// ticket into lanes/, and the migration waits for it with its
 // stop line before anything new runs.
 func TestMigrationWaitsForAnOldRunThatSlipsIn(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -242,7 +242,7 @@ func TestMigrationWaitsForAnOldRunThatSlipsIn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitForText(t, &mErr, fmt.Sprintf("incoda:   incoda kill --queue slip --pid %d --reason 'incoda upgrade' --force\n", o.Process.Pid))
+	waitForText(t, &mErr, fmt.Sprintf("incoda:   incoda kill --queue slip --pid %d --reason 'incoda upgrade'\n", o.Process.Pid))
 	if !machine.FencePlaced(state) {
 		t.Fatal("M5 waits behind the fence")
 	}

@@ -162,7 +162,7 @@ func TestWaitIdleRefusesAnAncestorHolder(t *testing.T) {
 	}
 }
 
-func TestWaitIdleM5ProbesLanesAndStraysWithForce(t *testing.T) {
+func TestWaitIdleM5ProbesLanesAndStrays(t *testing.T) {
 	state := t.TempDir()
 	holdTicket(t, lane.LanesDir(state), "slip", 6001, "just", "gate")
 	holdTicket(t, filepath.Join(StraysDir(state), "1727853243000000000"), "late", 6002, "make")
@@ -178,8 +178,8 @@ func TestWaitIdleM5ProbesLanesAndStraysWithForce(t *testing.T) {
 		"incoda: upgrade-wait: state upgrade waits for 2 run(s) by an older incoda:\n",
 		"incoda:   late pid 6002: make\n",
 		"incoda:   slip pid 6001: just gate\n",
-		"incoda:   incoda kill --queue late --pid 6002 --reason 'incoda upgrade' --force\n",
-		"incoda:   incoda kill --queue slip --pid 6001 --reason 'incoda upgrade' --force\n",
+		"incoda:   incoda kill --queue late --pid 6002 --reason 'incoda upgrade'\n",
+		"incoda:   incoda kill --queue slip --pid 6001 --reason 'incoda upgrade'\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
