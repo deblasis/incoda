@@ -6,10 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"time"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 )
 
@@ -104,24 +103,13 @@ func FindKillTarget(stateDir string, v View, key string, pid int, deadline time.
 	return KillTarget{Kind: TargetNone, Key: key, PID: pid}, nil
 }
 
-// fixWord quotes one value of a printed command (spec 2.6, fix lines):
-// one single-quoted word, an embedded quote closed, escaped with a
-// backslash and reopened on Unix (POSIX sh), doubled on Windows
-// (PowerShell).
-func fixWord(s string) string {
-	if runtime.GOOS == "windows" {
-		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
 // KillLine is a printed stop line: incoda kill --queue K --pid N --reason
-// '<reason>', plus --force when force is set (the stopped-holder rerun line
+// '<reason>' (quoted by fixline.Quote), plus --force when force is set (the stopped-holder rerun line
 // of spec 3.2 carries it; kill needs no --force for an older incoda). The key is
 // validated and prints bare; the reason is always a constant of this
 // binary, so the line never needs a placeholder.
 func KillLine(key string, pid int, reason string, force bool) string {
-	s := fmt.Sprintf("incoda kill --queue %s --pid %d --reason %s", key, pid, fixWord(reason))
+	s := fmt.Sprintf("incoda kill --queue %s --pid %d --reason %s", key, pid, fixline.Quote(fixline.Native(), reason))
 	if force {
 		s += " --force"
 	}
