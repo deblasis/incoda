@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/proc"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -48,19 +51,36 @@ func NewLaneKiller(dir string) LaneKiller {
 	return LaneKiller{Dir: dir, By: name, ByPID: os.Getpid()}
 }
 
-// open finds key's lane in the layout the state directory has now (lanes/
-// once migrated, queues/ before) without creating anything: a kill
-// addresses the layout it finds (spec 3.2).
-func (k LaneKiller) open(key string) (*lane.Queue, error) {
+// target finds pid on key in the layout the state directory has now
+// (lanes/ once migrated, queues/ before, strays/ for an older incoda that
+// runs outside the pools) without creating anything: a kill addresses the
+// layout it finds (spec 3.2).
+func (k LaneKiller) target(key string, pid int) (machine.KillTarget, error) {
 	v, err := machine.Inspect(k.Dir)
 	if err != nil {
-		return nil, err
+		return machine.KillTarget{}, err
 	}
-	return lane.OpenIn(v.Root, key, lane.Existing)
+	t, err := machine.FindKillTarget(k.Dir, v, key, pid)
+	if err != nil {
+		return machine.KillTarget{}, err
+	}
+	if t.Kind == machine.TargetNone {
+		return t, fmt.Errorf("queue %q has no live participant with pid %d: %w", key, pid, lane.ErrNoParticipant)
+	}
+	return t, nil
 }
 
 func (k LaneKiller) Request(key string, pid int, reason string) error {
-	q, err := k.open(key)
+	t, err := k.target(key, pid)
+	if err != nil {
+		return err
+	}
+	if t.Old() {
+		// An older incoda gets no request: it is ended with its whole job
+		// at once (spec 3.2, old-holder kill).
+		return k.killOld(t, reason)
+	}
+	q, err := lane.OpenIn(t.Root, key, lane.Existing)
 	if err != nil {
 		return err
 	}
@@ -70,7 +90,14 @@ func (k LaneKiller) Request(key string, pid int, reason string) error {
 }
 
 func (k LaneKiller) Gone(key string, pid int, wait time.Duration) (bool, error) {
-	q, err := k.open(key)
+	t, err := k.target(key, pid)
+	if errors.Is(err, lane.ErrNoParticipant) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	q, err := lane.OpenIn(t.Root, key, lane.Existing)
 	if err != nil {
 		return false, err
 	}
@@ -78,15 +105,37 @@ func (k LaneKiller) Gone(key string, pid int, wait time.Duration) (bool, error) 
 	return q.WaitGone(pid, wait, 100*time.Millisecond)
 }
 
+// Force ends pid. An older incoda is ended with its whole job (the
+// old-holder kill of spec 3.2); a holder of this binary is terminated as
+// before.
 func (k LaneKiller) Force(key string, pid int, reason string) error {
+	t, err := k.target(key, pid)
+	if err != nil {
+		return err
+	}
+	if t.Old() {
+		return k.killOld(t, reason)
+	}
 	if err := proc.Terminate(pid, killedExit); err != nil {
 		return err
 	}
-	q, err := k.open(key)
+	q, err := lane.OpenIn(t.Root, key, lane.Existing)
 	if err != nil {
 		return err
 	}
 	defer q.Close()
 	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, pid, textsafe.LogValue(k.By), textsafe.LogValue(reason))
+	return nil
+}
+
+// killOld ends an older incoda with its whole job and logs it where its
+// ticket is.
+func (k LaneKiller) killOld(t machine.KillTarget, reason string) error {
+	res, err := machine.KillOldHolder(k.Dir, t, procinfo.ParentChain())
+	if err != nil {
+		return err
+	}
+	lane.AppendLog(t.Dir, "queue=%s event=kill pid=%d by=%s reason=%s forced=true old=true processes=%d",
+		t.Key, t.PID, textsafe.LogValue(k.By), textsafe.LogValue(reason), res.Processes)
 	return nil
 }
