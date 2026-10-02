@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Refreshed against bba4ccb** (plan 3a landed as `e40deba..bcc4580`, index updated in `bba4ccb`). Every Replace block was re-applied in order to a scratch copy of that commit; each occurs exactly once when reached and every task builds, vets (darwin, linux, windows, with and without `incoda_crashpoints`) and passes its tests. What changed:
+> - New **Task 0** carries plan 3a's follow-ups (index, "Carried forward from plan 3a"): run's signal context now reaches `machine.Ensure`, so Ctrl-C during the wait for `machine.lock` or for older runs of the state upgrade exits 130 (as 6829fc4 did for first links); a `--quiet-machine`-only `config` change is logged as `event=link ... quiet_machine=...` and echoed; a comment at `linkEdit.named()`; a test of the several-keys unlinked refusal with a quiet suggestion.
+> - Task 5: `internal/machine/link.go` blocks rewritten. Since bbe31a2 the pool check lives in `writeLinkHeld`, so the `project` flag goes through it (`WriteLink` and `WriteFirstLinks` pass `true`, `WriteStep` `false`). Its interactive `init` no longer prints the placeholder `incoda link KEY`: it names each key it left unlinked.
+> - Task 6: the third `run.go` block starts at the ticket literal (since 6655267 `takeLane` opens with the `busy` closure). `lineRefused` now adds every pool when a printed run line takes quiet-machine (plan 3a's b001b41 lane-set check), with `TestQuietFixLineChecksEveryPool`.
+> - Every printed command of this plan goes through `internal/fixline`: `machine.configCmd` (Task 1, the `pools add` refusals) and `runplan.LinkLine` (Task 3, used by `link`, `init --print`, `init --apply-suggestions`, interactive `init` and doctor). Tests compare the POSIX text and the PowerShell form where they print one (`TestConfigCmd`, `TestLinkLine`, root helper `linkCmd`).
+> - Expected texts that changed with it: `TestAddPool` (the two refusals build their command with `configCmd`), `TestLinkNeedsATerminal`, `TestInitPrint` (doctor line) and `TestInitApplySuggestions` (through `linkCmd`), `TestInitAsks` (the `left unlinked:` line names `incoda link polymatto`). Plan 3a's own tests change only in Task 0 (`TestConfigLinkFlags`: two more `event=link` lines and the quiet_machine echo).
+
 **Goal:** The user's setup commands for pools (`pools add|remove`, `incoda pools`, `incoda link`, `incoda init` interactive, `--print` and `--apply-suggestions`), quiet-machine at top level, doctor's unlinked lanes, and `incoda help` documenting every prefix.
 
 **Architecture:** Kind changes are `machine.AddPool` and `machine.RemovePool`: `machine.lock`, then the lane's registry lock held across the ticket check and the `machine.json` write (`lane.Queue.UpdateIdle`). The setup commands talk to a person only through a terminal seam (`cli.openTerminal`) with a line-based picker; each answer is a compare-and-set under `machine.lock` (`machine.WriteLink`, `machine.WriteStep`) against the value the question showed. `runplan` gains `UnlinkedLanes` and quiet-machine (every pool in the plan, exclusive `quiet` tickets, replan trigger 3). `report.BuildPools` is the pool view `incoda pools --json` prints and plan 5's `status --json` will reuse.
@@ -26,7 +33,8 @@
 - Planning (`internal/runplan`) reads `machine.json` and `config.json` files only: it never opens, creates or locks a lane, so a refused run leaves no directory, ticket or log behind (spec 4.1).
 - `run` never reads a terminal (spec 4.1). `link` and `init` read one only through the `openTerminal` seam (plan 3b Task 3).
 - Every string that came from state, a file, argv, another process or the environment is printed through `textsafe.Escape` (keys are validated and print bare); in `lane.log` such values go through `textsafe.LogValue`. Descriptions and closed texts are checked with `textsafe.CheckWrite` before any write (spec 4.6).
-- Every printed run, config or kill command is built by `internal/fixline` (plan 3a Task 2): POSIX sh on Unix, PowerShell on Windows, no placeholders.
+- Every printed run, config, link or kill command is built by `internal/fixline` (plan 3a Task 2): POSIX sh on Unix, PowerShell on Windows, no placeholders. This plan's are `machine.configCmd` (Task 1), `runplan.LinkLine` (Task 3) and the `ConfigLine` of plan 3a's `configLine` (Task 4); a command with no variable word (`incoda init`, `incoda init --print`, `incoda doctor`) is literal text, which is what fixline renders for it in both shells. Every printed run line is checked by `lineRefused` against every lane it would take (plan 3a, b001b41), the pools quiet-machine brings included (Task 6). Usage and help texts are documentation and may say `KEY`.
+- An interrupt (SIGINT, SIGTERM) ends every wait of a run with exit 130, including the wait for `machine.lock` and for older runs during the state upgrade (Task 0). Setup commands keep the default signal behavior: an interrupted `init` keeps the steps already applied.
 - Test safety rules, binding on every test this plan adds or changes:
   - Never invoke an incoda found on PATH, not even `incoda version`. Tests build their own binaries (`binaries`, `oldBinary`, `crashBinary`) and run them by absolute path. The one test that pastes a printed line into a shell (`TestPrintedUnlinkedLineRunsAsPrinted`) sets PATH to the test build's directory followed by `/usr/bin:/bin` only.
   - Every invocation of any incoda, old or new, gets `INCODA_DIR` set to a `t.TempDir()` through `laneEnv` (or `doctorEnv`); in-process tests (`internal/cli`) set it with `t.Setenv`.
@@ -48,6 +56,9 @@ Plan 3a's decisions hold. In addition:
 - **`init --print`** refuses `--wait` (it takes no lock) and, on a layout not upgraded yet, reads the old `queues/` with the bootstrap pools as the registry to be. `init --apply-suggestions` leaves a lane alone when its suggestion names a pool this machine lacks (`left unlinked: K (no suggestion: ...)`), and a lane linked or closed meanwhile.
 - **doctor** prints one `attention:` line per unlinked open lane (spec 5.5), with its suggestion or the ask-the-user text; it still exits 0.
 - **Quiet machine.** From config, the first named project lane (in key order) with `quiet_machine` names the source. The informational line comes with each wait notice (the first, then every 60s), `holding nothing` before any pool is held. A pool only quiet-machine brings has the role `pool, quiet-machine`. Quiet tickets are exclusive and record `quiet: true`; the enqueue line logs `quiet=true`. Trigger 3 is checked after trigger 1, so a pool of the plan that left the registry still reports `left the registry`.
+- **Interrupts during the upgrade** (Task 0). Only run passes a context to `machine.Ensure`; an interrupt ends the upgrade's waits at the points where a spent `--wait` already ends them, so it leaves what a timeout leaves and the next mutating command resumes. The line is `incoda: interrupted while waiting for machine.lock or the state upgrade` (exit 130).
+- **quiet_machine is part of the link** (Task 0). Any write that changes it logs `event=link by=<by> old=<pools> new=<pools> quiet_machine=<new>`; `config` echoes a change of it as `link: tests -> tests, quiet_machine` (both sides carry `, quiet_machine` when set). A change of the pools alone logs and echoes as plan 3a does.
+- **Printed `incoda link` lines name the key.** Interactive `init` ends with `left unlinked: a, b; runs on them are refused until they are linked (the user runs: incoda link a, incoda link b)` instead of a `KEY` placeholder. On Windows every printed key is PowerShell-quoted (`incoda link 'cap-gate'`), as fixline quotes keys; plan 3a's refusals keep their own text.
 - **`incoda help`** documents the prefixes and informational lines this binary prints after plan 3; plan 4 adds its own (`out-of-order-busy:`, `self-wait:`, `quiet-nested:`, `nested-refused:`, `held-lost:`, `exclusive-ignored:`).
 
 ## File structure
@@ -57,7 +68,11 @@ Plan 3a's decisions hold. In addition:
 | `internal/lane/config.go` | `ErrLaneBusy`, `UpdateIdle` |
 | `internal/lane/ticket.go`, `queue.go` | `Ticket.Quiet`, `quiet=true` in the enqueue log |
 | `internal/machine/kind.go` | `AddPool`, `RemovePool`, `LinkedFrom`, `PoolChange`, `KindResult` |
-| `internal/machine/link.go` | `ErrLinkMoved`, `WriteStep` |
+| `internal/machine/link.go` | `ErrLinkMoved`, `WriteStep`, the project flag through `writeLinkHeld`, `event=link` on a quiet_machine change |
+| `internal/machine/options.go`, `idle.go`, `migrate.go` | `Options.sleep`: the upgrade's waits end on an interrupt |
+| `internal/cli/state.go` | `mutatingStateCtx` |
+| `internal/cli/config.go`, `linkflags.go` | the quiet_machine echo, the `named()` comment |
+| `internal/runplan/refusals.go` | `LinkLine`; `lineRefused` sees the pools quiet-machine brings |
 | `internal/report/pools.go` | `Pools`, `Pool`, `BuildPools` |
 | `internal/runplan/unlinked.go` | `Unlinked`, `UnlinkedLanes`, `ConfigLine`, `SlotNotes` |
 | `internal/runplan/runplan.go` | quiet-machine in `Make`, trigger 3 in `Changed`, the `pool, quiet-machine` role |
@@ -66,9 +81,690 @@ Plan 3a's decisions hold. In addition:
 | `internal/cli/link.go` | `incoda link`, `askLink`, `pickLink` |
 | `internal/cli/initcmd.go` | `incoda init`, `--print`, `--apply-suggestions` |
 | `internal/cli/misc.go` | doctor's unlinked lines |
-| `internal/cli/run.go` | `--quiet-machine`, quiet tickets, the quiet line |
+| `internal/cli/run.go` | the signal context before the upgrade, `--quiet-machine`, quiet tickets, the quiet line |
 | `internal/cli/cli.go` | dispatch of `pools`, `link`, `init`; the help text |
-| root `pools_test.go`, `init_test.go` (new), `config_test.go`, `integration_test.go`; `internal/cli` `link_test.go`, `init_test.go`, `help_test.go` (new), `run_test.go` | tests |
+| root `pools_test.go`, `init_test.go` (new), `config_test.go`, `integration_test.go`, `busyregistry_unix_test.go`; `internal/cli` `link_test.go`, `init_test.go`, `help_test.go` (new), `run_test.go`; `internal/machine` `kind_test.go`, `interrupt_test.go` (new); `internal/runplan/runplan_test.go` | tests |
+
+
+---
+
+### Task 0: Plan 3a follow-ups: interrupts during the upgrade, quiet_machine as a link change
+
+Plan 3a's final review routed four items to this plan, to land first (plan index, "Carried forward from plan 3a"; the fifth, the stale Replace blocks, is folded into Tasks 5 and 6).
+
+1. A run installs its signal context only after `mutatingState`, so `machine.Ensure` waits for `machine.lock`, and during the state upgrade for older runs (M2, M5, and Windows' not-idle wait), outside it: Ctrl-C there never reaches the exit 130 path that every other queueing wait of a run has, and nothing says what was interrupted. The run now installs its signal context before `mutatingState` and passes it through `machine.Ensure` (`Options.Ctx`, as commit 6829fc4 did for first links). Every sleep inside the upgrade goes through `Options.sleep`, which returns `machine.ErrInterrupted` once the context ends, at the same points that already return a timeout, so an interrupted upgrade leaves exactly what an upgrade that ran out of `--wait` leaves (the recovery rows of plan 2a resume it). The run maps it to exit 130 `incoda: interrupted while waiting for machine.lock or the state upgrade`. Every other command passes no context and is unchanged.
+2. `incoda config KEY --quiet-machine[=false]` alone changes the link (quiet_machine is part of it, spec 4.4) but logged and echoed nothing. `machine.WriteLink` now logs `event=link` whenever the pools or quiet_machine change, with ` quiet_machine=true|false` appended when quiet_machine moved, and `config` echoes the change as `link: tests -> tests, quiet_machine` (both sides carry `, quiet_machine` when it is set; a change of the pools alone echoes as before).
+3. A comment at `linkEdit.named()` says why `--remove-pool` is left out: a name being removed need not be a registered pool.
+4. A test for the unlinked refusal of several keys where one suggestion carries quiet_machine: the config line with `--quiet-machine`, the run line with `--wait '5m'`, and the note.
+
+**Files:**
+- Modify: `internal/machine/options.go`
+- Modify: `internal/machine/idle.go`
+- Modify: `internal/machine/migrate.go`
+- Modify: `internal/machine/link.go`
+- Modify: `internal/cli/state.go`
+- Modify: `internal/cli/run.go`
+- Modify: `internal/cli/config.go`
+- Modify: `internal/cli/linkflags.go`
+- Test: `internal/machine/interrupt_test.go` (new)
+- Test: `busyregistry_unix_test.go`
+- Test: `config_test.go`
+- Test: `internal/runplan/runplan_test.go`
+
+**Interfaces:**
+- Consumes: `machine.Options.Ctx`, `machine.ErrInterrupted` (commit 6829fc4); `holdLockElsewhere` (busyregistry_test.go); `holdTicket`, `takeLock` (internal/machine/idle_test.go); `spec4Pools`, `spec4Rows` (internal/runplan/runplan_test.go).
+- Produces: `func (o Options) sleep() error` in `machine`; `func mutatingStateCtx(ctx context.Context, start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, *machine.Registry, error)` and `func linkText(c lane.Config) string` in `cli`; root test helper `interruptOnLine(t, c *exec.Cmd, line string, sig syscall.Signal) (int, string)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `internal/machine/interrupt_test.go`:
+
+```go
+package machine
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/deblasis/incoda/internal/lane"
+)
+
+// TestWaitIdleEndsWhenItsContextDoes: the upgrade's wait for older runs
+// (M2, M5) ends with ErrInterrupted between polls once its context ends,
+// long before the --wait budget.
+func TestWaitIdleEndsWhenItsContextDoes(t *testing.T) {
+	state := t.TempDir()
+	holdTicket(t, lane.QueuesDir(state), "builds", 4711, "zig", "build")
+	lk := takeLock(t, state)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	err := waitIdle(state, lk, Options{Start: start, Wait: 10 * time.Second, Poll: 50 * time.Millisecond, Ctx: ctx}, phaseM2)
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("want ErrInterrupted, got %v", err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("the interrupted wait took %v", el)
+	}
+}
+
+// TestNotIdleWaitEndsWhenItsContextDoes: the wait for a directory Windows
+// will not move yet ends the same way.
+func TestNotIdleWaitEndsWhenItsContextDoes(t *testing.T) {
+	state := t.TempDir()
+	lk := takeLock(t, state)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var w notIdleWait
+	start := time.Now()
+	if err := w.wait(state, lk, Options{Start: start, Wait: time.Minute, Poll: 2 * time.Second, Ctx: ctx}); !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("want ErrInterrupted, got %v", err)
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("an ended context must not wait a poll: %v", el)
+	}
+}
+```
+
+Append to the end of `busyregistry_unix_test.go`:
+
+```go
+
+// interruptOnLine starts c in its own process group, sends sig once a
+// stderr line contains line, and returns the exit code and stderr. The
+// run must end within 3s of the signal.
+func interruptOnLine(t *testing.T, c *exec.Cmd, line string, sig syscall.Signal) (int, string) {
+	t.Helper()
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	errPipe, err := c.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Only this run's own group, started above with Setpgid.
+		_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	})
+	done := make(chan error, 1)
+	lines := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(errPipe)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+		done <- c.Wait()
+	}()
+	var got []string
+	deadline := time.After(15 * time.Second)
+	for seen := false; !seen; {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatalf("%s: run ended before %q:\n%s", sig, line, strings.Join(got, "\n"))
+			}
+			got = append(got, l)
+			seen = strings.Contains(l, line)
+		case <-deadline:
+			t.Fatalf("%s: no %q within 15s:\n%s", sig, line, strings.Join(got, "\n"))
+		}
+	}
+	sent := time.Now()
+	if err := c.Process.Signal(sig); err != nil {
+		t.Fatal(err)
+	}
+	for l := range lines {
+		got = append(got, l)
+	}
+	var werr error
+	select {
+	case werr = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: run did not end after the signal:\n%s", sig, strings.Join(got, "\n"))
+	}
+	if d := time.Since(sent); d > 3*time.Second {
+		t.Fatalf("%s: run took %s to end after the signal", sig, d)
+	}
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(werr, &ee) {
+		code = ee.ExitCode()
+	}
+	return code, strings.Join(got, "\n")
+}
+
+// TestMigrationLockWaitIsInterruptible: a run that must upgrade the state
+// directory waits for machine.lock another process keeps; SIGINT or
+// SIGTERM ends it promptly with 130 and the interrupted line, long before
+// its --wait, and nothing is migrated. The run is on a pool: no link can
+// exist before the upgrade.
+func TestMigrationLockWaitIsInterruptible(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	holdLockElsewhere(t, machine.LockPath(state))
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		c := exec.Command(incoda, "run", "--queue", "builds", "--wait", "30s", "--poll", "50ms", "--",
+			stamp, filepath.Join(t.TempDir(), "s.txt"), "x", "1")
+		c.Env = laneEnv(state)
+		code, out := interruptOnLine(t, c, "incoda: waiting for machine.lock", sig)
+		if code != 130 || !strings.Contains(out, "incoda: interrupted while waiting for machine.lock or the state upgrade") {
+			t.Fatalf("%s: want exit 130 and the interrupted line, got %d:\n%s", sig, code, out)
+		}
+		if _, err := os.Stat(machine.RegistryPath(state)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: an interrupted run migrated: %v", sig, err)
+		}
+	}
+}
+```
+
+In `config_test.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+	step(0, "  quiet machine: yes\n", "--quiet-machine")
+	if pools, quiet := cfgOf(); strings.Join(pools, ",") != "tests" || !quiet {
+		t.Fatalf("stored: %v %v", pools, quiet)
+	}
+	step(0, "  quiet machine: no\n", "--quiet-machine=false")
+```
+
+with:
+
+```go
+	if out := step(0, "  quiet machine: yes\n", "--quiet-machine"); !strings.Contains(out, "link: tests -> tests, quiet_machine\n") {
+		t.Fatalf("a quiet_machine change alone is echoed:\n%s", out)
+	}
+	if pools, quiet := cfgOf(); strings.Join(pools, ",") != "tests" || !quiet {
+		t.Fatalf("stored: %v %v", pools, quiet)
+	}
+	if out := step(0, "  quiet machine: no\n", "--quiet-machine=false"); !strings.Contains(out, "link: tests, quiet_machine -> tests\n") {
+		t.Fatalf("a quiet_machine change alone is echoed:\n%s", out)
+	}
+	if out := step(0, "  quiet machine: no\n", "--quiet-machine=false"); strings.Contains(out, "link: ") {
+		t.Fatalf("an unchanged quiet_machine echoes nothing:\n%s", out)
+	}
+```
+
+(2 of 2) Replace:
+
+```go
+	for _, want := range []string{" by=config old= new=tests", " by=config old=tests new=builds", " by=config old=builds new=builds,tests",
+		" by=config old=builds,tests new=tests", " by=config old=tests new=\n"} {
+		if !strings.Contains(string(b)+"\n", want) {
+			t.Fatalf("lane.log lacks %q:\n%s", want, b)
+		}
+	}
+	if n := strings.Count(string(b), " event=link "); n != 5 {
+		t.Fatalf("%d event=link lines, want one per change (5):\n%s", n, b)
+	}
+```
+
+with:
+
+```go
+	for _, want := range []string{" by=config old= new=tests", " by=config old=tests new=builds", " by=config old=builds new=builds,tests",
+		" by=config old=builds,tests new=tests", " by=config old=tests new=tests quiet_machine=true\n",
+		" by=config old=tests new=tests quiet_machine=false\n", " by=config old=tests new=\n"} {
+		if !strings.Contains(string(b)+"\n", want) {
+			t.Fatalf("lane.log lacks %q:\n%s", want, b)
+		}
+	}
+	if n := strings.Count(string(b), " event=link "); n != 7 {
+		t.Fatalf("%d event=link lines, want one per change (7):\n%s", n, b)
+	}
+```
+
+Append to the end of `internal/runplan/runplan_test.go`:
+
+```go
+
+// TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion: with several unlinked
+// keys, a suggestion that carries quiet_machine puts --quiet-machine on its
+// config line and --wait '5m' on the run line, with the note (spec 4.1).
+// POSIX quoting.
+func TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion(t *testing.T) {
+	if fixline.Native() != fixline.POSIX {
+		t.Skip("the expected lines are POSIX sh")
+	}
+	state, reg := machineDir(t, spec4Pools)
+	req := Request{Named: []string{"kungfoo-measure", "cap-gate"}, Reason: "wintty gate",
+		Fix: fixline.Run{Flags: []fixline.Flag{{Name: "reason", Value: "wintty gate"}}, Argv: []string{"just", "measure"}, Dir: "/src", Here: "/src"}}
+	want := `incoda: unlinked: cap-gate, kungfoo-measure
+incoda: queues "cap-gate", "kungfoo-measure" are not linked to any pool; every project queue names the machine-wide pools its jobs use.
+` + spec4Rows + `incoda: suggested: cap-gate -> tests (name matches *-gate); kungfoo-measure -> tests, quiet_machine (name matches *-measure)
+incoda: to link them to the suggestions (stored; every later run on these queues takes these pools), then run:
+incoda:   incoda config cap-gate --pool tests
+incoda:   incoda config kungfoo-measure --pool tests --quiet-machine
+incoda:   incoda run --queue cap-gate,kungfoo-measure --reason 'wintty gate' --wait '5m' -- 'just' 'measure'
+incoda: (--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)
+incoda: if a suggestion does not fit, ask the user; they run: incoda link cap-gate, incoda link kungfoo-measure
+`
+	_, err := Make(state, reg, req)
+	var rf *machine.Refusal
+	if !errors.As(err, &rf) {
+		t.Fatalf("want a refusal, got %v", err)
+	}
+	if got := "incoda: " + rf.Msg + "\n"; got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+```
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run (bash), one at a time:
+
+- `go test ./internal/machine/ -run 'TestWaitIdleEndsWhenItsContextDoes|TestNotIdleWaitEndsWhenItsContextDoes' -count=1 -timeout 120s`
+- `go test . -run 'TestMigrationLockWaitIsInterruptible|TestConfigLinkFlags' -count=1 -timeout 120s`
+- `go test ./internal/runplan/ -run 'TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion' -count=1 -timeout 120s`
+
+Expected: `TestWaitIdleEndsWhenItsContextDoes` fails with `want ErrInterrupted, got upgrade-timeout: ...` once its 10s budget is spent, and `TestNotIdleWaitEndsWhenItsContextDoes` with `want ErrInterrupted, got <nil>` after one 2s poll; `TestMigrationLockWaitIsInterruptible` fails with `want exit 130 and the interrupted line, got -1` (the run dies by the signal: no signal context is installed yet); `TestConfigLinkFlags` fails with `a quiet_machine change alone is echoed`. `TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion` passes already: it pins plan 3a's behavior before Task 6 changes the lane-set check of printed lines.
+
+- [ ] **Step 3: Implement**
+
+In `internal/machine/options.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+	// Ctx, when set, lets an interrupt end a machine.lock wait
+	// (ErrInterrupted); nil waits as before.
+	Ctx context.Context
+}
+```
+
+with:
+
+```go
+	// Ctx, when set, lets an interrupt end a machine.lock wait and the
+	// state upgrade's waits for older runs (ErrInterrupted); nil waits as
+	// before.
+	Ctx context.Context
+}
+```
+
+(2 of 2) Replace:
+
+```go
+func (o Options) stderr() io.Writer {
+```
+
+with:
+
+```go
+// sleep waits one poll. When Ctx ends first it returns ErrInterrupted at
+// once, so every wait of the state upgrade ends on an interrupt at the
+// points where it already ends when the --wait budget is spent.
+func (o Options) sleep() error {
+	if o.Ctx == nil {
+		time.Sleep(o.poll())
+		return nil
+	}
+	t := time.NewTimer(o.poll())
+	defer t.Stop()
+	select {
+	case <-o.Ctx.Done():
+		return ErrInterrupted
+	case <-t.C:
+		return nil
+	}
+}
+
+func (o Options) stderr() io.Writer {
+```
+
+In `internal/machine/idle.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+// note. It returns nil once no ticket the phase covers is live.
+```
+
+with:
+
+```go
+// note. It returns nil once no ticket the phase covers is live, and
+// ErrInterrupted when o.Ctx ends first.
+```
+
+(2 of 2) Replace:
+
+```go
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return &Timeout{Msg: joinLines(upgradeTimeoutLines(bs, ph, o.Wait))}
+		}
+		time.Sleep(o.poll())
+	}
+}
+```
+
+with:
+
+```go
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return &Timeout{Msg: joinLines(upgradeTimeoutLines(bs, ph, o.Wait))}
+		}
+		if err := o.sleep(); err != nil {
+			return err
+		}
+	}
+}
+```
+
+In `internal/machine/migrate.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+// found), then sleeps one poll, or gives up when the --wait budget is
+// spent.
+```
+
+with:
+
+```go
+// found), then sleeps one poll, or gives up when the --wait budget is
+// spent (ErrInterrupted when o.Ctx ends first).
+```
+
+(2 of 2) Replace:
+
+```go
+			"upgrade the older incoda on PATH; see incoda doctor",
+		})}
+	}
+	time.Sleep(o.poll())
+	return nil
+}
+```
+
+with:
+
+```go
+			"upgrade the older incoda on PATH; see incoda doctor",
+		})}
+	}
+	return o.sleep()
+}
+```
+
+In `internal/machine/link.go`, make these 3 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 3) Replace:
+
+```go
+// or a refusal. When the pools change, event=link by=<by> old=<pools>
+// new=<pools> goes to the lane's lane.log.
+```
+
+with:
+
+```go
+// or a refusal. When the pools or quiet_machine change, event=link
+// by=<by> old=<pools> new=<pools> goes to the lane's lane.log, with
+// quiet_machine=<new value> appended when quiet_machine moved.
+```
+
+(2 of 3) Replace:
+
+```go
+// registry lock and logs event=link when the pools change.
+```
+
+with:
+
+```go
+// registry lock and logs event=link when the pools or quiet_machine
+// change.
+```
+
+(3 of 3) Replace:
+
+```go
+	res.New, res.Changed = cfg, true
+	if !SameSet(res.Old.Pools, cfg.Pools) {
+		// Pool names come from config.json as stored (or hand-edited), so
+		// they go through LogValue; an empty side stays empty (old=).
+		q.Logf("queue=%s event=link pid=%d by=%s old=%s new=%s", key, os.Getpid(), by,
+			logSet(res.Old.Pools), logSet(cfg.Pools))
+	}
+	return res, nil
+}
+```
+
+with:
+
+```go
+	res.New, res.Changed = cfg, true
+	// quiet_machine is part of the link (spec 4.4): a change of it alone
+	// is a link change too.
+	quietMoved := res.Old.QuietMachine != cfg.QuietMachine
+	if !SameSet(res.Old.Pools, cfg.Pools) || quietMoved {
+		// Pool names come from config.json as stored (or hand-edited), so
+		// they go through LogValue; an empty side stays empty (old=).
+		line := fmt.Sprintf("queue=%s event=link pid=%d by=%s old=%s new=%s", key, os.Getpid(), by,
+			logSet(res.Old.Pools), logSet(cfg.Pools))
+		if quietMoved {
+			line += fmt.Sprintf(" quiet_machine=%v", cfg.QuietMachine)
+		}
+		q.Logf("%s", line)
+	}
+	return res, nil
+}
+```
+
+In `internal/cli/state.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+import (
+	"errors"
+	"fmt"
+```
+
+with:
+
+```go
+import (
+	"context"
+	"errors"
+	"fmt"
+```
+
+(2 of 2) Replace:
+
+```go
+// It returns the registry the command runs under.
+func mutatingState(start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, *machine.Registry, error) {
+	d, err := stateDir()
+	if err != nil {
+		return "", nil, err
+	}
+	v, _, _ := versionInfo()
+	reg, err := machine.Ensure(d, machine.Options{
+		Start: start, Wait: wait, Poll: poll, Chain: chain,
+		By: "incoda " + v, Stderr: stderr, Path: startGetenv("PATH"),
+	})
+	if err != nil {
+		return "", nil, machineExit(err)
+	}
+	return d, reg, nil
+}
+```
+
+with:
+
+```go
+// It returns the registry the command runs under.
+func mutatingState(start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, *machine.Registry, error) {
+	return mutatingStateCtx(context.Background(), start, wait, poll, chain, stderr)
+}
+
+// mutatingStateCtx is mutatingState for run, whose waits all end on an
+// interrupt: when ctx ends during the wait for machine.lock or for older
+// runs of the state upgrade, it returns exit 130 (spec 2.4: every queueing
+// wait of a run). What the upgrade did before the interrupt stays, as
+// after a timeout at the same point; the next mutating command resumes it.
+func mutatingStateCtx(ctx context.Context, start time.Time, wait, poll time.Duration, chain procinfo.Chain, stderr io.Writer) (string, *machine.Registry, error) {
+	d, err := stateDir()
+	if err != nil {
+		return "", nil, err
+	}
+	v, _, _ := versionInfo()
+	reg, err := machine.Ensure(d, machine.Options{
+		Start: start, Wait: wait, Poll: poll, Chain: chain,
+		By: "incoda " + v, Stderr: stderr, Path: startGetenv("PATH"), Ctx: ctx,
+	})
+	if errors.Is(err, machine.ErrInterrupted) {
+		return "", nil, exitWith(ExitInterrupt, "interrupted while waiting for machine.lock or the state upgrade")
+	}
+	if err != nil {
+		return "", nil, machineExit(err)
+	}
+	return d, reg, nil
+}
+```
+
+In `internal/cli/run.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+	chain := procinfo.ParentChain()
+	dir, reg, err := mutatingState(start, wait.d, *poll, chain, stderr)
+	if err != nil {
+		return err
+	}
+```
+
+with:
+
+```go
+	chain := procinfo.ParentChain()
+	// An interrupt ends every wait of a run from here on: machine.lock and
+	// the state upgrade (machine.Ensure), a first link, and every lane.
+	ctx, stop := signal.NotifyContext(context.Background(), interruptSignals()...)
+	defer stop()
+	dir, reg, err := mutatingStateCtx(ctx, start, wait.d, *poll, chain, stderr)
+	if err != nil {
+		return err
+	}
+```
+
+(2 of 2) Replace:
+
+```go
+	defer release()
+
+	ctx, stop := signal.NotifyContext(context.Background(), interruptSignals()...)
+	defer stop()
+
+```
+
+with:
+
+```go
+	defer release()
+
+```
+
+In `internal/cli/config.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+
+(1 of 2) Replace:
+
+```go
+		switch {
+		case !machine.SameSet(res.Old.Pools, res.New.Pools):
+			fmt.Fprintf(stdout, "link: %s -> %s\n", textsafe.Escape(machine.SetText(res.Old.Pools)), textsafe.Escape(machine.SetText(res.New.Pools)))
+```
+
+with:
+
+```go
+		switch {
+		case res.Old.QuietMachine != res.New.QuietMachine:
+			// quiet_machine is part of the link (spec 4.4): a change of
+			// it is echoed like a change of the pools.
+			fmt.Fprintf(stdout, "link: %s -> %s\n", linkText(res.Old), linkText(res.New))
+		case !machine.SameSet(res.Old.Pools, res.New.Pools):
+			fmt.Fprintf(stdout, "link: %s -> %s\n", textsafe.Escape(machine.SetText(res.Old.Pools)), textsafe.Escape(machine.SetText(res.New.Pools)))
+```
+
+(2 of 2) Replace:
+
+```go
+func yesNo(b bool) string {
+```
+
+with:
+
+```go
+// linkText is a link as config echoes a quiet_machine change: the pools,
+// escaped (they are read back from config.json), and ", quiet_machine"
+// when it is set.
+func linkText(c lane.Config) string {
+	s := textsafe.Escape(machine.SetText(c.Pools))
+	if c.QuietMachine {
+		s += ", quiet_machine"
+	}
+	return s
+}
+
+func yesNo(b bool) string {
+```
+
+In `internal/cli/linkflags.go`, replace:
+
+```go
+// named is every pool the edit adds to a link; each must be registered.
+```
+
+with:
+
+```go
+// named is every pool the edit adds to a link; each must be registered.
+// The --remove-pool names are left out on purpose: a name being removed
+// need not be a registered pool, so a link that names something no longer
+// registered (a hand edit, a rebuilt registry) can still be cleaned up.
+```
+
+- [ ] **Step 4: Run the tests to see them pass**
+
+Run (bash), one at a time:
+
+- `go test ./internal/machine/ -run 'TestWaitIdleEndsWhenItsContextDoes|TestNotIdleWaitEndsWhenItsContextDoes|TestWriteLink' -count=1`
+- `go test . -run 'TestMigrationLockWaitIsInterruptible|TestFirstLinkWaitIsInterruptible|TestEnrollOnABusyRegistryIsInterruptible|TestConfigLinkFlags' -count=1`
+- `go test ./internal/runplan/ -run 'TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion' -count=1`
+
+Expected: `ok` for each package.
+
+- [ ] **Step 5: Run the gates**
+
+Run (bash): `just ci && GOOS=windows go vet ./... && GOOS=windows go vet -tags incoda_crashpoints ./... && GOOS=linux go vet ./... && GOOS=linux go vet -tags incoda_crashpoints ./...`
+
+Expected: every step passes and `just ci` ends with the `ok` lines of every package. If only a test named in the Global Constraints as pre-existing timing-sensitive fails, rerun it alone before debugging this task.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add busyregistry_unix_test.go config_test.go internal/cli/config.go internal/cli/linkflags.go internal/cli/run.go internal/cli/state.go internal/machine/idle.go internal/machine/interrupt_test.go internal/machine/link.go internal/machine/migrate.go internal/machine/options.go internal/runplan/runplan_test.go
+git commit -F - <<'MSG'
+fix: an interrupt ends a run's upgrade waits, and quiet_machine is a link change
+
+A run installs its signal context before the state upgrade and passes it
+through machine.Ensure, so Ctrl-C or SIGTERM during the wait for
+machine.lock or for older runs ends it with 130, as every other
+queueing wait of a run does. A change of quiet_machine alone is logged
+as event=link and echoed by config like a change of the pools.
+MSG
+```
 
 
 ---
@@ -87,8 +783,8 @@ Spec 3.4. `incoda pools add NAME --slots N --description TEXT` creates a pool or
 - Test: `pools_test.go`
 
 **Interfaces:**
-- Consumes: `machine.AcquireLock`, `machine.UpdateRegistry`, `machine.Options`; `checkTexts` (plan 3a Task 3); `Queue.SetBudget` (plan 3a Task 1).
-- Produces: `lane.ErrLaneBusy`; `func (q *Queue) UpdateIdle(fn func(*Config) error, after func(Config) error) (Config, error)`; package `machine`: `type PoolChange struct { Slots int; Description *string }`, `type KindResult struct { Registry *Registry; Config lane.Config; Converted bool }`, `func AddPool(stateDir, name string, ch PoolChange, o Options) (KindResult, error)`, `func RemovePool(stateDir, name string, o Options) (KindResult, error)`, `func LinkedFrom(stateDir, pool string) []string`. In `cli`: `cmdPools` (subcommands `add`, `remove`), `poolName`.
+- Consumes: `machine.AcquireLock`, `machine.UpdateRegistry`, `machine.Options`; `checkTexts` (plan 3a Task 3); `Queue.SetBudget` (plan 3a Task 1); `fixline.Line`, `fixline.Key`, `fixline.Lit` (plan 3a Task 2).
+- Produces: `lane.ErrLaneBusy`; `func (q *Queue) UpdateIdle(fn func(*Config) error, after func(Config) error) (Config, error)`; package `machine`: `type PoolChange struct { Slots int; Description *string }`, `type KindResult struct { Registry *Registry; Config lane.Config; Converted bool }`, `func AddPool(stateDir, name string, ch PoolChange, o Options) (KindResult, error)`, `func RemovePool(stateDir, name string, o Options) (KindResult, error)`, `func LinkedFrom(stateDir, pool string) []string`, `configCmd(key string, flags ...string) string` and `configCmdFor(sh fixline.Shell, key string, flags ...string) string` (the printed config commands of the refusals). In `cli`: `cmdPools` (subcommands `add`, `remove`), `poolName`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -105,6 +801,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 )
 
@@ -147,13 +844,13 @@ func TestAddPool(t *testing.T) {
 		t.Fatalf("conversion keeps the lane's fields: %+v %v", res, err)
 	}
 	refusedWith(t, func() error { _, err := AddPool(state, "gpu", PoolChange{}, kindOpts()); return err }(),
-		`pools add: "gpu" is already a pool; change its slots or description with incoda config gpu`)
+		`pools add: "gpu" is already a pool; change its slots or description with `+configCmd("gpu"))
 	writeConfig(t, state, "cap-gate", `{"schema":2,"pools":["tests"]}`)
 	refusedWith(t, func() error { _, err := AddPool(state, "cap-gate", PoolChange{}, kindOpts()); return err }(),
 		`kind-busy: "cap-gate" links pools; unlink it first`)
 	writeConfig(t, state, "kf-measure", `{"schema":2,"quiet_machine":true}`)
 	refusedWith(t, func() error { _, err := AddPool(state, "kf-measure", PoolChange{}, kindOpts()); return err }(),
-		`kind-busy: "kf-measure" sets quiet_machine; clear it first: incoda config kf-measure --quiet-machine=false`)
+		`kind-busy: "kf-measure" sets quiet_machine; clear it first: `+configCmd("kf-measure", "--quiet-machine=false"))
 	q, err := lane.Open(state, "busy")
 	if err != nil {
 		t.Fatal(err)
@@ -178,6 +875,17 @@ func TestAddPool(t *testing.T) {
 	b, _ := os.ReadFile(MachineLogPath(state))
 	if !strings.Contains(string(b), "event=kind pid=") || !strings.Contains(string(b), " key=printer kind=pool by=pools-add ") {
 		t.Fatalf("machine.log:\n%s", b)
+	}
+}
+
+// TestConfigCmd: the config commands a kind-busy or already-a-pool refusal
+// prints are fixline lines, POSIX on Unix and PowerShell on Windows.
+func TestConfigCmd(t *testing.T) {
+	if got := configCmdFor(fixline.POSIX, "kf-measure", "--quiet-machine=false"); got != "incoda config kf-measure --quiet-machine=false" {
+		t.Fatalf("POSIX: %q", got)
+	}
+	if got := configCmdFor(fixline.PowerShell, "gpu"); got != "incoda config 'gpu'" {
+		t.Fatalf("PowerShell: %q", got)
 	}
 }
 
@@ -320,10 +1028,10 @@ with:
 
 Run (bash), one at a time:
 
-- `go test ./internal/machine/ -run 'TestAddPool|TestRemovePool|TestUpdateIdleHoldsTheRegistryLockAcrossTheWrite' -count=1 -timeout 120s`
+- `go test ./internal/machine/ -run 'TestAddPool|TestRemovePool|TestUpdateIdleHoldsTheRegistryLockAcrossTheWrite|TestConfigCmd' -count=1 -timeout 120s`
 - `go test . -run 'TestPoolsAddAndRemove|TestConfigRefusesControlCharacters' -count=1 -timeout 120s`
 
-Expected: the `internal/machine` test build fails (`undefined: AddPool`, `undefined: PoolChange`); the root tests fail with `incoda: unknown command "pools"`.
+Expected: the `internal/machine` test build fails (`undefined: AddPool`, `undefined: PoolChange`, `undefined: configCmd`); the root tests fail with `incoda: unknown command "pools"`.
 
 - [ ] **Step 3: Implement**
 
@@ -576,6 +1284,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
@@ -614,7 +1323,7 @@ func AddPool(stateDir, name string, ch PoolChange, o Options) (KindResult, error
 		return KindResult{}, err
 	}
 	if reg.IsPool(name) {
-		return KindResult{}, &Refusal{Msg: fmt.Sprintf("pools add: %q is already a pool; change its slots or description with incoda config %s", name, name)}
+		return KindResult{}, &Refusal{Msg: fmt.Sprintf("pools add: %q is already a pool; change its slots or description with %s", name, configCmd(name))}
 	}
 	res := KindResult{Converted: lane.Exists(stateDir, name)}
 	q, err := lane.Open(stateDir, name)
@@ -628,7 +1337,7 @@ func AddPool(stateDir, name string, ch PoolChange, o Options) (KindResult, error
 		case len(c.Pools) > 0:
 			return &Refusal{Msg: fmt.Sprintf("kind-busy: %q links pools; unlink it first", name)}
 		case c.QuietMachine:
-			return &Refusal{Msg: fmt.Sprintf("kind-busy: %q sets quiet_machine; clear it first: incoda config %s --quiet-machine=false", name, name)}
+			return &Refusal{Msg: fmt.Sprintf("kind-busy: %q sets quiet_machine; clear it first: %s", name, configCmd(name, "--quiet-machine=false"))}
 		}
 		if ch.Slots > 0 {
 			c.Slots = ch.Slots
@@ -752,13 +1461,30 @@ func logKind(stateDir, name, kind, by string, reg *Registry) {
 	lane.AppendLog(lane.LaneDir(stateDir, name), "queue=%s event=kind pid=%d kind=%s by=%s generation=%d", name, os.Getpid(), kind, by, reg.Generation)
 	appendMachineLog(stateDir, "event=kind pid=%d key=%s kind=%s by=%s generation=%d", os.Getpid(), textsafe.LogValue(name), kind, by, reg.Generation)
 }
+
+// configCmd is "incoda config KEY [FLAG...]" as this platform's shell
+// takes it, built by internal/fixline like every printed command. key is
+// a validated key and flags are literal words, so a line always renders.
+func configCmd(key string, flags ...string) string {
+	return configCmdFor(fixline.Native(), key, flags...)
+}
+
+// configCmdFor is configCmd with the shell fixed, so both forms can be
+// tested on any host.
+func configCmdFor(sh fixline.Shell, key string, flags ...string) string {
+	w := []fixline.Word{fixline.Lit("incoda"), fixline.Lit("config"), fixline.Key(key)}
+	for _, f := range flags {
+		w = append(w, fixline.Lit(f))
+	}
+	return fixline.Line{Words: w}.Render(sh).Text
+}
 ```
 
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run (bash), one at a time:
 
-- `go test ./internal/machine/ -run 'TestAddPool|TestRemovePool|TestUpdateIdleHoldsTheRegistryLockAcrossTheWrite' -count=1`
+- `go test ./internal/machine/ -run 'TestAddPool|TestRemovePool|TestUpdateIdleHoldsTheRegistryLockAcrossTheWrite|TestConfigCmd' -count=1`
 - `go test . -run 'TestPoolsAddAndRemove|TestConfigRefusesControlCharacters' -count=1`
 
 Expected: `ok` for each package.
@@ -1180,12 +1906,14 @@ Spec 4.3. `incoda link KEY` shows every pool with its slots and description and 
 - Create: `internal/cli/link.go`
 - Create: `internal/cli/terminal.go`
 - Modify: `internal/machine/link.go`
+- Modify: `internal/runplan/refusals.go`
 - Test: `internal/cli/link_test.go` (new)
+- Test: `internal/runplan/runplan_test.go`
 - Test: `pools_test.go`
 
 **Interfaces:**
 - Consumes: `machine.WriteLink` (plan 3a Task 3), `runplan.Suggest`, `runplan.PoolRows` (plan 3a Task 7), `colorize.IsTerminal`, `configError` (plan 3a Task 3).
-- Produces: `machine.ErrLinkMoved`; in `cli`: `type terminal struct { in *bufio.Reader; out io.Writer }`, the seam `openTerminal func() (*terminal, bool)`, `errCancelled`, `(t *terminal) line(prompt string) (string, error)`, `(t *terminal) pick(title string, choices, rows, pre []string) ([]string, error)`, `cmdLink`, `pickLink(tm, dir, reg, key, shown) ([]string, error)`. Test helpers `fakeTerminal(t, input io.Reader) *bytes.Buffer`, `onFirstRead`, `linkOf`.
+- Produces: `machine.ErrLinkMoved`; in `cli`: `type terminal struct { in *bufio.Reader; out io.Writer }`, the seam `openTerminal func() (*terminal, bool)`, `errCancelled`, `(t *terminal) line(prompt string) (string, error)`, `(t *terminal) pick(title string, choices, rows, pre []string) ([]string, error)`, `cmdLink`, `pickLink(tm, dir, reg, key, shown) ([]string, error)`; in `runplan`: `func LinkLine(sh fixline.Shell, key string) string`. Test helpers `fakeTerminal(t, input io.Reader) *bytes.Buffer`, `onFirstRead`, `linkOf`; root `linkCmd(key string) string`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1310,17 +2038,41 @@ Append to the end of `pools_test.go`:
 
 ```go
 
+// linkCmd is the printed "incoda link KEY" of this platform's shell
+// (runplan.LinkLine): PowerShell quotes the key.
+func linkCmd(key string) string {
+	if runtime.GOOS == "windows" {
+		return "incoda link '" + key + "'"
+	}
+	return "incoda link " + key
+}
+
 // TestLinkNeedsATerminal: link is the user's interactive command; without
 // a terminal (an agent, a pipe) it refuses before it touches anything.
 func TestLinkNeedsATerminal(t *testing.T) {
 	incoda, _ := binaries(t)
 	state := t.TempDir()
 	out := mustRun(t, incoda, state, 120, "link", "cap-e2e")
-	if out != "incoda: needs-terminal: ask the user to run incoda link cap-e2e in a terminal\n" {
+	if out != "incoda: needs-terminal: ask the user to run "+linkCmd("cap-e2e")+" in a terminal\n" {
 		t.Fatalf("needs-terminal:\n%s", out)
 	}
 	if entries, _ := os.ReadDir(state); len(entries) != 0 {
 		t.Fatalf("link without a terminal must leave the state directory alone: %v", entries)
+	}
+}
+```
+
+Append to the end of `internal/runplan/runplan_test.go`:
+
+```go
+
+// TestLinkLine: the printed "incoda link KEY" in both shells.
+func TestLinkLine(t *testing.T) {
+	if got := LinkLine(fixline.POSIX, "cap-e2e"); got != "incoda link cap-e2e" {
+		t.Fatalf("POSIX: %q", got)
+	}
+	if got := LinkLine(fixline.PowerShell, "cap-e2e"); got != "incoda link 'cap-e2e'" {
+		t.Fatalf("PowerShell: %q", got)
 	}
 }
 ```
@@ -1331,8 +2083,9 @@ Run (bash), one at a time:
 
 - `go test ./internal/cli/ -run 'TestLinkPicker|TestLinkAsksAgainWhenTheLinkMovedMeanwhile' -count=1 -timeout 120s`
 - `go test . -run 'TestLinkNeedsATerminal' -count=1 -timeout 120s`
+- `go test ./internal/runplan/ -run 'TestLinkLine' -count=1 -timeout 120s`
 
-Expected: the `internal/cli` test build fails (`undefined: openTerminal`, `undefined: terminal`); the root `TestLinkNeedsATerminal` fails with `incoda: unknown command "link"`.
+Expected: the `internal/cli` test build fails (`undefined: openTerminal`, `undefined: terminal`); the root `TestLinkNeedsATerminal` fails with `incoda: unknown command "link"`; the `internal/runplan` test build fails (`undefined: LinkLine`).
 
 - [ ] **Step 3: Implement**
 
@@ -1374,6 +2127,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -1406,7 +2160,7 @@ func cmdLink(args []string, stdout, stderr io.Writer) error {
 	}
 	tm, ok := openTerminal()
 	if !ok {
-		return usagef("needs-terminal: ask the user to run incoda link %s in a terminal", key)
+		return usagef("needs-terminal: ask the user to run %s in a terminal", runplan.LinkLine(fixline.Native(), key))
 	}
 	chain := procinfo.ParentChain()
 	dir, reg, err := mutatingState(start, wait.d, 200*time.Millisecond, chain, stderr)
@@ -1578,6 +2332,24 @@ func (t *terminal) pick(title string, choices, rows, pre []string) ([]string, er
 }
 ```
 
+In `internal/runplan/refusals.go`, replace:
+
+```go
+// configLine is "incoda config KEY --pool S [--quiet-machine]".
+```
+
+with:
+
+```go
+// LinkLine is "incoda link KEY", the command a person runs to choose a
+// key's pools, as sh takes it (fixline; PowerShell quotes the key).
+func LinkLine(sh fixline.Shell, key string) string {
+	return fixline.Line{Words: []fixline.Word{fixline.Lit("incoda"), fixline.Lit("link"), fixline.Key(key)}}.Render(sh).Text
+}
+
+// configLine is "incoda config KEY --pool S [--quiet-machine]".
+```
+
 In `internal/machine/link.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
 
 (1 of 2) Replace:
@@ -1637,6 +2409,7 @@ Run (bash), one at a time:
 
 - `go test ./internal/cli/ -run 'TestLinkPicker|TestLinkAsksAgainWhenTheLinkMovedMeanwhile' -count=1`
 - `go test . -run 'TestLinkNeedsATerminal' -count=1`
+- `go test ./internal/runplan/ -run 'TestLinkLine' -count=1`
 
 Expected: `ok` for each package.
 
@@ -1649,7 +2422,7 @@ Expected: every step passes and `just ci` ends with the `ok` lines of every pack
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/cli/cli.go internal/cli/link.go internal/cli/link_test.go internal/cli/terminal.go internal/machine/link.go pools_test.go
+git add internal/cli/cli.go internal/cli/link.go internal/cli/link_test.go internal/cli/terminal.go internal/machine/link.go internal/runplan/refusals.go internal/runplan/runplan_test.go pools_test.go
 git commit -F - <<'MSG'
 feat: incoda link lets the user pick a lane's pools in a terminal
 
@@ -1677,7 +2450,7 @@ Spec 4.3 and 5.5. `incoda init --print` takes no lock and writes nothing: each u
 - Test: `internal/runplan/runplan_test.go`
 
 **Interfaces:**
-- Consumes: `runplan.Suggest`, `configLine` (plan 3a Task 7), `machine.WriteLink`, `machine.LinkedLine` (plan 3a Task 3), `readState`, `mutatingState`.
+- Consumes: `runplan.Suggest`, `configLine` (plan 3a Task 7), `machine.WriteLink`, `machine.LinkedLine` (plan 3a Task 3), `readState`, `mutatingState`, `runplan.LinkLine` and the root `linkCmd` (Task 3).
 - Produces: package `runplan`: `type Unlinked struct { Key string; Slots int; Suggestion Suggestion }`, `func UnlinkedLanes(root string, reg *machine.Registry) ([]Unlinked, []string)`, `(u Unlinked) ConfigLine(sh fixline.Shell) string`, `(u Unlinked) SlotNotes(poolSlots func(string) int) []string`. In `cli`: `cmdInit`, `initPrint`, `initApply`, `unlinkedAttention(dir string) []string`. Root helpers `stateSum`, `seedLanes`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1802,7 +2575,7 @@ polymatto: no suggestion (no name pattern matches)
 	out, _ = doctor(t, incoda, state)
 	mustContain(t, out,
 		"attention: unlinked lane cap-gate: runs are refused until it is linked; suggested: tests (incoda init --print shows the command)\n",
-		"attention: unlinked lane polymatto: runs are refused until it is linked; no suggestion (no name pattern matches): the user runs incoda link polymatto\n")
+		"attention: unlinked lane polymatto: runs are refused until it is linked; no suggestion (no name pattern matches): the user runs "+linkCmd("polymatto")+"\n")
 	mustRun(t, incoda, state, 120, "init")
 	mustRun(t, incoda, state, 120, "init", "--print", "--wait", "1s")
 }
@@ -1819,7 +2592,7 @@ func TestInitApplySuggestions(t *testing.T) {
 	want := `linked cap-gate -> tests
 linked kungfoo-build -> builds
 linked kungfoo-measure -> tests, quiet_machine
-left unlinked: polymatto (no suggestion: no name pattern matches; the user links it with incoda link polymatto)
+left unlinked: polymatto (no suggestion: no name pattern matches; the user links it with ` + linkCmd("polymatto") + `)
 `
 	if out != want {
 		t.Fatalf("init --apply-suggestions:\n%s\nwant:\n%s", out, want)
@@ -1839,7 +2612,7 @@ left unlinked: polymatto (no suggestion: no name pattern matches; the user links
 		t.Fatalf("lane.log:\n%s", log)
 	}
 	out = mustRun(t, incoda, state, 0, "init", "--apply-suggestions")
-	if out != "left unlinked: polymatto (no suggestion: no name pattern matches; the user links it with incoda link polymatto)\n" {
+	if out != "left unlinked: polymatto (no suggestion: no name pattern matches; the user links it with "+linkCmd("polymatto")+")\n" {
 		t.Fatalf("a second apply changes nothing:\n%s", out)
 	}
 }
@@ -1958,7 +2731,7 @@ func initPrint(stdout, stderr io.Writer) error {
 	for _, u := range lanes {
 		s := u.Suggestion
 		if !s.Usable {
-			fmt.Fprintf(stdout, "%s: no suggestion (%s)\n  ask the user; they run: incoda link %s\n", u.Key, s.Why, u.Key)
+			fmt.Fprintf(stdout, "%s: no suggestion (%s)\n  ask the user; they run: %s\n", u.Key, s.Why, runplan.LinkLine(fixline.Native(), u.Key))
 			continue
 		}
 		fmt.Fprintf(stdout, "%s: suggested %s (name matches %s)\n  %s\n", u.Key, s.Text(), s.Pattern, u.ConfigLine(fixline.Native()))
@@ -2008,7 +2781,7 @@ func initApply(start time.Time, wait time.Duration, stdout, stderr io.Writer) er
 		}
 	}
 	for _, u := range left {
-		fmt.Fprintf(stdout, "left unlinked: %s (no suggestion: %s; the user links it with incoda link %s)\n", u.Key, u.Suggestion.Why, u.Key)
+		fmt.Fprintf(stdout, "left unlinked: %s (no suggestion: %s; the user links it with %s)\n", u.Key, u.Suggestion.Why, runplan.LinkLine(fixline.Native(), u.Key))
 	}
 	for _, k := range unreadable {
 		fmt.Fprintf(stdout, "left unlinked: %s (config.json is unreadable; see incoda doctor)\n", k)
@@ -2022,6 +2795,8 @@ In `internal/cli/misc.go`, make these 3 replacements, in order (each quoted bloc
 (1 of 3) Replace:
 
 ```go
+	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -2033,6 +2808,9 @@ In `internal/cli/misc.go`, make these 3 replacements, in order (each quoted bloc
 with:
 
 ```go
+	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/fixline"
+	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -2099,7 +2877,7 @@ func unlinkedAttention(dir string) []string {
 			out = append(out, fmt.Sprintf("unlinked lane %s: runs are refused until it is linked; suggested: %s (incoda init --print shows the command)", u.Key, u.Suggestion.Text()))
 			continue
 		}
-		out = append(out, fmt.Sprintf("unlinked lane %s: runs are refused until it is linked; no suggestion (%s): the user runs incoda link %s", u.Key, u.Suggestion.Why, u.Key))
+		out = append(out, fmt.Sprintf("unlinked lane %s: runs are refused until it is linked; no suggestion (%s): the user runs %s", u.Key, u.Suggestion.Why, runplan.LinkLine(fixline.Native(), u.Key)))
 	}
 	return out
 }
@@ -2239,8 +3017,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
+	"github.com/deblasis/incoda/internal/runplan"
 )
 
 func slotsOf(t *testing.T, dir, key string) int {
@@ -2295,7 +3075,7 @@ func TestInitAsks(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, shown)
 		}
 	}
-	if out.String() != "linked cap-gate -> tests\nleft unlinked: polymatto; runs on them are refused until they are linked (incoda link KEY)\n" {
+	if out.String() != "linked cap-gate -> tests\nleft unlinked: polymatto; runs on them are refused until they are linked (the user runs: "+runplan.LinkLine(fixline.Native(), "polymatto")+")\n" {
 		t.Fatalf("out:\n%s", out.String())
 	}
 	if linkOf(t, dir, "cap-gate") != "tests" || linkOf(t, dir, "polymatto") != "(none)" {
@@ -2528,7 +3308,12 @@ func initAsk(start time.Time, wait time.Duration, stdout, stderr io.Writer) erro
 		}
 	}
 	if len(left) > 0 {
-		fmt.Fprintf(stdout, "left unlinked: %s; runs on them are refused until they are linked (incoda link KEY)\n", strings.Join(left, ", "))
+		// Every printed command is a fixline line with no placeholder.
+		links := make([]string, len(left))
+		for i, k := range left {
+			links[i] = runplan.LinkLine(fixline.Native(), k)
+		}
+		fmt.Fprintf(stdout, "left unlinked: %s; runs on them are refused until they are linked (the user runs: %s)\n", strings.Join(left, ", "), strings.Join(links, ", "))
 	}
 	return nil
 }
@@ -2750,7 +3535,7 @@ func askLink(tm *terminal, dir string, reg *machine.Registry, key, by string, o 
 
 ```
 
-In `internal/machine/link.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+In `internal/machine/link.go`, make these 2 replacements, in order (each quoted block occurs exactly once in the file when you reach it). Since plan 3a split `WriteFirstLinks` out (commit bbe31a2), the pool check lives in `writeLinkHeld`, so the project-only flag goes through it; `WriteFirstLinks` passes `true`:
 
 (1 of 2) Replace:
 
@@ -2761,6 +3546,21 @@ func WriteLink(stateDir, key, by string, o Options, fn func(reg *Registry, c *la
 	lk, err := AcquireLock(stateDir, o.lockOptions("link"))
 	if err != nil {
 		return LinkResult{}, err
+	}
+	defer lk.Release()
+	reg, err := ReadRegistry(stateDir)
+	if err != nil {
+		return LinkResult{}, err
+	}
+	return writeLinkHeld(stateDir, key, by, o, reg, fn)
+}
+
+// writeLinkHeld is WriteLink once machine.lock is held and machine.json
+// read: it refuses a pool key, then does the load-modify-store under key's
+// registry lock and logs event=link when the pools or quiet_machine
+// change.
+func writeLinkHeld(stateDir, key, by string, o Options, reg *Registry, fn func(reg *Registry, c *lane.Config) error) (LinkResult, error) {
+	if reg.IsPool(key) {
 ```
 
 with:
@@ -2781,34 +3581,40 @@ func WriteStep(stateDir, key, by string, o Options, fn func(reg *Registry, c *la
 	return writeStep(stateDir, key, by, o, false, fn)
 }
 
+// writeStep takes machine.lock, reads machine.json under it and hands over
+// to writeLinkHeld. project says whether key must be a project lane.
 func writeStep(stateDir, key, by string, o Options, project bool, fn func(reg *Registry, c *lane.Config) error) (LinkResult, error) {
 	lk, err := AcquireLock(stateDir, o.lockOptions("link"))
 	if err != nil {
 		return LinkResult{}, err
+	}
+	defer lk.Release()
+	reg, err := ReadRegistry(stateDir)
+	if err != nil {
+		return LinkResult{}, err
+	}
+	return writeLinkHeld(stateDir, key, by, o, reg, project, fn)
+}
+
+// writeLinkHeld is WriteLink once machine.lock is held and machine.json
+// read: when project is set (WriteLink, WriteFirstLinks) it refuses a pool
+// key, then does the load-modify-store under key's registry lock and logs
+// event=link when the pools or quiet_machine change. WriteStep passes
+// false: an init answer may set a pool's cap.
+func writeLinkHeld(stateDir, key, by string, o Options, reg *Registry, project bool, fn func(reg *Registry, c *lane.Config) error) (LinkResult, error) {
+	if project && reg.IsPool(key) {
 ```
 
 (2 of 2) Replace:
 
 ```go
-	if err != nil {
-		return LinkResult{}, err
-	}
-	if reg.IsPool(key) {
-		return LinkResult{}, &Refusal{Msg: fmt.Sprintf("pool-mismatch: %q is a pool; a pool never links other pools and carries no quiet_machine", key)}
-	}
-	q, err := lane.Open(stateDir, key)
+		res, err := writeLinkHeld(stateDir, fl.Key, by, o, reg, func(_ *Registry, c *lane.Config) error {
 ```
 
 with:
 
 ```go
-	if err != nil {
-		return LinkResult{}, err
-	}
-	if project && reg.IsPool(key) {
-		return LinkResult{}, &Refusal{Msg: fmt.Sprintf("pool-mismatch: %q is a pool; a pool never links other pools and carries no quiet_machine", key)}
-	}
-	q, err := lane.Open(stateDir, key)
+		res, err := writeLinkHeld(stateDir, fl.Key, by, o, reg, true, func(_ *Registry, c *lane.Config) error {
 ```
 
 - [ ] **Step 4: Run the tests to see them pass**
@@ -2846,21 +3652,22 @@ MSG
 
 ### Task 6: Quiet machine
 
-Spec 2.8, 2.7 and 2.5 trigger 3. `run --quiet-machine`, or `quiet_machine: true` in a named project lane's config, enrolls an exclusive `quiet` ticket on every pool in `machine.json` at plan time, one at a time in the total order. Unless `--quiet`, a run that took it from config prints on each wait notice `incoda: quiet-machine (from config of "kungfoo-measure"): holding builds; waiting tests`, so the caller knows to use a short `--wait`. A quiet plan replans when `machine.json`'s pools differ from the set it used (a pool added before the final verify is then covered; one added after it is not, as the spec states). A pool only quiet-machine brings has the role `pool, quiet-machine`. The nested quiet refusal is plan 4.
+Spec 2.8, 2.7 and 2.5 trigger 3. `run --quiet-machine`, or `quiet_machine: true` in a named project lane's config, enrolls an exclusive `quiet` ticket on every pool in `machine.json` at plan time, one at a time in the total order. Unless `--quiet`, a run that took it from config prints on each wait notice `incoda: quiet-machine (from config of "kungfoo-measure"): holding builds; waiting tests`, so the caller knows to use a short `--wait`. A quiet plan replans when `machine.json`'s pools differ from the set it used (a pool added before the final verify is then covered; one added after it is not, as the spec states). A pool only quiet-machine brings has the role `pool, quiet-machine`. A printed run line (the fix of an unlinked, link-needs-user or pool-mismatch refusal) that takes quiet-machine, from a suggestion, the run's `--quiet-machine` or a named key's stored `quiet_machine`, is checked by `lineRefused` against every pool, so a closed pool outside the link rules the line out (spec 2.6). The nested quiet refusal is plan 4.
 
 **Files:**
 - Modify: `internal/cli/run.go`
 - Modify: `internal/lane/queue.go`
 - Modify: `internal/lane/ticket.go`
 - Modify: `internal/runplan/runplan.go`
+- Modify: `internal/runplan/refusals.go`
 - Test: `integration_test.go`
 - Test: `internal/cli/run_test.go`
 - Test: `internal/runplan/runplan_test.go`
 - Test: `pools_test.go`
 
 **Interfaces:**
-- Consumes: `runplan.Make`, `runplan.Plan.Changed` (plan 3a Tasks 5 and 9), `machine.SameSet`.
-- Produces: `runplan.Request.QuietMachine bool`; `runplan.Lane.Quiet bool`; `runplan.Plan` gains `Quiet bool`, `QuietFrom string`, `RegPools []string`; `lane.Ticket.Quiet bool` (`json:"quiet,omitempty"`), logged `quiet=true`; the `run --quiet-machine` flag; `cli.quietLine(from string, parts []*lanePart, waiting string) string`; root `ticketPayload.Quiet`.
+- Consumes: `runplan.Make`, `runplan.Plan.Changed` (plan 3a Tasks 5 and 9), `machine.SameSet`, `runplan.fixFor` and `lineRefused` (plan 3a, commit b001b41).
+- Produces: `runplan.Request.QuietMachine bool`; `runplan.Lane.Quiet bool`; `runplan.Plan` gains `Quiet bool`, `QuietFrom string`, `RegPools []string`; `lane.Ticket.Quiet bool` (`json:"quiet,omitempty"`), logged `quiet=true`; the `run --quiet-machine` flag; `cli.quietLine(from string, parts []*lanePart, waiting string) string`; `lineRefused` gains a `quiet bool` parameter (fixFor passes its own); root `ticketPayload.Quiet`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2906,6 +3713,49 @@ func TestQuietMachine(t *testing.T) {
 	}
 	if why, err := plain.Changed(state); err != nil || why != "" {
 		t.Fatalf("a plan without quiet-machine does not care: %q %v", why, err)
+	}
+}
+
+// TestQuietFixLineChecksEveryPool: a printed run line that takes
+// quiet-machine takes every pool, so a closed pool its link never names
+// still rules the line out (spec 2.6, 2.8): from a suggestion that carries
+// quiet_machine, from the run's --quiet-machine, and from a named key's
+// stored quiet_machine.
+func TestQuietFixLineChecksEveryPool(t *testing.T) {
+	state, reg := machineDir(t, map[string]string{
+		"builds":       `{"schema":2,"slots":1}`,
+		"computer-use": `{"schema":2,"slots":1}`,
+		"tests":        `{"schema":2,"slots":1}`,
+		"vm":           `{"schema":2,"slots":1,"closed":"host down"}`,
+		"quiet-proj":   `{"schema":2,"pools":["tests"],"quiet_machine":true}`,
+	})
+	fix := fixline.Run{Argv: []string{"x"}, Dir: "/src", Here: "/src"}
+	for _, c := range []struct {
+		name string
+		req  Request
+		lead string
+	}{
+		{"a suggestion with quiet_machine", Request{Named: []string{"kungfoo-measure"}, Fix: fix}, "unlinked: kungfoo-measure"},
+		{"several keys, one suggestion with quiet_machine", Request{Named: []string{"kungfoo-measure", "cap-gate"}, Fix: fix}, "unlinked: cap-gate, kungfoo-measure"},
+		{"--quiet-machine on an unlinked key", Request{Named: []string{"cap-gate"}, QuietMachine: true, Fix: fix}, "unlinked: cap-gate"},
+		{"a stored quiet_machine", Request{Named: []string{"quiet-proj"}, Pool: []string{"computer-use"}, Fix: fix}, "pool-mismatch:"},
+	} {
+		_, err := Make(state, reg, c.req)
+		var rf *machine.Refusal
+		if !errors.As(err, &rf) {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !strings.HasPrefix(rf.Msg, c.lead) || strings.Contains(rf.Msg, "incoda run ") ||
+			!strings.Contains(rf.Msg, `no runnable command (queue "vm" is closed (pool, quiet-machine))`) {
+			t.Errorf("%s: want no runnable line, ruled out by the closed vm:\n%s", c.name, rf.Msg)
+		}
+	}
+	// Without quiet-machine the same closed pool is not in the line's set.
+	_, err := Make(state, reg, Request{Named: []string{"cap-gate"}, Fix: fix})
+	var rf *machine.Refusal
+	if !errors.As(err, &rf) || !strings.Contains(rf.Msg, "  incoda run --queue cap-gate --pool tests") {
+		t.Fatalf("a line without quiet-machine ignores vm: %v", err)
 	}
 }
 ```
@@ -3024,7 +3874,7 @@ func TestQuietMachine(t *testing.T) {
 
 Run (bash), one at a time:
 
-- `go test ./internal/runplan/ -run 'TestQuietMachine' -count=1 -timeout 120s`
+- `go test ./internal/runplan/ -run 'TestQuietMachine|TestQuietFixLineChecksEveryPool' -count=1 -timeout 120s`
 - `go test ./internal/cli/ -run 'TestQuietPlanReplansWhenAPoolIsAdded' -count=1 -timeout 120s`
 - `go test . -run 'TestQuietMachine' -count=1 -timeout 120s`
 
@@ -3032,7 +3882,7 @@ Expected: the `internal/runplan` test build fails (`unknown field QuietMachine i
 
 - [ ] **Step 3: Implement**
 
-In `internal/cli/run.go`, make these 5 replacements, in order (each quoted block occurs exactly once in the file when you reach it):
+In `internal/cli/run.go`, make these 5 replacements, in order (each quoted block occurs exactly once in the file when you reach it). Since commit 6655267 `takeLane` opens with the `busy` closure, so the third block starts at the ticket literal:
 
 (1 of 5) Replace:
 
@@ -3094,7 +3944,6 @@ with:
 (3 of 5) Replace:
 
 ```go
-	takeLane := func(plan *runplan.Plan, pt *lanePart) (string, error) {
 		t := lane.Ticket{
 			// --exclusive holds a lane the run names; it does not
 			// propagate to the pools a link brings (spec 2.4).
@@ -3107,7 +3956,6 @@ with:
 with:
 
 ```go
-	takeLane := func(plan *runplan.Plan, pt *lanePart) (string, error) {
 		t := lane.Ticket{
 			// --exclusive holds a lane the run names; it does not
 			// propagate to the pools a link brings (spec 2.4). A
@@ -3466,11 +4314,96 @@ with:
 	for k := range p.Links {
 ```
 
+In `internal/runplan/refusals.go`, make these 3 replacements, in order (each quoted block occurs exactly once in the file when you reach it). A printed run line is checked against every lane it would take (plan 3a, commit b001b41); a line that takes quiet-machine takes every pool, so the check must see them too:
+
+(1 of 3) Replace:
+
+```go
+// and the reason no runnable line may be printed, if a lane the line would
+// take is closed or requires a reason and the run has none (spec 2.6).
+func fixFor(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string, quiet bool) (fixline.Run, string) {
+	r := req.Fix
+	r.Queue, r.Pool = queue, pool
+	r.Flags = append([]fixline.Flag(nil), req.Fix.Flags...)
+	if quiet && !req.WaitGiven {
+		r.Flags = append(r.Flags, fixline.Flag{Name: "wait", Value: quietWait})
+	}
+	return r, lineRefused(stateDir, reg, req, queue, pool, links)
+}
+```
+
+with:
+
+```go
+// and the reason no runnable line may be printed, if a lane the line would
+// take is closed or requires a reason and the run has none (spec 2.6).
+// quiet says a printed config line sets quiet_machine, so the line takes
+// every pool.
+func fixFor(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string, quiet bool) (fixline.Run, string) {
+	r := req.Fix
+	r.Queue, r.Pool = queue, pool
+	r.Flags = append([]fixline.Flag(nil), req.Fix.Flags...)
+	if quiet && !req.WaitGiven {
+		r.Flags = append(r.Flags, fixline.Flag{Name: "wait", Value: quietWait})
+	}
+	return r, lineRefused(stateDir, reg, req, queue, pool, links, quiet)
+}
+```
+
+(2 of 3) Replace:
+
+```go
+// the fix sets it, else as stored), narrowed by the line's --pool. It
+// says why the first lane in total order that would refuse the line does,
+// or "" when none would.
+func lineRefused(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string) string {
+```
+
+with:
+
+```go
+// the fix sets it, else as stored), narrowed by the line's --pool, plus
+// every pool in machine.json when the line takes quiet-machine (quiet: a
+// printed config line sets it; the run's --quiet-machine, which the line
+// carries; or a named project key's stored quiet_machine, spec 2.8). It
+// says why the first lane in total order that would refuse the line does,
+// or "" when none would.
+func lineRefused(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string, quiet bool) string {
+```
+
+(3 of 3) Replace:
+
+```go
+		for _, p := range use {
+			l := add(p, true)
+			l.Via = append(l.Via, k)
+		}
+	}
+	ls := make([]Lane, 0, len(lanes))
+```
+
+with:
+
+```go
+		for _, p := range use {
+			l := add(p, true)
+			l.Via = append(l.Via, k)
+		}
+		quiet = quiet || lanes[k].Cfg.QuietMachine
+	}
+	if quiet || req.QuietMachine {
+		for _, p := range reg.Pools {
+			add(p, true).Quiet = true
+		}
+	}
+	ls := make([]Lane, 0, len(lanes))
+```
+
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run (bash), one at a time:
 
-- `go test ./internal/runplan/ -run 'TestQuietMachine' -count=1`
+- `go test ./internal/runplan/ -run 'TestQuietMachine|TestQuietFixLineChecksEveryPool|TestFixLineChecksTheLaneSetItTakes|TestUnlinkedRefusal' -count=1`
 - `go test ./internal/cli/ -run 'TestQuietPlanReplansWhenAPoolIsAdded' -count=1`
 - `go test . -run 'TestQuietMachine' -count=1`
 
@@ -3485,14 +4418,15 @@ Expected: every step passes and `just ci` ends with the `ok` lines of every pack
 - [ ] **Step 6: Commit**
 
 ```bash
-git add integration_test.go internal/cli/run.go internal/cli/run_test.go internal/lane/queue.go internal/lane/ticket.go internal/runplan/runplan.go internal/runplan/runplan_test.go pools_test.go
+git add integration_test.go internal/cli/run.go internal/cli/run_test.go internal/lane/queue.go internal/lane/ticket.go internal/runplan/refusals.go internal/runplan/runplan.go internal/runplan/runplan_test.go pools_test.go
 git commit -F - <<'MSG'
 feat: quiet-machine takes every pool with an exclusive quiet ticket
 
 run --quiet-machine, or quiet_machine in a named project lane's config,
 takes every pool in machine.json with an exclusive quiet ticket in the
 total order, says what it holds while it waits when it came from config,
-and replans when the set of pools changes before its final verify.
+and replans when the set of pools changes before its final verify. A
+printed run line that takes quiet-machine is checked against every pool.
 MSG
 ```
 
@@ -3707,20 +4641,22 @@ MSG
 Every in-scope clause of plan 3 (both plans), and the task that implements and tests it. `3a-N` is plan 3a's Task N, `3b-N` this plan's.
 
 - **2.2 kinds.** From `machine.json` only (3a-5); a project's own slots apply inside its pools (3a-6); pools carry no `pools` or `quiet_machine`: link writes refuse a pool (3a-3) and `pools add` refuses a lane carrying either (3b-1, `TestAddPool`).
-- **2.4 lane set, total order, one-at-a-time acquisition, one `--wait` budget, `--slots` and `--exclusive` scope** (3a-5, 3a-6, 3a-8); the busy, holder and 121 lines for pools (3a-6).
+- **2.4 lane set, total order, one-at-a-time acquisition, one `--wait` budget, `--slots` and `--exclusive` scope** (3a-5, 3a-6, 3a-8); the busy, holder and 121 lines for pools (3a-6); an interrupt ends every wait of a run with 130, the first link's `machine.lock` wait (6829fc4) and the upgrade's waits (3b-0, `TestMigrationLockWaitIsInterruptible`, `TestWaitIdleEndsWhenItsContextDoes`, `TestNotIdleWaitEndsWhenItsContextDoes`).
 - **2.5 plan, enroll, verify**: verify points and triggers 1 and 2 (3a-9), trigger 3 (3b-6, `TestQuietMachine` in `runplan`, `TestQuietPlanReplansWhenAPoolIsAdded`), replan release, line and log (3a-9), closed after each enroll and on every poll (3a-4), every linked pool resolves or 122 (3a-5, 3a-9).
 - **2.7** `via`, `wait` (3a-6), `quiet` (3b-6). `root`, `pgid`: plan 4.
-- **2.8 quiet machine at top level**: `run --quiet-machine` and `quiet_machine` config, exclusive quiet tickets on every pool in `machine.json` at plan time in the total order, the informational line, trigger 3 (3b-6, root `TestQuietMachine`). The nested refusal: plan 4.
+- **2.8 quiet machine at top level**: `run --quiet-machine` and `quiet_machine` config, exclusive quiet tickets on every pool in `machine.json` at plan time in the total order, the informational line, trigger 3 (3b-6, root `TestQuietMachine`); a printed run line that takes quiet-machine is checked against every pool (3b-6, `TestQuietFixLineChecksEveryPool`); the several-keys unlinked refusal with a quiet suggestion (3b-0, `TestUnlinkedRefusalSeveralKeysWithAQuietSuggestion`). The nested refusal: plan 4.
 - **3.4 kind changes**: `pools add` and `pools remove`, `kind-busy:` and `pool-linked:`, machine.lock then the registry lock held across the `machine.json` write, generation bumped (3b-1, `TestAddPool`, `TestRemovePool`, `TestUpdateIdleHoldsTheRegistryLockAcrossTheWrite`, `TestPoolsAddAndRemove`).
 - **3.5 suggestions**: the table (plan 2a `machine.Suggest`); where they appear: the unlinked refusal (3a-7), `init --print` (3b-4), interactive `init` preselected (3b-5), `init --apply-suggestions` (3b-4); `run --pool` makes a first link only to it (3a-8). `status --tree`, watch and `status --json`: plan 5.
 - **4.1** (3a-7). **4.2** (3a-8). **4.4** (3a-3, 3b-1, 3b-5: every link and kind write holds machine.lock first).
-- **4.3 setup commands**: `incoda link KEY` with picker, `needs-terminal:`, no lock while the picker is open, compare-and-set on confirm and re-ask (3b-3, `TestLinkPicker`, `TestLinkAsksAgainWhenTheLinkMovedMeanwhile`, `TestLinkNeedsATerminal`); `config` link flags (3a-3); `incoda init` interactive, `needs-terminal:`, no lock while asking, each answer its own locked step, re-read and re-ask (3b-5, `TestInitAsks`, `TestInitAsksAgainWhenTheStateChanged`, `TestInitNeedsATerminal`); `init --print` with no config line for a lane without a suggestion and the slots note (3b-4, `TestInitPrint`); `init --apply-suggestions` (3b-4, `TestInitApplySuggestions`); `incoda pools` and `--json` (3b-2, `TestPoolsList`); `--wait` default 1m on `config`, `link`, `init`, `pools add|remove` (3a-3, 3b-1, 3b-3, 3b-4, 3b-5).
+- **4.3 setup commands**: `incoda link KEY` with picker, `needs-terminal:`, no lock while the picker is open, compare-and-set on confirm and re-ask (3b-3, `TestLinkPicker`, `TestLinkAsksAgainWhenTheLinkMovedMeanwhile`, `TestLinkNeedsATerminal`); `config` link flags (3a-3), with a `--quiet-machine`-only change logged and echoed as a link change (3b-0, `TestConfigLinkFlags`); `incoda init` interactive, `needs-terminal:`, no lock while asking, each answer its own locked step, re-read and re-ask (3b-5, `TestInitAsks`, `TestInitAsksAgainWhenTheStateChanged`, `TestInitNeedsATerminal`); `init --print` with no config line for a lane without a suggestion and the slots note (3b-4, `TestInitPrint`); `init --apply-suggestions` (3b-4, `TestInitApplySuggestions`); `incoda pools` and `--json` (3b-2, `TestPoolsList`); `--wait` default 1m on `config`, `link`, `init`, `pools add|remove` (3a-3, 3b-1, 3b-3, 3b-4, 3b-5).
 - **4.5** closed and require_reason of a pool bind runs that enroll on it, `(pool, via K)` texts, description never binds (3a-5, 3a-6).
 - **4.6** bad-text on every new write path: `config` (3a-3), `pools add` (3b-1, a row of the table-driven test), `init` descriptions (3b-5, `TestInitAsks` refuses an ESC and asks again).
-- **5.1** the prefixes of plan 3: `unlinked:`, `link-conflict:`, `pool-mismatch:`, `link-exists:`, `link-needs-user:`, `closed-while-waiting:` (3a), `kind-busy:`, `pool-linked:`, `needs-terminal:`, `bad-text:` (3a-3, 3b-1), `machine-state:` for unresolved links (3a-5); `incoda help` documents them all (3b-7, `TestHelpDocumentsEveryPrefix`). Fix lines through `internal/fixline` on every printed run and config line (3a-2, 3a-7, 3a-8, 3b-4).
+- **5.1** the prefixes of plan 3: `unlinked:`, `link-conflict:`, `pool-mismatch:`, `link-exists:`, `link-needs-user:`, `closed-while-waiting:` (3a), `kind-busy:`, `pool-linked:`, `needs-terminal:`, `bad-text:` (3a-3, 3b-1), `machine-state:` for unresolved links (3a-5); `incoda help` documents them all (3b-7, `TestHelpDocumentsEveryPrefix`). Fix lines through `internal/fixline` on every printed run and config line (3a-2, 3a-7, 3a-8, 3b-4), and on this plan's other printed commands: the `pools add` refusals (3b-1, `configCmd`, `TestConfigCmd`) and every `incoda link KEY` (3b-3, `LinkLine`, `TestLinkLine`; used in 3b-3, 3b-4, 3b-5).
 - **5.5** unlinked lanes with their suggestions in doctor (3b-4).
 
 Carried items (all routed to plan 3): bounded registry locks (3a-1); strays on project keys decided and charged (3a-10); the FIFO test with two waiters and an unpooled holder and the end-to-end orphan-as-holder test (3a-10); `Enroll` fails closed on `NewerSchemaError` (3a-4); table-driven config text checks (3a-3, extended in 3b-1); the 4.5 closed refusal rewrite (3a-5, 3a-6).
+
+Carried from plan 3a to this plan (index, "Carried forward from plan 3a"): the two stale Replace blocks (3b-5 `writeLinkHeld` with the `project` flag and `WriteFirstLinks` passing `true`; 3b-6 the ticket block after the `busy` closure); the run's context through `machine.Ensure` so Ctrl-C during the upgrade's `machine.lock` wait exits 130 (3b-0); a `--quiet-machine`-only config change logged and echoed (3b-0); the comment at `named()` (3b-0); the multi-key quiet suggestion test (3b-0).
 
 Not specified fully, stated:
 
