@@ -241,16 +241,23 @@ func ChargedPools(stateDir string, reg *Registry, key string) []string {
 	return append([]string(nil), reg.Pools...)
 }
 
-// ChargedTo returns the holders of us that count on pool. A key that is
-// not a pool is charged nothing: unpooled holders count on pools only.
-func ChargedTo(stateDir string, reg *Registry, pool string, us []Unpooled) []Unpooled {
-	if !reg.IsPool(pool) {
-		return nil
-	}
+// ChargedTo returns the holders of us that count on lane key. On a pool
+// they are the holders ChargedPools charges to it (spec 2.3). On a project
+// lane they are the holders on that very key: an older incoda that held
+// project key K used K's own width as well as its pools, so a new run on K
+// counts it against K's slots too, before it reaches the pools (the safe
+// direction; spec 2.3 names only the pools).
+func ChargedTo(stateDir string, reg *Registry, key string, us []Unpooled) []Unpooled {
 	var out []Unpooled
 	for _, u := range us {
+		if !reg.IsPool(key) {
+			if u.Key == key {
+				out = append(out, u)
+			}
+			continue
+		}
 		for _, p := range ChargedPools(stateDir, reg, u.Key) {
-			if p == pool {
+			if p == key {
 				out = append(out, u)
 				break
 			}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/machine"
+	"github.com/deblasis/incoda/internal/procinfo"
 )
 
 // startOldRunAfterFenceDeletion migrates a state directory, deletes the
@@ -100,6 +101,18 @@ func TestUnknownStrayKeyCountsOnEveryPool(t *testing.T) {
 	if code != 121 || !strings.Contains(out, fmt.Sprintf("unpooled run by an older incoda: pid %d, key oldjob", o.Process.Pid)) {
 		t.Fatalf("a linked project run waits for it through its pool: %d\n%s", code, out)
 	}
+
+	// The unrelated stray's key ("oldjob") matches no project lane, so it
+	// does not charge proj itself (ChargedTo only matches a non-pool key
+	// against its own name, the restored half of this test): the run above
+	// acquired proj at once, with no busy wait on proj itself, and only
+	// then queued and gave up on tests. (status cannot show this: its
+	// holder/waiter split is structural ticket position, blind to the
+	// extra Unpooled count Acquire applies; see the FIFO test above.)
+	if strings.Contains(out, `queue "proj" busy`) {
+		t.Fatalf("the unrelated stray must not charge lane proj itself:\n%s", out)
+	}
+	inOrder(t, out, `incoda: acquired queue "proj"`, `incoda: queue "tests" busy`)
 }
 
 // TestUnpooledAncestorIsUpgradeBlocked: a new run inside the job of an
@@ -124,5 +137,109 @@ func TestUnpooledAncestorIsUpgradeBlocked(t *testing.T) {
 	}
 	if el := time.Since(start); el > 10*time.Second {
 		t.Fatalf("refused after %s; it must refuse at once", el)
+	}
+}
+
+// TestFIFOWithAnUnpooledHolder: two new runs queue on a pool behind an
+// unpooled run of an older incoda (a live stray ticket). Both name it on
+// their busy line, neither starts while it runs, and once it is gone they
+// are served in arrival order, one at a time.
+func TestFIFOWithAnUnpooledHolder(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "seed")
+	release := holdOldTicket(t, filepath.Join(machine.StraysDir(state), "1"), "builds", 999999, "zig", "build")
+	stamps := t.TempDir()
+	var outs [2]syncBuffer
+	var ws [2]*exec.Cmd
+	for i := range ws {
+		label := fmt.Sprintf("w%d", i)
+		ws[i] = exec.Command(incoda, "run", "--queue", "builds", "--wait", "60s", "--poll", "50ms",
+			"--", stamp, filepath.Join(stamps, label+".txt"), label, "300")
+		ws[i].Env = laneEnv(state)
+		ws[i].Stdout, ws[i].Stderr = &outs[i], &outs[i]
+		if err := ws[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func(c *exec.Cmd) { _ = c.Process.Kill(); _ = c.Wait() }(ws[i])
+		// The busy line comes after the first poll, so the waiter is
+		// enrolled before the next one starts. (status shows the first
+		// waiter as a holder: it counts positions, not unpooled holders.)
+		waitForText(t, &outs[i], "incoda:   unpooled run by an older incoda: pid 999999, key builds\n")
+	}
+	time.Sleep(300 * time.Millisecond)
+	for i := range ws {
+		if _, ok := readInterval(t, filepath.Join(stamps, fmt.Sprintf("w%d.txt", i))); ok {
+			t.Fatalf("w%d ran beside the unpooled holder", i)
+		}
+	}
+	freed := time.Now().UnixNano()
+	release()
+	for i, w := range ws {
+		if err := w.Wait(); err != nil {
+			t.Fatalf("w%d: %v\n%s", i, err, outs[i].String())
+		}
+	}
+	w0, _ := readInterval(t, filepath.Join(stamps, "w0.txt"))
+	w1, _ := readInterval(t, filepath.Join(stamps, "w1.txt"))
+	if w0.enter < freed || w1.enter < w0.exit {
+		t.Fatalf("FIFO behind the unpooled holder violated: freed %d, w0 %+v, w1 %+v", freed, w0, w1)
+	}
+}
+
+// TestUnpooledHolderOnAProjectKeyCountsOnThatLane: an older incoda's run
+// on project key K used K's own width, so a new run on K counts it on K
+// itself before it reaches K's pools (a plan 3 decision; spec 2.3 charges
+// the pools).
+func TestUnpooledHolderOnAProjectKeyCountsOnThatLane(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "p-gate", "--pool", "tests")
+	holdOldTicket(t, filepath.Join(machine.StraysDir(state), "1"), "p-gate", 999999, "just", "gate")
+	out := mustRun(t, incoda, state, 121, "run", "--queue", "p-gate", "--wait", "300ms", "--poll", "50ms",
+		"--", stamp, filepath.Join(t.TempDir(), "s.txt"), "s", "1")
+	inOrder(t, out, `incoda: queue "p-gate" busy (1 slot(s), 0 ahead of you)`,
+		"incoda:   unpooled run by an older incoda: pid 999999, key p-gate\n", `incoda: queue "p-gate" still busy after 300ms.`)
+}
+
+// TestOrphanRecordHoldsALaneUntilItsTreeIsGone: the record of an older
+// incoda's job that a kill is ending counts as a held slot on its key's
+// pool while any recorded process still runs; once the tree is gone the
+// next run proceeds and the record is deleted (spec 3.2).
+func TestOrphanRecordHoldsALaneUntilItsTreeIsGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("orphan records are written by the Unix old-holder kill")
+	}
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "seed")
+	job := exec.Command("sleep", "30")
+	if err := job.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = job.Process.Kill(); _ = job.Wait() }()
+	p, err := procinfo.Lookup(job.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := fmt.Sprintf(`{"key":"builds","pid":999999,"command":["zig","build"],"descendants":[{"pid":%d,"start":%d}],"groups":[],"by_pid":1,"at":"2026-10-02T00:00:00Z"}`, p.PID, p.Start)
+	if err := os.MkdirAll(machine.OrphansDir(state), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(machine.OrphansDir(state), "999999-1.orphan")
+	if err := os.WriteFile(path, []byte(rec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRun(t, incoda, state, 121, "run", "--queue", "builds", "--wait", "300ms", "--poll", "50ms",
+		"--", stamp, filepath.Join(t.TempDir(), "a.txt"), "a", "1")
+	if !strings.Contains(out, "incoda:   unpooled run by an older incoda: pid 999999, key builds\n") {
+		t.Fatalf("the orphan record holds builds:\n%s", out)
+	}
+	_ = job.Process.Kill()
+	_ = job.Wait()
+	mustRun(t, incoda, state, 0, "run", "--queue", "builds", "--wait", "10s", "--poll", "50ms",
+		"--", stamp, filepath.Join(t.TempDir(), "b.txt"), "b", "1")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("an acquisition deletes the record of an empty tree")
 	}
 }

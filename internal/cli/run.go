@@ -233,37 +233,35 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 		key := pt.key
 		role := pt.l.Role()
-		// On a pool, unpooled runs of an older incoda (strays and orphan
-		// records, spec 2.3) hold slots too. Each poll rescans them,
-		// deletes stray lanes that have fully died, and refuses at once
-		// when one of them is this run's own ancestor: waiting for it
+		// Unpooled runs of an older incoda (strays and orphan records,
+		// spec 2.3) hold slots too: on a pool as ChargedPools says, on a
+		// project lane when they ran on that very key. Each poll rescans
+		// them, deletes stray lanes that have fully died, and refuses at
+		// once when one of them is this run's own ancestor: waiting for it
 		// would never end.
 		var unpooled []machine.Unpooled
-		var countUnpooled func() (int, error)
-		if reg.IsPool(key) {
-			countUnpooled = func() (int, error) {
-				// The probes of one poll wait for a stray's registry
-				// lock at most PollProbeWait and never past the budget:
-				// a lock held for ever reads as one held slot.
-				var end time.Time
-				if wait.d >= 0 {
-					end = start.Add(wait.d)
-				}
-				all, err := machine.ScanUnpooled(dir, true, lane.ProbeDeadline(end, lane.PollProbeWait))
-				if err != nil {
-					return 0, &machine.StateError{Msg: "machine-state: cannot scan for unpooled runs: " + textsafe.Escape(err.Error())}
-				}
-				mine := machine.ChargedTo(dir, reg, key, all)
-				if !chain.Skip {
-					for _, u := range mine {
-						if !u.Unknown && chain.Contains(u.PID) {
-							return 0, machine.UpgradeBlocked(u.PID, u.Key)
-						}
+		countUnpooled := func() (int, error) {
+			// The probes of one poll wait for a stray's registry
+			// lock at most PollProbeWait and never past the budget:
+			// a lock held for ever reads as one held slot.
+			var end time.Time
+			if wait.d >= 0 {
+				end = start.Add(wait.d)
+			}
+			all, err := machine.ScanUnpooled(dir, true, lane.ProbeDeadline(end, lane.PollProbeWait))
+			if err != nil {
+				return 0, &machine.StateError{Msg: "machine-state: cannot scan for unpooled runs: " + textsafe.Escape(err.Error())}
+			}
+			mine := machine.ChargedTo(dir, reg, key, all)
+			if !chain.Skip {
+				for _, u := range mine {
+					if !u.Unknown && chain.Contains(u.PID) {
+						return 0, machine.UpgradeBlocked(u.PID, u.Key)
 					}
 				}
-				unpooled = mine
-				return len(mine), nil
 			}
+			unpooled = mine
+			return len(mine), nil
 		}
 		acqErr := en.Acquire(ctx, lane.AcquireOptions{
 			Wait:   budget,

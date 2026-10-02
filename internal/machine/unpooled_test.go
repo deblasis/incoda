@@ -57,7 +57,7 @@ func TestChargedPools(t *testing.T) {
 		return strings.Join(s, ",")
 	}
 	for _, tc := range []struct{ pool, want string }{
-		{"builds", "2,3"}, {"tests", "1,3"}, {"vm", "1,3"}, {"computer-use", "3"}, {"linked", ""},
+		{"builds", "2,3"}, {"tests", "1,3"}, {"vm", "1,3"}, {"computer-use", "3"}, {"linked", "1"}, {"unlinked", ""},
 	} {
 		if got := pids(ChargedTo(state, reg, tc.pool, us)); got != tc.want {
 			t.Fatalf("ChargedTo(%s) = %s, want %s", tc.pool, got, tc.want)
