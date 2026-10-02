@@ -21,6 +21,17 @@ func TestQuote(t *testing.T) {
 		{POSIX, `a\b`, `'a\b'`},
 		{PowerShell, "it's", `'it''s'`},
 		{PowerShell, `C:\x y\`, `'C:\x y\'`},
+		// PowerShell treats the Unicode smart quotes as single-quote
+		// characters too (open, close, and doubled escape), so each one
+		// must be doubled exactly like the ASCII apostrophe or it closes
+		// the quoted string early.
+		{PowerShell, "it\u2018s", "'it\u2018\u2018s'"},
+		{PowerShell, "it\u2019s", "'it\u2019\u2019s'"},
+		{PowerShell, "it\u201As", "'it\u201A\u201As'"},
+		{PowerShell, "it\u201Bs", "'it\u201B\u201Bs'"},
+		// $, a backtick and ; have no special meaning inside a PowerShell
+		// single-quoted string: they print through unchanged.
+		{PowerShell, "$HOME `cmd` ;x", "'$HOME `cmd` ;x'"},
 	} {
 		if got := Quote(c.sh, c.in); got != c.want {
 			t.Errorf("Quote(%v, %q) = %s, want %s", c.sh, c.in, got, c.want)
@@ -59,6 +70,29 @@ func TestRenderRunLine(t *testing.T) {
 	if rd := r.Line().Render(POSIX); rd.Text != "" || rd.Why == "" {
 		t.Fatalf("a relative directory gives no runnable line: %+v", rd)
 	}
+
+	// A right single quotation mark (U+2019) in a flag value and in the cwd
+	// is doubled like an ASCII apostrophe on PowerShell, not left to close
+	// the quoted string early.
+	rq := Run{Queue: []string{"q"}, Flags: []Flag{{Name: "reason", Value: "Alex\u2019s run"}},
+		Argv: []string{"x"}, Dir: `C:\Users\Alex` + "\u2019s stuff", Here: `C:\Users\Alex` + "\u2019s stuff"}
+	if got, want := rq.Line().Render(PowerShell).Text,
+		"incoda run --queue 'q' --reason 'Alex\u2019\u2019s run' '--' 'x'"; got != want {
+		t.Fatalf("smart quote in a value:\n got %s\nwant %s", got, want)
+	}
+	rq.Here = `C:\elsewhere`
+	if got, want := rq.Line().Render(PowerShell).Text,
+		"Set-Location -LiteralPath 'C:\\Users\\Alex\u2019\u2019s stuff'; if ($?) { incoda run --queue 'q' --reason 'Alex\u2019\u2019s run' '--' 'x' }"; got != want {
+		t.Fatalf("smart quote in the cwd:\n got %s\nwant %s", got, want)
+	}
+
+	// A flag value that looks like a flag (starts with --) is still one
+	// quoted word: quoting, not position, is what keeps it from being
+	// read as a flag of the pasted command.
+	rf := Run{Queue: []string{"q"}, Flags: []Flag{{Name: "reason", Value: "--sneaky"}}, Argv: []string{"x"}, Dir: "/d", Here: "/d"}
+	if got, want := rf.Line().Render(POSIX).Text, `incoda run --queue q --reason '--sneaky' -- 'x'`; got != want {
+		t.Fatalf("flag value starting with --: got %s want %s", got, want)
+	}
 }
 
 // TestNoRunnableLine: a value no quoting can carry gives no runnable line
@@ -75,12 +109,16 @@ func TestNoRunnableLine(t *testing.T) {
 		{"escape", PowerShell, []string{"a\x1bb"}, false},
 		{"bidi", POSIX, []string{"a\u202eb"}, false},
 		{"bad utf-8", POSIX, []string{"a\xffb"}, false},
+		{"newline", POSIX, []string{"a\nb"}, false},
+		{"newline on PowerShell", PowerShell, []string{"a\nb"}, false},
 		{"double quote on PowerShell", PowerShell, []string{`say "hi"`}, false},
 		{"empty on PowerShell", PowerShell, []string{""}, false},
 		{"space and trailing backslash on PowerShell", PowerShell, []string{`C:\a b\`}, false},
+		{"no-break space and trailing backslash on PowerShell", PowerShell, []string{"C:\\a\u00a0b\\"}, false},
 		{"double quote on POSIX", POSIX, []string{`say "hi"`}, true},
 		{"empty on POSIX", POSIX, []string{""}, true},
 		{"space and trailing backslash on POSIX", POSIX, []string{`C:\a b\`}, true},
+		{"no-break space and trailing backslash on POSIX", POSIX, []string{"C:\\a\u00a0b\\"}, true},
 		{"backslash on PowerShell", PowerShell, []string{`a\b`}, true},
 	} {
 		r := base
@@ -98,13 +136,59 @@ func TestNoRunnableLine(t *testing.T) {
 		Argv: []string{"a", "b"}, Here: "/w"}, "", "run it")
 	want := []string{
 		"no runnable command (a value contains a control, bidi or invalid UTF-8 character); run it with these fields:",
-		"  queue: q", "  pool: tests", "  flags: --exclusive", `  reason: r\x1b`, "  cwd: /w", "  command: a b",
+		"  queue: q", "  pool: tests", `  flags: "--exclusive"`, `  reason: r\x1b`, "  cwd: (unknown)", `  command: "a" "b"`,
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("fields:\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
 	if got := RunLines(POSIX, base, `queue "q" requires --reason and this run has none`, "run it"); !strings.HasPrefix(got[0], `no runnable command (queue "q" requires --reason`) {
 		t.Fatalf("a reason the caller knows rules the line out: %q", got)
+	}
+}
+
+// TestInvalidKey: every comma-separated part of --queue and --pool must
+// pass lane.ValidateKey, and an unset Queue or Pool that would still print
+// its flag (Pool non-nil but empty) is caught the same way, since joining
+// gives the empty key lane.ValidateKey rejects.
+func TestInvalidKey(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		r    Run
+	}{
+		{"queue has a bad character", Run{Queue: []string{"ok", "bad key!"}, Argv: []string{"x"}, Dir: "/d", Here: "/d"}},
+		{"queue is empty", Run{Queue: nil, Argv: []string{"x"}, Dir: "/d", Here: "/d"}},
+		{"pool set but empty", Run{Queue: []string{"ok"}, Pool: []string{}, Argv: []string{"x"}, Dir: "/d", Here: "/d"}},
+		{"pool has a bad character", Run{Queue: []string{"ok"}, Pool: []string{"bad!", "ok"}, Argv: []string{"x"}, Dir: "/d", Here: "/d"}},
+	} {
+		for _, sh := range []Shell{POSIX, PowerShell} {
+			if rd := c.r.Line().Render(sh); rd.Why != "invalid key" {
+				t.Errorf("%s (%v): Why = %q, want %q", c.name, sh, rd.Why, "invalid key")
+			}
+			lines := RunLines(sh, c.r, "", "run it")
+			if !strings.HasPrefix(lines[0], "no runnable command (invalid key); run it with these fields:") {
+				t.Errorf("%s (%v): %q", c.name, sh, lines)
+			}
+		}
+	}
+	// A valid multi-key queue still renders.
+	ok := Run{Queue: []string{"builds", "kungfoo-gate"}, Argv: []string{"x"}, Dir: "/d", Here: "/d"}
+	if rd := ok.Line().Render(POSIX); rd.Why != "" {
+		t.Fatalf("a valid key list must still render: %+v", rd)
+	}
+}
+
+// TestFlagsFieldDefault: the no-runnable "flags" field reads "(none)" when
+// the run carries no flags, never an empty value.
+func TestFlagsFieldDefault(t *testing.T) {
+	lines := RunLines(POSIX, Run{Queue: []string{"q"}, Argv: []string{"a\tb"}, Dir: "/d", Here: "/d"}, "", "run it")
+	found := false
+	for _, l := range lines {
+		if l == "  flags: (none)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no \"flags: (none)\" line: %q", lines)
 	}
 }
 
@@ -125,29 +209,37 @@ func argvStub(t *testing.T) string {
 	return dir
 }
 
-// paste runs line in the native shell with the stub first on PATH and
-// returns the arguments and directory the stub saw (ok false when it never
-// ran).
+// paste runs line in the native shell with PATH set to the stub directory
+// followed only by the shell's own minimal bin directories, never the
+// caller's full PATH, so nothing but the stub can ever be reached as
+// "incoda" (or anything else a pasted line might name). Returns the
+// arguments and directory the stub saw (ok false when it never ran).
 func paste(t *testing.T, stub, line string) (args []string, cwd string, ok bool) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "argv.json")
 	var cmd *exec.Cmd
+	var path string
 	if runtime.GOOS == "windows" {
 		ps, err := exec.LookPath("powershell")
 		if err != nil {
 			t.Skip("no powershell on this machine")
 		}
 		cmd = exec.Command(ps, "-NoProfile", "-NonInteractive", "-Command", line)
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
+		}
+		path = stub + string(os.PathListSeparator) + root + `\System32` + string(os.PathListSeparator) + root + `\System32\WindowsPowerShell\v1.0`
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", line)
+		path = stub + string(os.PathListSeparator) + "/usr/bin:/bin"
 	}
-	env := []string{"ARGV_OUT=" + out}
+	env := []string{"ARGV_OUT=" + out, "PATH=" + path}
 	for _, kv := range os.Environ() {
-		if k, v, _ := strings.Cut(kv, "="); strings.EqualFold(k, "PATH") {
-			env = append(env, k+"="+stub+string(os.PathListSeparator)+v)
-		} else {
-			env = append(env, kv)
+		if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "PATH") || strings.EqualFold(k, "ARGV_OUT") {
+			continue
 		}
+		env = append(env, kv)
 	}
 	cmd.Env = env
 	_ = cmd.Run()
@@ -179,7 +271,7 @@ func TestPastedLineReproducesArgvAndDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	argv := []string{"it's", `say "hi"`, "a;b", "$(echo pwned)", "two words", "back`tick", `a\b`, `grep 'a\.b'`}
+	argv := []string{"it's", `say "hi"`, "a;b", "$(echo pwned)", "two words", "back`tick", `a\b`, `grep 'a\.b'`, "--"}
 	if Native() == POSIX {
 		argv = append(argv, `C:\Program Files\x\`, "")
 	}

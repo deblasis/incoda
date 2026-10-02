@@ -6,16 +6,19 @@
 // never escaped for display: a backslash is literal inside single quotes in
 // both shells. A value that no quoting can carry safely (a control, bidi or
 // invalid UTF-8 character anywhere; on PowerShell also a double quote, an
-// empty value, or a space or tab before a trailing backslash) gives no
-// runnable line at all, never a line with a placeholder: the caller prints
-// the fields instead (NoRunnable, Fields).
+// empty value, or a space before a trailing backslash) gives no runnable
+// line at all, never a line with a placeholder: the caller prints the
+// fields instead (NoRunnable, Fields).
 package fixline
 
 import (
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -69,12 +72,49 @@ func Val(s string) Word { return Word{s, val} }
 // where a bare -- is the end-of-parameters token and is not passed on.
 func Sep() Word { return Word{"--", sep} }
 
+// isSmartQuote reports whether r is a character PowerShell's single-quoted
+// strings also treat as a quote delimiter: the ASCII apostrophe, and the
+// Unicode left, right, low-9 and reversed-9 single quotation marks, which
+// PowerShell's tokenizer accepts in place of an ASCII quote and which
+// CodeGeneration.EscapeSingleQuotedStringContent doubles just like it.
+func isSmartQuote(r rune) bool {
+	switch r {
+	case '\'', '‘', '’', '‚', '‛':
+		return true
+	}
+	return false
+}
+
+// hasSpace reports whether s contains any Unicode space character, not
+// only ASCII space and tab: Windows PowerShell 5.1's native-argument
+// re-quoting is triggered by any character unicode.IsSpace accepts (for
+// example U+00A0 no-break space or U+3000 ideographic space), not only
+// " \t".
+func hasSpace(s string) bool {
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // Quote renders s as one single-quoted word: on POSIX each single quote
-// inside is closed, escaped with a backslash and reopened; on PowerShell it
-// is doubled.
+// inside is closed, escaped with a backslash and reopened; on PowerShell
+// every character isSmartQuote accepts is doubled.
 func Quote(sh Shell, s string) string {
 	if sh == PowerShell {
-		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+		var b strings.Builder
+		b.Grow(len(s) + 2)
+		b.WriteByte('\'')
+		for _, r := range s {
+			b.WriteRune(r)
+			if isSmartQuote(r) {
+				b.WriteRune(r)
+			}
+		}
+		b.WriteByte('\'')
+		return b.String()
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -97,8 +137,22 @@ func Problem(sh Shell, s string) string {
 		return "a value contains a double quote, which PowerShell does not pass on intact"
 	case s == "":
 		return "a value is empty, which PowerShell does not pass on"
-	case strings.ContainsAny(s, " \t") && strings.HasSuffix(s, `\`):
+	case hasSpace(s) && strings.HasSuffix(s, `\`):
 		return "a value with a space ends in a backslash, which PowerShell does not pass on intact"
+	}
+	return ""
+}
+
+// invalidKeyReason reports why s cannot be printed as a queue or pool key
+// list, or "" when every comma-separated part of s passes
+// lane.ValidateKey. An empty s (an unset Queue or Pool where the line
+// would print a flag with no value) is invalid: splitting "" on "," yields
+// one empty part, which lane.ValidateKey rejects.
+func invalidKeyReason(s string) string {
+	for _, part := range strings.Split(s, ",") {
+		if err := lane.ValidateKey(part); err != nil {
+			return "invalid key"
+		}
 	}
 	return ""
 }
@@ -137,7 +191,13 @@ func (l Line) Render(sh Shell) Rendered {
 		case lit:
 			parts = append(parts, w.text)
 		case key:
+			if why := invalidKeyReason(w.text); why != "" {
+				return Rendered{Why: why}
+			}
 			if sh == PowerShell {
+				if why := Problem(sh, w.text); why != "" {
+					return Rendered{Why: why}
+				}
 				parts = append(parts, Quote(sh, w.text))
 			} else {
 				parts = append(parts, w.text)
@@ -194,14 +254,39 @@ func NoRunnable(why, lead string) string {
 // Field is one line of the fields printed instead of a runnable command.
 type Field struct{ Name, Value string }
 
-// FieldLines renders fields as "name: value" lines, each value escaped
-// for display (spec 4.6).
+// FieldLines renders fields as "name: value" lines. The "flags" and
+// "command" fields Run.Fields builds are already rendered as one escaped,
+// double-quoted Go string per word (quoteWords), which keeps a space
+// inside one word from reading as a boundary between two; those two
+// values are printed as-is. Every other field's value is escaped for
+// display (spec 4.6).
 func FieldLines(fs []Field) []string {
 	out := make([]string, len(fs))
 	for i, f := range fs {
-		out[i] = f.Name + ": " + textsafe.Escape(f.Value)
+		switch f.Name {
+		case "flags", "command":
+			out[i] = f.Name + ": " + f.Value
+		default:
+			out[i] = f.Name + ": " + textsafe.Escape(f.Value)
+		}
 	}
 	return out
+}
+
+// quoteWords renders the no-runnable "flags" and "command" fields so
+// argument boundaries are recoverable from the printed text: each word is
+// escaped for display (textsafe.Escape) and then wrapped in Go double
+// quotes (strconv.Quote), joined by single spaces, for example
+// `"just" "a b"`. "(none)" when there are no words.
+func quoteWords(words []string) string {
+	if len(words) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, len(words))
+	for i, w := range words {
+		parts[i] = strconv.Quote(textsafe.Escape(w))
+	}
+	return strings.Join(parts, " ")
 }
 
 // Flag is one flag of a printed run line. A switch carries Bool: it prints
@@ -249,40 +334,38 @@ func (r Run) Line() Line {
 }
 
 // Fields are the run line's parts for NoRunnable: queue, pool (when set),
-// flags (every carried flag but the reason), reason (when set), cwd and the
-// command, one escaped line each.
+// flags (every carried flag but the reason, "(none)" when there are none),
+// reason (when set), cwd ("(unknown)" when Dir is empty, since an empty
+// Dir never means "here": printing Here instead would fabricate the outer
+// job's directory) and the command, one line each.
 func (r Run) Fields() []Field {
 	fs := []Field{{"queue", strings.Join(r.Queue, ",")}}
 	if r.Pool != nil {
 		fs = append(fs, Field{"pool", strings.Join(r.Pool, ",")})
 	}
-	var flags []string
+	var flagWords []string
 	reason, hasReason := "", false
 	for _, f := range r.Flags {
 		switch {
 		case f.Name == "reason":
 			reason, hasReason = f.Value, true
 		case f.Bool && f.Value == "true":
-			flags = append(flags, "--"+f.Name)
+			flagWords = append(flagWords, "--"+f.Name)
 		case f.Bool:
-			flags = append(flags, "--"+f.Name+"=false")
+			flagWords = append(flagWords, "--"+f.Name+"=false")
 		default:
-			flags = append(flags, "--"+f.Name+" "+f.Value)
+			flagWords = append(flagWords, "--"+f.Name, f.Value)
 		}
 	}
-	flagsText := strings.Join(flags, " ")
-	if flagsText == "" {
-		flagsText = "(none)"
-	}
-	fs = append(fs, Field{"flags", flagsText})
+	fs = append(fs, Field{"flags", quoteWords(flagWords)})
 	if hasReason {
 		fs = append(fs, Field{"reason", reason})
 	}
 	dir := r.Dir
 	if dir == "" {
-		dir = r.Here
+		dir = "(unknown)"
 	}
-	fs = append(fs, Field{"cwd", dir}, Field{"command", strings.Join(r.Argv, " ")})
+	fs = append(fs, Field{"cwd", dir}, Field{"command", quoteWords(r.Argv)})
 	return fs
 }
 

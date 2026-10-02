@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/deblasis/incoda/internal/fixline"
@@ -104,12 +105,27 @@ func FindKillTarget(stateDir string, v View, key string, pid int, deadline time.
 }
 
 // KillLine is a printed stop line: incoda kill --queue K --pid N --reason
-// '<reason>' (quoted by fixline.Quote), plus --force when force is set (the stopped-holder rerun line
-// of spec 3.2 carries it; kill needs no --force for an older incoda). The key is
-// validated and prints bare; the reason is always a constant of this
-// binary, so the line never needs a placeholder.
+// '<reason>', plus --force when force is set (the stopped-holder rerun line
+// of spec 3.2 carries it; kill needs no --force for an older incoda). On
+// POSIX the key and pid print bare (ValidateKey and a decimal number need
+// no quoting there); on PowerShell every value is one single-quoted word
+// (fixline.Quote), key and pid included, since PowerShell's own quoting
+// rules, not a value's shape, decide whether it is safe bare. The reason
+// is always a constant of this binary, so the line never needs a
+// placeholder.
 func KillLine(key string, pid int, reason string, force bool) string {
-	s := fmt.Sprintf("incoda kill --queue %s --pid %d --reason %s", key, pid, fixline.Quote(fixline.Native(), reason))
+	return killLineFor(fixline.Native(), key, pid, reason, force)
+}
+
+// killLineFor is KillLine with the shell fixed, so both branches can be
+// tested on any host regardless of fixline.Native().
+func killLineFor(sh fixline.Shell, key string, pid int, reason string, force bool) string {
+	k, p := key, strconv.Itoa(pid)
+	if sh == fixline.PowerShell {
+		k = fixline.Quote(sh, key)
+		p = fixline.Quote(sh, p)
+	}
+	s := fmt.Sprintf("incoda kill --queue %s --pid %s --reason %s", k, p, fixline.Quote(sh, reason))
 	if force {
 		s += " --force"
 	}

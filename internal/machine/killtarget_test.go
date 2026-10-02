@@ -5,8 +5,27 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/lane"
 )
+
+// TestKillLinePerShell: POSIX prints the key and pid bare (unchanged); on
+// PowerShell every value is one single-quoted word, key and pid included,
+// since fixline.Quote now also doubles PowerShell's smart quotes.
+func TestKillLinePerShell(t *testing.T) {
+	if got, want := killLineFor(fixline.POSIX, "builds", 4711, "incoda upgrade", false),
+		"incoda kill --queue builds --pid 4711 --reason 'incoda upgrade'"; got != want {
+		t.Fatalf("POSIX: got %s want %s", got, want)
+	}
+	if got, want := killLineFor(fixline.PowerShell, "builds", 4711, "incoda upgrade", false),
+		"incoda kill --queue 'builds' --pid '4711' --reason 'incoda upgrade'"; got != want {
+		t.Fatalf("PowerShell: got %s want %s", got, want)
+	}
+	if got, want := killLineFor(fixline.PowerShell, "k", 1, "it's", true),
+		"incoda kill --queue 'k' --pid '1' --reason 'it''s' --force"; got != want {
+		t.Fatalf("PowerShell with force and a quote: got %s want %s", got, want)
+	}
+}
 
 // TestFindKillTarget: kill finds a participant wherever the layout puts
 // it and tells a run of this binary from an older incoda (spec 3.2).
