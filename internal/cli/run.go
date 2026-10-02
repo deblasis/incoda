@@ -96,6 +96,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if err != nil {
 			return exitWith(ExitState, "%v", err)
 		}
+		// Every registry lock wait of this run stays inside its --wait
+		// budget: a stopped incoda keeping a registry lock costs this run
+		// its budget, never more.
+		q.SetBudget(start, wait.d)
 		pt := &lanePart{key: key, q: q}
 		parts = append(parts, pt)
 		cfg, err := q.LoadConfig()
@@ -208,6 +212,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				rc = ExitUsage
 				return usagef("%v", err)
 			}
+			if errors.Is(err, lane.ErrRegistryBusy) {
+				rc = ExitTimeout
+				return exitWith(ExitTimeout, "cannot enter queue %q within --wait: %v. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead", pt.key, err, pt.key)
+			}
 			rc = ExitState
 			return exitWith(ExitState, "cannot enter queue %q: %v", pt.key, err)
 		}
@@ -275,6 +283,14 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Unpooled: countUnpooled,
 			OnWait: func(pos, effSlots int, live []lane.Entry, waited time.Duration) {
 				if *quiet {
+					return
+				}
+				if live == nil && effSlots == 0 {
+					// The poll could not read the lane: another process
+					// kept its registry lock (a stopped incoda).
+					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+						p.Yellow(fmt.Sprintf("queue %q busy (%s), waited %s%s",
+							key, lane.ErrRegistryBusy, waited.Round(time.Second), waitBudget(wait.d))))
 					return
 				}
 				ahead := pos

@@ -23,6 +23,7 @@ import (
 // why, takes its job tree down and exits 124. --force is for the participant
 // that never answers.
 func cmdKill(args []string, stdout, stderr io.Writer) error {
+	start := time.Now()
 	fs := newFlagSet("kill", stderr)
 	queue := fs.String("queue", "", "queue key (defaults to $INCODA_QUEUE)")
 	pid := fs.Int("pid", 0, "pid of the holder or waiter, as status shows it")
@@ -81,6 +82,10 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "%v", err)
 	}
 	defer q.Close()
+	// The request and the checks after it wait for the registry lock only
+	// within --wait (plus the floor), so a stopped incoda keeping that lock
+	// cannot hang kill.
+	q.SetBudget(start, *wait)
 
 	entry, err := q.RequestKill(*pid, req)
 	if errors.Is(err, lane.ErrNoParticipant) {

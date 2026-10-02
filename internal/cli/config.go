@@ -74,6 +74,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "%v", err)
 	}
 	defer q.Close()
+	q.SetBudget(start, wait.d)
 
 	apply := func(cfg *lane.Config) bool {
 		changed := false

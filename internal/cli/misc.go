@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -179,6 +180,9 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 	}
 	defer q.Close()
 	removed, err := q.ForceRelease(*live)
+	if errors.Is(err, lane.ErrRegistryBusy) {
+		return exitWith(ExitState, "queue %q: %v", key, err)
+	}
 	if err != nil {
 		return exitWith(ExitUsage, "%v", err)
 	}

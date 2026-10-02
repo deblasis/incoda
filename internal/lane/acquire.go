@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -65,6 +66,13 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 			}
 		}
 		idx, slots, live, err := e.Position()
+		if errors.Is(err, ErrRegistryBusy) {
+			// Another process kept the registry lock past this poll's
+			// bound (a stopped incoda): nobody can tell who holds the
+			// lane, so this poll admits nobody and the wait goes on
+			// within its budget. OnWait sees no live set.
+			idx, slots, live, err = -1, 0, nil, nil
+		}
 		if err != nil {
 			return err
 		}

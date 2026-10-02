@@ -2,6 +2,7 @@ package lane
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -132,6 +133,90 @@ func TestProbesAreBoundedWhenAnotherProcessHoldsTheRegistry(t *testing.T) {
 	})
 	if ErrRegistryBusy.Error() != "cannot tell: registry lock held by another process" {
 		t.Fatalf("text: %q", ErrRegistryBusy)
+	}
+}
+
+// TestRegistryWaitsAreBounded: every lane operation of this binary waits
+// for a registry lock another process keeps (a stopped incoda) only within
+// the handle's budget, never for ever. Enroll, Position, RequestKill,
+// WaitGone, ForceRelease, UpdateConfig, SaveConfig and LockAll fail with
+// ErrRegistryBusy; MarkAcquired gives up silently; Release frees the
+// ticket without the lock; Acquire reads a busy poll as "not admitted" and
+// times out within its wait.
+func TestRegistryWaitsAreBounded(t *testing.T) {
+	saved := registryFloor
+	registryFloor = 100 * time.Millisecond
+	defer func() { registryFloor = saved }()
+	root := t.TempDir()
+	q, err := OpenIn(root, "bounded", Create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	en, err := q.Enroll(Ticket{Slots: 1, Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdLockElsewhere(t, RegistryLockPath(q.Dir))
+	q.SetBudget(time.Now(), 200*time.Millisecond)
+	const limit = 1500 * time.Millisecond
+	busy := func(what string, fn func() error) {
+		t.Helper()
+		within(t, what, limit, func() {
+			if err := fn(); !errors.Is(err, ErrRegistryBusy) {
+				t.Fatalf("%s: want ErrRegistryBusy, got %v", what, err)
+			}
+		})
+	}
+	busy("Enroll", func() error { _, err := q.Enroll(Ticket{Slots: 1}); return err })
+	busy("Position", func() error { _, _, _, err := en.Position(); return err })
+	busy("RequestKill", func() error { _, err := q.RequestKill(os.Getpid(), KillRequest{By: "t", Reason: "r"}); return err })
+	busy("WaitGone", func() error { _, err := q.WaitGone(os.Getpid(), 0, 10*time.Millisecond); return err })
+	busy("ForceRelease", func() error { _, err := q.ForceRelease(true); return err })
+	busy("UpdateConfig", func() error { _, err := q.UpdateConfig(func(*Config) error { return nil }); return err })
+	busy("SaveConfig", func() error { return q.SaveConfig(Config{Slots: 2}) })
+	busy("LockAll", func() error { _, err := LockAll([]*Queue{q}, time.Now().Add(100*time.Millisecond)); return err })
+	within(t, "MarkAcquired", limit, func() { en.MarkAcquired() })
+	within(t, "Acquire", limit+time.Second, func() {
+		if err := en.Acquire(context.Background(), AcquireOptions{Wait: 300 * time.Millisecond, Poll: 20 * time.Millisecond}); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("Acquire must time out within its wait: %v", err)
+		}
+	})
+	within(t, "Release", releaseRegistryWait+time.Second, func() { en.Release(0) })
+	if _, err := os.Stat(TicketFilePath(q.Dir, en.Name())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Release must remove the ticket without the lock: %v", err)
+	}
+}
+
+// TestRegistryDeadline: the budget end, capped by limit, floored by
+// registryFloor; no budget gives defaultRegistryWait; a negative wait has
+// no deadline unless a limit caps it.
+func TestRegistryDeadline(t *testing.T) {
+	q := &Queue{}
+	near := func(got time.Time, want time.Duration) bool {
+		d := time.Until(got)
+		return d > want-200*time.Millisecond && d <= want+50*time.Millisecond
+	}
+	if dl := q.registryDeadline(0); !near(dl, defaultRegistryWait) {
+		t.Fatalf("no budget: %s", time.Until(dl))
+	}
+	q.SetBudget(time.Now(), 10*time.Second)
+	if dl := q.registryDeadline(0); !near(dl, 10*time.Second) {
+		t.Fatalf("budget end: %s", time.Until(dl))
+	}
+	if dl := q.registryDeadline(PollProbeWait); !near(dl, registryFloor) {
+		t.Fatalf("a limit below the floor gets the floor: %s", time.Until(dl))
+	}
+	q.SetBudget(time.Now().Add(-time.Hour), time.Minute)
+	if dl := q.registryDeadline(0); !near(dl, registryFloor) {
+		t.Fatalf("a spent budget gets the floor: %s", time.Until(dl))
+	}
+	q.SetBudget(time.Now(), -1)
+	if dl := q.registryDeadline(0); !dl.IsZero() {
+		t.Fatalf("a negative wait has no deadline: %s", time.Until(dl))
+	}
+	if dl := q.registryDeadline(3 * time.Second); !near(dl, 3*time.Second) {
+		t.Fatalf("a limit caps a negative wait: %s", time.Until(dl))
 	}
 }
 

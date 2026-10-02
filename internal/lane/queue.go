@@ -41,6 +41,83 @@ type Queue struct {
 	Dir      string
 	registry *lockfile.File
 	readOnly bool
+	// budget bounds every wait for the registry lock (SetBudget).
+	budget budget
+}
+
+// budget is a caller's --wait budget: it runs from start for wait, and a
+// negative wait never ends. The zero budget is unset.
+type budget struct {
+	start time.Time
+	wait  time.Duration
+	set   bool
+}
+
+// Registry lock bounds for this binary's own lane operations. A registry
+// hold lasts microseconds; only a holder stopped inside one (Ctrl-Z, a
+// debugger, a kill window never resumed) keeps it longer, and such a holder
+// must cost a run, a kill or a config at most its own --wait, never hang it.
+// Every wait polls TryLock (LockBy); none blocks in the kernel except a
+// handle whose budget never ends (a negative --wait).
+var (
+	// defaultRegistryWait bounds a registry lock wait of a handle that has
+	// no budget: force-release, the watch screen's killer, tests.
+	defaultRegistryWait = 5 * time.Second
+	// releaseRegistryWait bounds Release's wait. Past it Release goes on
+	// without the lock (see Release).
+	releaseRegistryWait = 2 * time.Second
+	// registryFloor is the least any bounded wait gets, so a run whose
+	// budget is spent still takes a lock an ordinary Enroll or Release holds
+	// for an instant. Tests shorten it.
+	registryFloor = 2 * time.Second
+)
+
+// SetBudget bounds every registry lock wait of this handle by the caller's
+// --wait budget, which runs from start; a negative wait has no end. Each
+// wait still gets registryFloor, and Position waits at most PollProbeWait
+// per poll, so a waiting run keeps checking its interrupt and kill file. A
+// wait that runs out fails with ErrRegistryBusy.
+func (q *Queue) SetBudget(start time.Time, wait time.Duration) {
+	q.budget = budget{start: start, wait: wait, set: true}
+}
+
+// registryDeadline is when one registry lock wait gives up: the end of the
+// budget (defaultRegistryWait from now without one), at most limit from now
+// when limit is positive, and never less than registryFloor from now. The
+// zero time means no deadline.
+func (q *Queue) registryDeadline(limit time.Duration) time.Time {
+	now := time.Now()
+	var d time.Time
+	switch {
+	case !q.budget.set:
+		d = now.Add(defaultRegistryWait)
+	case q.budget.wait >= 0:
+		d = q.budget.start.Add(q.budget.wait)
+	}
+	if limit > 0 && (d.IsZero() || now.Add(limit).Before(d)) {
+		d = now.Add(limit)
+	}
+	if d.IsZero() {
+		return d
+	}
+	if floor := now.Add(registryFloor); d.Before(floor) {
+		d = floor
+	}
+	return d
+}
+
+// lockRegistry takes the registry lock within registryDeadline(limit).
+func (q *Queue) lockRegistry(limit time.Duration) error {
+	var err error
+	if dl := q.registryDeadline(limit); dl.IsZero() {
+		err = q.registry.Lock()
+	} else {
+		err = LockBy(q.registry, dl)
+	}
+	if err != nil {
+		return fmt.Errorf("registry lock: %w", err)
+	}
+	return nil
 }
 
 // Mode says what a Queue handle may create or change.
@@ -110,9 +187,14 @@ func (q *Queue) Close() error {
 // RegistryLockPath is the path of a queue directory's registry lock.
 func RegistryLockPath(queueDir string) string { return filepath.Join(queueDir, registryLockName) }
 
-func (q *Queue) withRegistry(fn func() error) error {
-	if err := q.registry.Lock(); err != nil {
-		return fmt.Errorf("registry lock: %w", err)
+// withRegistry runs fn inside one hold of the registry lock, waiting for it
+// only as long as the handle's budget allows (registryDeadline).
+func (q *Queue) withRegistry(fn func() error) error { return q.withRegistryLimit(0, fn) }
+
+// withRegistryLimit is withRegistry with each wait also capped at limit.
+func (q *Queue) withRegistryLimit(limit time.Duration, fn func() error) error {
+	if err := q.lockRegistry(limit); err != nil {
+		return err
 	}
 	defer q.registry.Unlock()
 	return fn()
@@ -517,14 +599,19 @@ func (e *Enrollment) Release(rc int) {
 	if e == nil || e.lock == nil {
 		return
 	}
-	_ = e.q.withRegistry(func() error {
-		// Close before unlink: on Windows the handle must go away for the
-		// delete to take effect promptly even with share-delete.
-		_ = e.lock.Close()
-		_ = os.Remove(e.path)
-		_ = os.Remove(e.path + killExt)
-		return nil
-	})
+	// Release never waits for ever: past releaseRegistryWait it goes on
+	// without the registry lock. That is safe for a release: the slot is
+	// freed by closing the ticket lock, and a scanner that listed the name
+	// meanwhile finds the file gone or unlocked and reaps it.
+	locked := LockBy(e.q.registry, time.Now().Add(releaseRegistryWait)) == nil
+	// Close before unlink: on Windows the handle must go away for the
+	// delete to take effect promptly even with share-delete.
+	_ = e.lock.Close()
+	_ = os.Remove(e.path)
+	_ = os.Remove(e.path + killExt)
+	if locked {
+		_ = e.q.registry.Unlock()
+	}
 	e.lock = nil
 	// dur is the wall time from enqueue to release (the arrival nano is the
 	// enqueue instant): time in the lane, wait included; cpu= already covers
@@ -544,9 +631,12 @@ func (e *Enrollment) Release(rc int) {
 
 // Position reports this enrollment's 0-based place in the live queue plus the
 // current effective slot count. Both come from one scan under the registry
-// lock, so the place and the count describe the same instant.
+// lock, so the place and the count describe the same instant. It waits for
+// the registry lock at most PollProbeWait (and never past the budget); past
+// that it fails with ErrRegistryBusy, which Acquire reads as "not admitted
+// on this poll".
 func (e *Enrollment) Position() (idx, slots int, live []Entry, err error) {
-	err = e.q.withRegistry(func() error {
+	err = e.q.withRegistryLimit(PollProbeWait, func() error {
 		var scanErr error
 		live, slots, scanErr = e.q.scanLocked(time.Now())
 		return scanErr
@@ -621,8 +711,10 @@ func (q *Queue) ForceRelease(allowLive bool) (removed int, err error) {
 // callers pass them sorted by key, the lock order of spec 3.1. It returns
 // the function that releases them in reverse order. A registry rebuild
 // uses it to hold every lane still while it checks for tickets and
-// rewrites machine.json.
-func LockAll(qs []*Queue) (func(), error) {
+// rewrites machine.json. Each lock is waited for only until deadline (the
+// zero time: as long as it takes); past it LockAll releases what it took
+// and fails with ErrRegistryBusy.
+func LockAll(qs []*Queue, deadline time.Time) (func(), error) {
 	var held []*Queue
 	unlock := func() {
 		for i := len(held) - 1; i >= 0; i-- {
@@ -630,7 +722,13 @@ func LockAll(qs []*Queue) (func(), error) {
 		}
 	}
 	for _, q := range qs {
-		if err := q.registry.Lock(); err != nil {
+		var err error
+		if deadline.IsZero() {
+			err = q.registry.Lock()
+		} else {
+			err = LockBy(q.registry, deadline)
+		}
+		if err != nil {
 			unlock()
 			return nil, fmt.Errorf("registry lock of %q: %w", q.Key, err)
 		}

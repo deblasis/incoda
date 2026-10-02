@@ -74,6 +74,43 @@ func holdRegistryElsewhere(t *testing.T, dir string) {
 	}
 }
 
+// TestOwnLaneOperationsAreBoundedByTheirWait: a registry lock another
+// process keeps on a lane of this layout (a stopped incoda of this binary)
+// costs a run, a config and a force-release on that lane at most their
+// --wait plus the 2s floor: the run times out with 121, config and
+// force-release fail closed with 122, and none of them hangs.
+func TestOwnLaneOperationsAreBoundedByTheirWait(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "seed"); code != 0 {
+		t.Fatalf("migrate: %d\n%s", code, out)
+	}
+	holdRegistryElsewhere(t, laneDir(state, "builds"))
+	const cannot = "cannot tell: registry lock held by another process"
+	timed := func(limit time.Duration, args ...string) (string, int) {
+		t.Helper()
+		start := time.Now()
+		out, code := runIncoda(t, incoda, state, args...)
+		if d := time.Since(start); d > limit {
+			t.Fatalf("incoda %s took %s:\n%s", strings.Join(args, " "), d, out)
+		}
+		return out, code
+	}
+	out, code := timed(8*time.Second, "run", "--queue", "builds", "--wait", "1s", "--poll", "50ms", "--",
+		stamp, filepath.Join(t.TempDir(), "s.txt"), "x", "1")
+	if code != 121 || !strings.Contains(out, `cannot enter queue "builds" within --wait: registry lock: `+cannot) {
+		t.Fatalf("run must time out within its wait: %d\n%s", code, out)
+	}
+	out, code = timed(8*time.Second, "config", "builds", "--slots", "2", "--wait", "1s")
+	if code != 122 || !strings.Contains(out, cannot) {
+		t.Fatalf("config must fail closed within its wait: %d\n%s", code, out)
+	}
+	out, code = timed(10*time.Second, "force-release", "--queue", "builds")
+	if code != 122 || !strings.Contains(out, cannot) {
+		t.Fatalf("force-release must fail closed within its bound: %d\n%s", code, out)
+	}
+}
+
 // TestRegistryLockHeldElsewhereNeverHangs: a registry lock another process
 // keeps for ever (a stray's, and a lane's of this layout) costs status,
 // doctor, kill and a pool run at most their bounds. status and doctor name

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // treeSnapshot maps every path under root to its mode, size and
@@ -191,7 +192,7 @@ func TestLockAllAndLiveLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer en.Release(0)
-	unlock, err := LockAll([]*Queue{a, b})
+	unlock, err := LockAll([]*Queue{a, b}, time.Now().Add(5*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

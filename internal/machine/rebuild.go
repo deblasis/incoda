@@ -87,7 +87,7 @@ func Rebuild(stateDir string, pools []string, o Options, report func(key, kind s
 		}
 		qs = append(qs, q)
 	}
-	unlock, err := lane.LockAll(qs)
+	unlock, err := lane.LockAll(qs, lockDeadline(o.Start, o.Wait, time.Now()))
 	if err != nil {
 		return nil, stateErrorf("%s", esc(err))
 	}
