@@ -533,3 +533,56 @@ func TestReadRegistryGone(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// TestFixLineChecksTheLaneSetItTakes: a printed line is checked against
+// every lane it would take, not only the keys it prints: the pools a
+// printed config line links, a named key's stored link, and the whole
+// stored link when the line keeps no --pool. A lane that would refuse the
+// line rules it out (spec 2.6), so no pasted line is refused.
+func TestFixLineChecksTheLaneSetItTakes(t *testing.T) {
+	configs := map[string]string{
+		"builds":       `{"schema":2,"slots":1,"require_reason":true}`,
+		"computer-use": `{"schema":2,"slots":1}`,
+		"tests":        `{"schema":2,"slots":1,"require_reason":true}`,
+		"vm":           `{"schema":2,"slots":1,"closed":"host down"}`,
+		"polymatto":    `{"schema":2,"pools":["builds","tests"]}`,
+		"plain":        `{"schema":2,"pools":["vm"]}`,
+	}
+	state, reg := machineDir(t, configs)
+	fix := fixline.Run{Argv: []string{"x"}, Dir: "/src", Here: "/src"}
+	for _, c := range []struct {
+		name string
+		req  Request
+		lead string
+		why  string
+	}{
+		{"unlinked single key next to a linked one", Request{Named: []string{"new-gate", "polymatto"}, Reason: "", Fix: fix},
+			"unlinked: new-gate", `queue "builds" requires --reason (pool, via polymatto) and this run has none`},
+		{"unlinked single key whose config line links a pool that requires a reason", Request{Named: []string{"new-gate", "plain"}, Fix: fix},
+			"unlinked: new-gate", `queue "tests" requires --reason (pool, via new-gate) and this run has none`},
+		{"unlinked keys", Request{Named: []string{"cap-e2e", "cap-gate"}, Fix: fix},
+			"unlinked: cap-e2e, cap-gate", `queue "tests" requires --reason (pool, via cap-e2e,cap-gate) and this run has none`},
+		{"link-needs-user with several keys", Request{Named: []string{"cap-gate", "plain"}, Pool: []string{"computer-use"}, Fix: fix},
+			"link-needs-user:", `queue "tests" requires --reason (pool, via cap-gate) and this run has none`},
+		{"pool-mismatch keeping the whole link", Request{Named: []string{"polymatto"}, Pool: []string{"computer-use"}, Fix: fix},
+			"pool-mismatch:", `queue "builds" requires --reason (pool, via polymatto) and this run has none`},
+		{"pool-mismatch whose extra pool is closed", Request{Named: []string{"polymatto"}, Pool: []string{"vm"}, Reason: "r", Fix: fix},
+			"pool-mismatch:", `queue "vm" is closed (pool)`},
+	} {
+		_, err := Make(state, reg, c.req)
+		var rf *machine.Refusal
+		if !errors.As(err, &rf) {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !strings.HasPrefix(rf.Msg, c.lead) {
+			t.Errorf("%s: wrong refusal:\n%s", c.name, rf.Msg)
+		}
+		if strings.Contains(rf.Msg, "incoda run ") {
+			t.Errorf("%s: printed a runnable line:\n%s", c.name, rf.Msg)
+		}
+		if want := "no runnable command (" + c.why + ")"; !strings.Contains(rf.Msg, want) {
+			t.Errorf("%s: want %q in:\n%s", c.name, want, rf.Msg)
+		}
+	}
+}

@@ -96,26 +96,75 @@ func quoted(keys []string) string {
 }
 
 // fixFor is the caller's run line with the queue and pool the fix sets,
-// plus --wait 5m when quiet is set and the caller gave no --wait. It
-// returns the line and the reason no runnable line may be printed, if a
-// lane in it requires a reason and the run has none.
-func fixFor(stateDir string, reg *machine.Registry, req Request, queue, pool []string, quiet bool) (fixline.Run, string) {
+// plus --wait 5m when quiet is set and the caller gave no --wait. links
+// are the links the printed config lines set before the run line (a
+// project key absent from it keeps its stored link). It returns the line
+// and the reason no runnable line may be printed, if a lane the line would
+// take is closed or requires a reason and the run has none (spec 2.6).
+func fixFor(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string, quiet bool) (fixline.Run, string) {
 	r := req.Fix
 	r.Queue, r.Pool = queue, pool
 	r.Flags = append([]fixline.Flag(nil), req.Fix.Flags...)
 	if quiet && !req.WaitGiven {
 		r.Flags = append(r.Flags, fixline.Flag{Name: "wait", Value: quietWait})
 	}
-	why := ""
-	if strings.TrimSpace(req.Reason) == "" {
-		for _, k := range append(append([]string(nil), queue...), pool...) {
-			if cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, k)); err == nil && cfg.RequireReason {
-				why = fmt.Sprintf("queue %q requires --reason and this run has none", k)
-				break
-			}
+	return r, lineRefused(stateDir, reg, req, queue, pool, links)
+}
+
+// lineRefused computes the lane set a printed line would take, as Make
+// does: the keys in queue, plus each project key's link (from links when
+// the fix sets it, else as stored), narrowed by the line's --pool. It
+// says why the first lane in total order that would refuse the line does,
+// or "" when none would.
+func lineRefused(stateDir string, reg *machine.Registry, req Request, queue, pool []string, links map[string][]string) string {
+	lanes := map[string]*Lane{}
+	add := func(k string, isPool bool) *Lane {
+		if l := lanes[k]; l != nil {
+			return l
+		}
+		cfg, _ := lane.ReadConfig(lane.LaneDir(stateDir, k))
+		l := &Lane{Key: k, Pool: isPool, Cfg: cfg}
+		lanes[k] = l
+		return l
+	}
+	for _, k := range queue {
+		add(k, reg.IsPool(k)).Named = true
+	}
+	for _, k := range queue {
+		if reg.IsPool(k) {
+			continue
+		}
+		link, set := links[k]
+		if !set {
+			link = lanes[k].Cfg.Pools
+		}
+		use := machine.SortedSet(link)
+		if pool != nil {
+			use = pool
+		}
+		for _, p := range use {
+			l := add(p, true)
+			l.Via = append(l.Via, k)
 		}
 	}
-	return r, why
+	ls := make([]Lane, 0, len(lanes))
+	for _, l := range lanes {
+		ls = append(ls, *l)
+	}
+	sortLanes(ls)
+	noReason := strings.TrimSpace(req.Reason) == ""
+	for _, l := range ls {
+		if l.Pool && !l.Named && req.Held[l.Key] {
+			continue
+		}
+		if l.Cfg.Closed != "" {
+			return fmt.Sprintf("queue %q is closed%s", l.Key, withRole(l))
+		}
+		if l.Cfg.RequireReason && noReason {
+			return fmt.Sprintf("queue %q requires --reason%s and this run has none", l.Key, withRole(l))
+		}
+	}
+	return ""
 }
 
 // namedOrder is the run's named keys in the total order: project keys,
@@ -187,12 +236,12 @@ func unlinkedRefusal(stateDir string, reg *machine.Registry, req Request, keys [
 		}
 		if projects == 1 {
 			lines = append(lines, fmt.Sprintf("to link it to the suggestion (stored; every later run on this queue takes %s):", takes))
-			run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, s.QuietMachine)
+			run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, map[string][]string{k: s.Pools}, s.QuietMachine)
 			lines = append(lines, fixline.RunLines(sh, run, why, "run it")...)
 		} else {
 			lines = append(lines, fmt.Sprintf("to link it to the suggestion (stored; every later run on this queue takes %s), then run:", takes),
 				"  "+configLine(sh, k, s))
-			run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, s.QuietMachine)
+			run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, map[string][]string{k: s.Pools}, s.QuietMachine)
 			lines = append(lines, fixline.RunLines(sh, run, why, "run it")...)
 		}
 		if s.QuietMachine && !req.WaitGiven {
@@ -217,10 +266,12 @@ func unlinkedRefusal(stateDir string, reg *machine.Registry, req Request, keys [
 		return refusal(append(lines, askUser...))
 	}
 	lines = append(lines, "to link them to the suggestions (stored; every later run on these queues takes these pools), then run:")
+	set := map[string][]string{}
 	for i, k := range keys {
 		lines = append(lines, "  "+configLine(sh, k, sugg[i]))
+		set[k] = sugg[i].Pools
 	}
-	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, quiet)
+	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, set, quiet)
 	lines = append(lines, fixline.RunLines(sh, run, why, "run it")...)
 	if quiet && !req.WaitGiven {
 		lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
@@ -244,7 +295,7 @@ func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key stri
 	}
 	lines := []string{fmt.Sprintf("link-needs-user: %q suggests %s; a first link from run must equal it", key, strings.Join(s.Pools, ","))}
 	if projects > 1 {
-		cfg, quiet, ok := configFirst(reg, unlinked)
+		cfg, set, quiet, ok := configFirst(reg, unlinked)
 		if !ok {
 			return refusal(append(lines, cfg...))
 		}
@@ -254,7 +305,7 @@ func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key stri
 		}
 		lines = append(lines, lead+", then run without --pool, which applies to every named project queue:")
 		lines = append(lines, cfg...)
-		run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, quiet)
+		run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, set, quiet)
 		lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
 		if quiet && !req.WaitGiven {
 			lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
@@ -262,7 +313,7 @@ func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key stri
 		return refusal(append(lines, "ask the user for anything else; they run: incoda link "+key))
 	}
 	lines = append(lines, "run it with the suggestion instead (stored; every later run on this queue takes these pools):")
-	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, s.QuietMachine)
+	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), s.Pools, map[string][]string{key: s.Pools}, s.QuietMachine)
 	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
 	if s.QuietMachine && !req.WaitGiven {
 		lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
@@ -271,11 +322,13 @@ func linkNeedsUser(stateDir string, reg *machine.Registry, req Request, key stri
 }
 
 // configFirst is the config line of each unlinked key, which links it to
-// its suggestion, and whether any suggestion carries quiet_machine. When a
+// its suggestion, the links those lines set, and whether any suggestion
+// carries quiet_machine. When a
 // key has no usable suggestion there is no runnable line: ok is false and
 // the one line returned asks the user to link every unlinked key.
-func configFirst(reg *machine.Registry, unlinked []string) (lines []string, quiet, ok bool) {
+func configFirst(reg *machine.Registry, unlinked []string) (lines []string, set map[string][]string, quiet, ok bool) {
 	sh := fixline.Native()
+	set = map[string][]string{}
 	for _, k := range unlinked {
 		s := Suggest(reg, k)
 		if !s.Usable {
@@ -283,12 +336,13 @@ func configFirst(reg *machine.Registry, unlinked []string) (lines []string, quie
 			for i, u := range unlinked {
 				links[i] = "incoda link " + u
 			}
-			return []string{fmt.Sprintf("no runnable line: %q has no usable suggestion (%s); ask the user; they run: %s", k, s.Why, strings.Join(links, ", "))}, false, false
+			return []string{fmt.Sprintf("no runnable line: %q has no usable suggestion (%s); ask the user; they run: %s", k, s.Why, strings.Join(links, ", "))}, nil, false, false
 		}
 		lines = append(lines, "  "+configLine(sh, k, s))
+		set[k] = s.Pools
 		quiet = quiet || s.QuietMachine
 	}
-	return lines, quiet, true
+	return lines, set, quiet, true
 }
 
 // poolMismatch refuses a --pool set that is not part of key's link (spec
@@ -312,11 +366,12 @@ func poolMismatch(stateDir string, reg *machine.Registry, req Request, key strin
 	lines := []string{fmt.Sprintf("pool-mismatch: %q is linked to %s; --pool %s is not part of it", key, strings.Join(link, ","), strings.Join(extra, ","))}
 	hold := fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change):", strings.Join(extra, ","))
 	quiet := false
+	var set map[string][]string
 	if projects > 1 {
 		keep = nil
 		hold = fmt.Sprintf("to also hold %s for this run only, name it next to the queue (no link change; without --pool, which applies to every named project queue):", strings.Join(extra, ","))
 		if len(unlinked) > 0 {
-			cfg, q, ok := configFirst(reg, unlinked)
+			cfg, s, q, ok := configFirst(reg, unlinked)
 			if !ok {
 				return refusal(append(append(lines, cfg...), "changing the link is the user's call; ask them."))
 			}
@@ -325,13 +380,13 @@ func poolMismatch(stateDir string, reg *machine.Registry, req Request, key strin
 				lead = fmt.Sprintf("link %s to their suggestions first (stored; every later run on these queues takes these pools):", strings.Join(unlinked, ", "))
 			}
 			lines = append(append(lines, lead), cfg...)
-			quiet = q
+			quiet, set = q, s
 		}
 	}
 	lines = append(lines, hold)
 	// A pool both named in --queue and in extra goes into the line once.
 	queue := namedOrder(reg, machine.SortedSet(append(append([]string(nil), req.Named...), extra...)))
-	run, why := fixFor(stateDir, reg, req, queue, keep, quiet)
+	run, why := fixFor(stateDir, reg, req, queue, keep, set, quiet)
 	lines = append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...)
 	if quiet && !req.WaitGiven {
 		lines = append(lines, "(--wait 5m added: quiet-machine holds every pool it has drained while it waits for the rest)")
@@ -347,6 +402,6 @@ func noProjectRefusal(stateDir string, reg *machine.Registry, req Request, pools
 		what = quoted(pools) + " are pools"
 	}
 	lines := []string{fmt.Sprintf("pool-mismatch: --pool needs a project key; %s", what), "rerun without --pool:"}
-	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, false)
+	run, why := fixFor(stateDir, reg, req, namedOrder(reg, req.Named), nil, nil, false)
 	return refusal(append(lines, fixline.RunLines(fixline.Native(), run, why, "run it")...))
 }
