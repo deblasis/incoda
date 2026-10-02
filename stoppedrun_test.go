@@ -4,6 +4,7 @@ package main
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -21,7 +22,8 @@ func TestStoppedRunOfThisBinaryGetsTheResumeLineOnly(t *testing.T) {
 	runnerSentinel(t)
 	incoda, _ := binaries(t)
 	state := t.TempDir()
-	c := exec.Command(incoda, "run", "--queue", "jc", "--poll", "50ms", "--quiet", "--", "sleep", "2")
+	started := filepath.Join(t.TempDir(), "started")
+	c := exec.Command(incoda, "run", "--queue", "jc", "--poll", "50ms", "--quiet", "--", "sh", "-c", `touch "$0"; sleep 3`, started)
 	c.Env = laneEnv(state)
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := c.Start(); err != nil {
@@ -29,7 +31,7 @@ func TestStoppedRunOfThisBinaryGetsTheResumeLineOnly(t *testing.T) {
 	}
 	pid := c.Process.Pid
 	t.Cleanup(func() {
-		// Resumed, the run reaps its job (sleep 2) and exits on its own.
+		// Resumed, the run reaps its job (sleep 3) and exits on its own.
 		_ = syscall.Kill(pid, syscall.SIGCONT)
 		done := make(chan struct{})
 		go func() { _ = c.Wait(); close(done) }()
@@ -40,7 +42,10 @@ func TestStoppedRunOfThisBinaryGetsTheResumeLineOnly(t *testing.T) {
 			<-done
 		}
 	})
-	waitForTicket(t, laneDir(state, "jc"))
+	// Stop it only once its job runs: stopped inside Enroll or
+	// MarkAcquired it would keep the registry lock, and status could then
+	// only say it cannot tell.
+	waitForFile(t, started)
 	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
