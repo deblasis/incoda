@@ -193,7 +193,21 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// started with the command, so machine.lock and migration waits above
 	// have already spent part of it.
 	for _, pt := range toTake {
-		en, err := pt.q.Enroll(lane.Ticket{
+		// Enroll's wait for the registry lock ends on an interrupt too, and
+		// says once why it waits when another process keeps that lock (a
+		// stopped incoda), so the wait is never silent.
+		busy := func() {
+			if *quiet {
+				return
+			}
+			limit := "no time limit"
+			if wait.d >= 0 {
+				limit = "limit " + wait.d.String()
+			}
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+				p.Yellow(fmt.Sprintf("queue %q: registry lock held by another process; waiting (%s)", pt.key, textsafe.Escape(limit))))
+		}
+		en, err := pt.q.EnrollContext(ctx, lane.Ticket{
 			Slots:     *slots,
 			Exclusive: *exclusive,
 			Command:   argv,
@@ -201,8 +215,12 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Owner:     *owner,
 			Hostname:  host,
 			Dir:       cwd,
-		})
+		}, busy)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				rc = ExitInterrupt
+				return exitWith(ExitInterrupt, "interrupted while queueing on %q", pt.key)
+			}
 			// The queue's config can change between the pre-check above and
 			// this enrollment; the refusal is the same caller mistake either
 			// way, so it gets the same message and the same usage exit

@@ -1,6 +1,7 @@
 package lane
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,9 +75,10 @@ var (
 
 // SetBudget bounds every registry lock wait of this handle by the caller's
 // --wait budget, which runs from start; a negative wait has no end. Each
-// wait still gets registryFloor, and Position waits at most PollProbeWait
-// per poll, so a waiting run keeps checking its interrupt and kill file. A
-// wait that runs out fails with ErrRegistryBusy.
+// wait still gets registryFloor. Position caps each poll's wait at
+// PollProbeWait raised to registryFloor (so at most registryFloor while
+// the budget lasts), and a waiting run checks its interrupt and kill file
+// between polls. A wait that runs out fails with ErrRegistryBusy.
 func (q *Queue) SetBudget(start time.Time, wait time.Duration) {
 	q.budget = budget{start: start, wait: wait, set: true}
 }
@@ -287,12 +289,18 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 			continue
 		}
 		path := ticketPath(q.Dir, de.Name())
+		// The ticket is opened without O_CREATE: one a Release unlinked
+		// after the ReadDir above (Release may run without the registry
+		// lock, see Release) is simply gone, not a dead holder to recreate,
+		// reap and log.
+		lf, err := lockfile.OpenExisting(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		var free bool
-		var err error
-		if q.readOnly {
-			free, err = lockfile.IsFreeExisting(path)
-		} else {
-			free, err = lockfile.IsFree(path)
+		if err == nil {
+			free, err = lf.TryLock()
+			lf.Close()
 		}
 		if err != nil {
 			// A ticket we cannot even open is not something we can reason
@@ -308,9 +316,13 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 			// this line the log shows an enqueue with no ending, and a
 			// history that cannot say how a job finished cannot be used to
 			// size a queue.
-			_ = os.Remove(path)
+			// Only the scan that removed the file logs it, so a ticket a
+			// lockless Release removed meanwhile is not logged as reaped.
+			removed := os.Remove(path) == nil
 			_ = os.Remove(path + killExt)
-			q.Logf("queue=%s event=reaped pid=%d", q.Key, ord.pid)
+			if removed {
+				q.Logf("queue=%s event=reaped pid=%d", q.Key, ord.pid)
+			}
 			continue
 		}
 		e := Entry{File: de.Name(), order: ord}
@@ -530,59 +542,20 @@ var ErrTimeout = errors.New("timed out waiting for a slot")
 // Enroll the process is in the queue, in arrival order, whether or not it holds
 // a slot yet.
 func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
-	var en *Enrollment
-	err := q.withRegistry(func() error {
-		// The stamp is taken while holding the registry lock so that stamp
-		// order and file-visibility order cannot disagree.
-		now := time.Now()
-		t.Queue = q.Key
-		t.PID = os.Getpid()
-		t.ArrivalNano = now.UnixNano()
-		t.Arrival = now.Format(time.RFC3339Nano)
-		// The configured count is the queue's width, in full. A ticket that
-		// does not ask is stamped with it; a ticket that asks for a
-		// different number is refused rather than silently clamped in either
-		// direction. Narrowing used to be allowed through the minimum rule
-		// and one stray "--slots 1" dragged a five-slot queue down to one
-		// for everyone; a job that genuinely needs the queue alone says
-		// --exclusive, which is explicit, visible in status, and still
-		// narrows to 1 on purpose. A missing or broken config leaves an
-		// unset count at 1, the safe direction.
-		cfg, cfgErr := q.LoadConfig()
-		switch {
-		case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
-			return NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)
-		case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
-			t.Slots = cfg.Slots
-		case t.Slots < 1:
-			t.Slots = 1
-		}
-		name := ticketName(t.ArrivalNano, t.PID)
-		path := ticketPath(q.Dir, name)
-		lf, err := lockfile.Open(path)
-		if err != nil {
-			return err
-		}
-		ok, err := lf.TryLock()
-		if err != nil {
-			lf.Close()
-			return err
-		}
-		if !ok {
-			// Same nanosecond and same pid as a live ticket is impossible for
-			// two distinct processes; this means a leftover we cannot own.
-			lf.Close()
-			return fmt.Errorf("ticket %s is already locked", name)
-		}
-		b, _ := json.Marshal(t)
-		if err := lf.Truncate(b); err != nil {
-			lf.Close()
-			_ = os.Remove(path)
-			return err
-		}
-		en = &Enrollment{q: q, name: name, path: path, lock: lf, ticket: t}
-		return nil
-	})
+	return q.EnrollContext(context.Background(), t, nil)
+}
+
+// EnrollContext is Enroll for a run: its wait for the registry lock (within
+// the handle's budget) also ends when ctx does, with ctx's error and no
+// ticket written, so an interrupt is never held up by a registry lock
+// another process keeps. busy, when not nil, is called once if that wait
+// lasts longer than PollProbeWait, so the caller can say why it waits.
+func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enrollment, error) {
+	if err := lockByContext(ctx, q.registry, q.registryDeadline(0), PollProbeWait, busy); err != nil {
+		return nil, fmt.Errorf("registry lock: %w", err)
+	}
+	en, err := q.enrollLocked(t)
+	_ = q.registry.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -592,6 +565,60 @@ func (q *Queue) Enroll(t Ticket) (*Enrollment, error) {
 	}
 	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), textsafe.LogValue(en.ticket.CommandString()))
 	return en, nil
+}
+
+// enrollLocked writes this process's ticket. The caller holds the registry
+// lock.
+func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
+	// The stamp is taken while holding the registry lock so that stamp
+	// order and file-visibility order cannot disagree.
+	now := time.Now()
+	t.Queue = q.Key
+	t.PID = os.Getpid()
+	t.ArrivalNano = now.UnixNano()
+	t.Arrival = now.Format(time.RFC3339Nano)
+	// The configured count is the queue's width, in full. A ticket that
+	// does not ask is stamped with it; a ticket that asks for a
+	// different number is refused rather than silently clamped in either
+	// direction. Narrowing used to be allowed through the minimum rule
+	// and one stray "--slots 1" dragged a five-slot queue down to one
+	// for everyone; a job that genuinely needs the queue alone says
+	// --exclusive, which is explicit, visible in status, and still
+	// narrows to 1 on purpose. A missing or broken config leaves an
+	// unset count at 1, the safe direction.
+	cfg, cfgErr := q.LoadConfig()
+	switch {
+	case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
+		return nil, NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)
+	case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
+		t.Slots = cfg.Slots
+	case t.Slots < 1:
+		t.Slots = 1
+	}
+	name := ticketName(t.ArrivalNano, t.PID)
+	path := ticketPath(q.Dir, name)
+	lf, err := lockfile.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := lf.TryLock()
+	if err != nil {
+		lf.Close()
+		return nil, err
+	}
+	if !ok {
+		// Same nanosecond and same pid as a live ticket is impossible for
+		// two distinct processes; this means a leftover we cannot own.
+		lf.Close()
+		return nil, fmt.Errorf("ticket %s is already locked", name)
+	}
+	b, _ := json.Marshal(t)
+	if err := lf.Truncate(b); err != nil {
+		lf.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return &Enrollment{q: q, name: name, path: path, lock: lf, ticket: t}, nil
 }
 
 // Release drops the ticket. It is safe to call more than once.
@@ -632,9 +659,9 @@ func (e *Enrollment) Release(rc int) {
 // Position reports this enrollment's 0-based place in the live queue plus the
 // current effective slot count. Both come from one scan under the registry
 // lock, so the place and the count describe the same instant. It waits for
-// the registry lock at most PollProbeWait (and never past the budget); past
-// that it fails with ErrRegistryBusy, which Acquire reads as "not admitted
-// on this poll".
+// the registry lock at most PollProbeWait raised to registryFloor (and,
+// past the floor, never past the budget); past that it fails with
+// ErrRegistryBusy, which Acquire reads as "not admitted on this poll".
 func (e *Enrollment) Position() (idx, slots int, live []Entry, err error) {
 	err = e.q.withRegistryLimit(PollProbeWait, func() error {
 		var scanErr error

@@ -1,6 +1,7 @@
 package lane
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -72,6 +73,46 @@ func LockBy(reg *lockfile.File, deadline time.Time) error {
 			return ErrRegistryBusy
 		}
 		time.Sleep(min(probeRetry, left))
+	}
+}
+
+// lockByContext is LockBy for a wait a person may interrupt: it also ends
+// when ctx does, with ctx's error, and a zero deadline means no end (the
+// caller asked to wait for ever) rather than one try. busy, when not nil,
+// is called once when the wait has lasted busyAfter.
+func lockByContext(ctx context.Context, reg *lockfile.File, deadline time.Time, busyAfter time.Duration, busy func()) error {
+	start := time.Now()
+	told := busy == nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ok, err := reg.TryLock()
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		if !told && time.Since(start) >= busyAfter {
+			told = true
+			busy()
+		}
+		sleep := probeRetry
+		if !deadline.IsZero() {
+			left := time.Until(deadline)
+			if left <= 0 {
+				return ErrRegistryBusy
+			}
+			sleep = min(sleep, left)
+		}
+		tm := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			tm.Stop()
+			return ctx.Err()
+		case <-tm.C:
+		}
 	}
 }
 
