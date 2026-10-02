@@ -78,9 +78,7 @@ func ScanUnpooled(stateDir string, clean bool, deadline time.Time) ([]Unpooled, 
 		}
 		out = append(out, found...)
 		if clean {
-			if err := cleanBatch(stateDir, batch, deadline); err != nil {
-				return nil, err
-			}
+			cleanBatch(stateDir, batch, deadline)
 		}
 	}
 	if kindOf(lane.QueuesDir(stateDir)) == aDir {
@@ -137,6 +135,8 @@ func probeRoot(root, where string, deadline time.Time) ([]Unpooled, error) {
 // CleanStrays deletes every fully dead lane directory under strays/ (see
 // ScanUnpooled), without listing anything. A re-fence and doctor use it on
 // a migrated layout. Registry locks are waited for only until deadline.
+// Its only error is a strays/ it cannot list; a lane it cannot delete is
+// logged (cleanBatch) and skipped.
 func CleanStrays(stateDir string, deadline time.Time) error {
 	batches, err := os.ReadDir(StraysDir(stateDir))
 	if errors.Is(err, os.ErrNotExist) {
@@ -147,9 +147,7 @@ func CleanStrays(stateDir string, deadline time.Time) error {
 	}
 	for _, b := range batches {
 		if b.IsDir() {
-			if err := cleanBatch(stateDir, filepath.Join(StraysDir(stateDir), b.Name()), deadline); err != nil {
-				return err
-			}
+			cleanBatch(stateDir, filepath.Join(StraysDir(stateDir), b.Name()), deadline)
 		}
 	}
 	return nil
@@ -158,28 +156,46 @@ func CleanStrays(stateDir string, deadline time.Time) error {
 // cleanBatch deletes every fully dead lane directory of one strays batch,
 // passing its log fragment to lanes/<K>/lane.log when that lane exists,
 // and then the batch itself if nothing is left in it.
-func cleanBatch(stateDir, batch string, deadline time.Time) error {
+//
+// It is housekeeping, so it is best effort: a failure (a lane or batch it
+// cannot list or delete) is logged to machine.log as event=cleanup-failed
+// and skipped, never handed to the run, config or doctor that called it.
+// Counting is not affected: the probes that decide what holds a slot fail
+// closed on their own.
+func cleanBatch(stateDir, batch string, deadline time.Time) {
 	keys, err := lane.ListIn(batch)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+		if !errors.Is(err, fs.ErrNotExist) {
+			logCleanupFailed(stateDir, batch, err)
 		}
-		return fmt.Errorf("%s: %w", batch, err)
+		return
 	}
 	for _, k := range keys {
-		_, err := lane.RemoveIfIdle(filepath.Join(batch, k), deadline, func(logPath string) {
+		dir := filepath.Join(batch, k)
+		_, err := removeIfIdleFn(dir, deadline, func(logPath string) {
 			if lane.Exists(stateDir, k) {
 				appendFragment(logPath, lane.LogPath(lane.LaneDir(stateDir, k)))
 			}
 		})
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("%s/%s: %w", batch, k, err)
+			logCleanupFailed(stateDir, dir, err)
 		}
 	}
 	if left, err := os.ReadDir(batch); err == nil && len(left) == 0 {
-		_ = os.Remove(batch)
+		if err := os.Remove(batch); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logCleanupFailed(stateDir, batch, err)
+		}
 	}
-	return nil
+}
+
+// removeIfIdleFn is the stray lane delete; tests replace it to make it
+// fail.
+var removeIfIdleFn = lane.RemoveIfIdle
+
+// logCleanupFailed records a housekeeping failure in machine.log, one line
+// with escaped values.
+func logCleanupFailed(stateDir, path string, err error) {
+	appendMachineLog(stateDir, "event=cleanup-failed pid=%d path=%s err=%s", os.Getpid(), textsafe.LogValue(path), textsafe.LogValue(err.Error()))
 }
 
 func dedupeUnpooled(us []Unpooled) []Unpooled {

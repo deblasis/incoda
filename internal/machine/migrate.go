@@ -100,9 +100,10 @@ func runMigration(stateDir string, lk *Lock, o Options) (*Registry, error) {
 				}
 				// A re-fence on a migrated layout deletes every stray
 				// lane whose tickets are all dead (spec 2.3); live ones
-				// stay and are counted by acquisitions.
+				// stay and are counted by acquisitions. Cleanup is
+				// best effort: a failure is logged, never fatal.
 				if err := CleanStrays(stateDir, lane.ProbeDeadline(budgetDeadline(o.Start, o.Wait), lane.PollProbeWait)); err != nil {
-					return nil, stateErrorf("cannot clean strays/: %s", esc(err))
+					logCleanupFailed(stateDir, StraysDir(stateDir), err)
 				}
 			}
 			return reg, nil

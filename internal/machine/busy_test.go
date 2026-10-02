@@ -195,3 +195,28 @@ func TestReadOnlyViewsAreBounded(t *testing.T) {
 		}
 	})
 }
+
+// TestStrayCleanupFailureIsLoggedNotFatal: a stray lane that cannot be
+// deleted is housekeeping that failed, not a state error. The scan and
+// CleanStrays still succeed, and machine.log gets one cleanup-failed line.
+func TestStrayCleanupFailureIsLoggedNotFatal(t *testing.T) {
+	state, _ := migrated(t)
+	batch := filepath.Join(StraysDir(state), "1")
+	holdTicket(t, batch, "dead", 4711, "x")()
+	saved := removeIfIdleFn
+	t.Cleanup(func() { removeIfIdleFn = saved })
+	removeIfIdleFn = func(string, time.Time, func(string)) (bool, error) {
+		return false, errors.New("injected \"failure\"")
+	}
+	if _, err := ScanUnpooled(state, true, soon()); err != nil {
+		t.Fatalf("a failed cleanup must not fail the scan: %v", err)
+	}
+	if err := CleanStrays(state, soon()); err != nil {
+		t.Fatalf("a failed cleanup must not fail CleanStrays: %v", err)
+	}
+	b, _ := os.ReadFile(MachineLogPath(state))
+	want := fmt.Sprintf("event=cleanup-failed pid=%d path=%s err=", os.Getpid(), filepath.Join(batch, "dead"))
+	if n := strings.Count(string(b), want); n != 2 || !strings.Contains(string(b), `err="injected \"failure\""`) {
+		t.Fatalf("want two escaped cleanup-failed lines, got:\n%s", b)
+	}
+}
