@@ -17,6 +17,10 @@ type Blocker struct {
 	Key     string
 	PID     int
 	Command string
+	// Orphan marks the job of an older incoda that a kill already ended
+	// (an orphan record, spec 3.2): it is waited for, but there is no
+	// participant left to kill.
+	Orphan bool
 }
 
 // Note is the line the machine.lock holder writes into the lock file, so

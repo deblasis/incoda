@@ -55,8 +55,8 @@ func laneDirsFor(stateDir string, ph phase) ([]string, error) {
 }
 
 // findBlockers probes every ticket the phase covers and returns the live
-// ones, sorted by key then pid. Plan 2b adds orphan records here (a record
-// is live until its recorded tree is empty).
+// ones, plus every orphan record whose tree still runs (deleting the
+// others), sorted by key then pid, one entry per key and pid.
 func findBlockers(stateDir string, ph phase) ([]Blocker, error) {
 	dirs, err := laneDirsFor(stateDir, ph)
 	if err != nil {
@@ -75,6 +75,21 @@ func findBlockers(stateDir string, ph phase) ([]Blocker, error) {
 			}
 			bs = append(bs, Blocker{Key: filepath.Base(d), PID: p.PID(), Command: textsafe.Escape(cmd)})
 		}
+	}
+	orphans, err := LiveOrphans(stateDir, true)
+	if err != nil {
+		return nil, fmt.Errorf("orphans/: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, b := range bs {
+		seen[fmt.Sprintf("%s/%d", b.Key, b.PID)] = true
+	}
+	for _, o := range orphans {
+		if seen[fmt.Sprintf("%s/%d", o.Key, o.PID)] {
+			continue
+		}
+		bs = append(bs, Blocker{Key: o.Key, PID: o.PID, Orphan: true,
+			Command: textsafe.Escape(o.CommandString()) + " (its job is still exiting after a kill: pids " + o.pidList() + ")"})
 	}
 	sort.Slice(bs, func(i, j int) bool {
 		if bs[i].Key != bs[j].Key {
@@ -144,9 +159,15 @@ func blockerLines(bs []Blocker, ph phase) []string {
 	for _, b := range bs {
 		lines = append(lines, fmt.Sprintf("  %s pid %d: %s", b.Key, b.PID, b.Command))
 	}
-	lines = append(lines, "ask the user before stopping another session's job; they can run:")
+	var stops []string
 	for _, b := range bs {
-		lines = append(lines, "  "+killLine(b, ph))
+		if !b.Orphan {
+			stops = append(stops, "  "+killLine(b, ph))
+		}
+	}
+	if len(stops) > 0 {
+		lines = append(lines, "ask the user before stopping another session's job; they can run:")
+		lines = append(lines, stops...)
 	}
 	return append(lines, "do not force-release them: the job keeps running and the upgrade would overlap it.")
 }
