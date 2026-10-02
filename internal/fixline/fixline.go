@@ -89,10 +89,12 @@ func isSmartQuote(r rune) bool {
 // only ASCII space and tab: Windows PowerShell 5.1's native-argument
 // re-quoting is triggered by any character unicode.IsSpace accepts (for
 // example U+00A0 no-break space or U+3000 ideographic space), not only
-// " \t".
+// " \t", plus U+180E (Mongolian vowel separator), which unicode.IsSpace
+// does not classify as whitespace but which older .NET Unicode data (the
+// version Windows PowerShell 5.1 runs against) does.
 func hasSpace(s string) bool {
 	for _, r := range s {
-		if unicode.IsSpace(r) {
+		if unicode.IsSpace(r) || r == '\u180E' {
 			return true
 		}
 	}
@@ -275,16 +277,20 @@ func FieldLines(fs []Field) []string {
 
 // quoteWords renders the no-runnable "flags" and "command" fields so
 // argument boundaries are recoverable from the printed text: each word is
-// escaped for display (textsafe.Escape) and then wrapped in Go double
-// quotes (strconv.Quote), joined by single spaces, for example
-// `"just" "a b"`. "(none)" when there are no words.
+// wrapped in Go double quotes (strconv.Quote), joined by single spaces,
+// for example `"just" "a b"`. strconv.Quote already escapes a backslash,
+// a control character, a bidi format character and invalid UTF-8 on its
+// own, so the word is not also run through textsafe.Escape first: doing
+// both would quote a backslash twice over (`a\b` would print as `a\\\\b`
+// instead of `a\\b`) and make the original value unrecoverable from the
+// printed line. "(none)" when there are no words.
 func quoteWords(words []string) string {
 	if len(words) == 0 {
 		return "(none)"
 	}
 	parts := make([]string, len(words))
 	for i, w := range words {
-		parts[i] = strconv.Quote(textsafe.Escape(w))
+		parts[i] = strconv.Quote(w)
 	}
 	return strings.Join(parts, " ")
 }

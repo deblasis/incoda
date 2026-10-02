@@ -115,10 +115,12 @@ func TestNoRunnableLine(t *testing.T) {
 		{"empty on PowerShell", PowerShell, []string{""}, false},
 		{"space and trailing backslash on PowerShell", PowerShell, []string{`C:\a b\`}, false},
 		{"no-break space and trailing backslash on PowerShell", PowerShell, []string{"C:\\a\u00a0b\\"}, false},
+		{"mongolian vowel separator and trailing backslash on PowerShell", PowerShell, []string{"C:\\a\u180Eb\\"}, false},
 		{"double quote on POSIX", POSIX, []string{`say "hi"`}, true},
 		{"empty on POSIX", POSIX, []string{""}, true},
 		{"space and trailing backslash on POSIX", POSIX, []string{`C:\a b\`}, true},
 		{"no-break space and trailing backslash on POSIX", POSIX, []string{"C:\\a\u00a0b\\"}, true},
+		{"mongolian vowel separator and trailing backslash on POSIX", POSIX, []string{"C:\\a\u180Eb\\"}, true},
 		{"backslash on PowerShell", PowerShell, []string{`a\b`}, true},
 	} {
 		r := base
@@ -143,6 +145,22 @@ func TestNoRunnableLine(t *testing.T) {
 	}
 	if got := RunLines(POSIX, base, `queue "q" requires --reason and this run has none`, "run it"); !strings.HasPrefix(got[0], `no runnable command (queue "q" requires --reason`) {
 		t.Fatalf("a reason the caller knows rules the line out: %q", got)
+	}
+
+	// A command word with a backslash is quoted exactly once (strconv.Quote
+	// alone), so the printed field can be read back to the original value;
+	// textsafe.Escape first would double the backslash a second time and
+	// make it unrecoverable.
+	bs := RunLines(PowerShell, Run{Queue: []string{"q"}, Argv: []string{`C:\a b\`}, Here: "/w"}, "", "run it")
+	wantBS := `  command: "C:\\a b\\"`
+	found := false
+	for _, l := range bs {
+		if l == wantBS {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("command field with a backslash:\n%s\nwant line %s", strings.Join(bs, "\n"), wantBS)
 	}
 }
 
