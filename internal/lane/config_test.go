@@ -497,3 +497,54 @@ func TestEnqueueLogsExclusive(t *testing.T) {
 		t.Fatalf("enqueue line should say exclusive, got %q", got)
 	}
 }
+
+// TestEnrollRefusesClosedReasonlessAndNewer: Enroll checks the lane's rules
+// under the registry lock (spec 2.5, 4.5), so a run that read the config
+// before it changed is still refused, and creates no ticket. A config
+// written by a newer incoda fails closed.
+func TestEnrollRefusesClosedReasonlessAndNewer(t *testing.T) {
+	q, err := Open(t.TempDir(), "rules")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	tickets := func() int {
+		n := 0
+		entries, _ := os.ReadDir(q.Dir)
+		for _, e := range entries {
+			if _, ok := parseTicketName(e.Name()); ok {
+				n++
+			}
+		}
+		return n
+	}
+	if err := q.SaveConfig(Config{Closed: "maintenance"}); err != nil {
+		t.Fatal(err)
+	}
+	var ce *ClosedError
+	if _, err := q.Enroll(Ticket{Reason: "r"}); !errors.As(err, &ce) || err.Error() != `queue "rules" is closed: maintenance` {
+		t.Fatalf("closed: %v", err)
+	}
+	if err := q.SaveConfig(Config{RequireReason: true}); err != nil {
+		t.Fatal(err)
+	}
+	var re *ReasonRequiredError
+	if _, err := q.Enroll(Ticket{Reason: "  "}); !errors.As(err, &re) || !strings.HasPrefix(err.Error(), `queue "rules" requires --reason: `) {
+		t.Fatalf("reason: %v", err)
+	}
+	if n := tickets(); n != 0 {
+		t.Fatalf("a refused enrollment left %d ticket(s)", n)
+	}
+	en, err := q.Enroll(Ticket{Reason: "nightly"})
+	if err != nil {
+		t.Fatalf("with a reason it enrolls: %v", err)
+	}
+	en.Release(0)
+	if err := os.WriteFile(filepath.Join(q.Dir, "config.json"), []byte(`{"schema":9}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var ns *NewerSchemaError
+	if _, err := q.Enroll(Ticket{Reason: "r"}); !errors.As(err, &ns) {
+		t.Fatalf("newer: %v", err)
+	}
+}

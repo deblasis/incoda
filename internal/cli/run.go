@@ -226,9 +226,16 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// way, so it gets the same message and the same usage exit
 			// rather than masquerading as unusable state.
 			var sd *lane.SlotsDisagreement
-			if errors.As(err, &sd) {
+			var ce *lane.ClosedError
+			var re *lane.ReasonRequiredError
+			var ns *lane.NewerSchemaError
+			switch {
+			case errors.As(err, &sd), errors.As(err, &ce), errors.As(err, &re):
 				rc = ExitUsage
 				return usagef("%v", err)
+			case errors.As(err, &ns):
+				rc = ExitState
+				return exitWith(ExitState, "machine-state: %v", err)
 			}
 			if errors.Is(err, lane.ErrRegistryBusy) {
 				rc = ExitTimeout
@@ -299,6 +306,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				return lane.KillRequest{}, false
 			},
 			Unpooled: countUnpooled,
+			// A lane closed while this run waits on it ends the wait
+			// (spec 2.5); the config is re-read without a lock (every
+			// write is a rename). A config written by a newer incoda
+			// fails closed.
+			Check: func() error { return waitingCheck(pt.q.Dir, key) },
 			OnWait: func(pos, effSlots int, live []lane.Entry, waited time.Duration) {
 				if *quiet {
 					return
@@ -451,6 +463,22 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	release()
 	if res.Code != 0 {
 		return &exitCode{code: res.Code}
+	}
+	return nil
+}
+
+// waitingCheck is the per-poll config check of a waiting run: closed while
+// waiting refuses (exit 120), a config written by a newer incoda fails
+// closed (122). A config that cannot be read is left to the admission
+// rule, which falls back to the safe width.
+func waitingCheck(laneDir, key string) error {
+	cfg, err := lane.ReadConfig(laneDir)
+	var ns *lane.NewerSchemaError
+	switch {
+	case errors.As(err, &ns):
+		return &machine.StateError{Msg: "machine-state: " + textsafe.Escape(err.Error())}
+	case err == nil && cfg.Closed != "":
+		return &machine.Refusal{Msg: fmt.Sprintf("closed-while-waiting: %q: %s", key, textsafe.Escape(cfg.Closed))}
 	}
 	return nil
 }

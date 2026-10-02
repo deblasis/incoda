@@ -248,6 +248,57 @@ func TestClosedQueueRefusesRuns(t *testing.T) {
 	}
 }
 
+// TestClosedWhileWaiting: a lane closed while a run waits on it ends that
+// run on its next poll with closed-while-waiting (exit 120) and nothing
+// left behind; the holder already admitted keeps running. A config written
+// by a newer incoda while a run waits fails it closed (122). The tests pool
+// is used directly, so no link is involved.
+func TestClosedWhileWaiting(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	holder, _ := startHolder(t, incoda, stamp, state, "tests", "holder", 4000, "50ms")
+	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
+	waitFor(t, incoda, state, "tests", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	wait := func(t *testing.T) (*exec.Cmd, *syncBuffer) {
+		t.Helper()
+		var out syncBuffer
+		w := exec.Command(incoda, "run", "--queue", "tests", "--wait", "60s", "--poll", "50ms",
+			"--", stamp, filepath.Join(t.TempDir(), "w.txt"), "w", "10")
+		w.Env = laneEnv(state)
+		w.Stdout, w.Stderr = &out, &out
+		if err := w.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, incoda, state, "tests", func(q queueReport) bool { return len(q.Waiting) == 1 })
+		return w, &out
+	}
+	w, out := wait(t)
+	if o, code := runIncoda(t, incoda, state, "config", "tests", "--close", "maintenance"); code != 0 {
+		t.Fatalf("close: %d\n%s", code, o)
+	}
+	if code := exitCodeOf(w.Wait()); code != 120 || !strings.Contains(out.String(), `incoda: closed-while-waiting: "tests": maintenance`) {
+		t.Fatalf("want exit 120 closed-while-waiting, got %d:\n%s", code, out.String())
+	}
+	if n := countTickets(t, state, "tests"); n != 1 {
+		t.Fatalf("only the holder's ticket stays, found %d", n)
+	}
+	if o, code := runIncoda(t, incoda, state, "config", "tests", "--open"); code != 0 {
+		t.Fatalf("open: %d\n%s", code, o)
+	}
+
+	w, out = wait(t)
+	if err := os.WriteFile(filepath.Join(laneDir(state, "tests"), "config.json"), []byte(`{"schema":9,"slots":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := exitCodeOf(w.Wait()); code != 122 || !strings.Contains(out.String(), "incoda: machine-state: ") || !strings.Contains(out.String(), "newer incoda") {
+		t.Fatalf("want exit 122 machine-state, got %d:\n%s", code, out.String())
+	}
+	if err := holder.Wait(); err != nil {
+		t.Fatalf("the admitted holder must finish normally: %v", err)
+	}
+}
+
 func TestRequireReason(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()

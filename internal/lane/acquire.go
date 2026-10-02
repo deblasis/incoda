@@ -24,6 +24,10 @@ type AcquireOptions struct {
 	// it already holds: a kill addressed to one of those must end the wait
 	// on the next one, not sit unread until every key is held.
 	Killed func() (KillRequest, bool)
+	// Check, when set, is called on every poll before the position. An
+	// error ends the wait and is returned as is: a lane closed while this
+	// run waits on it, a config written by a newer incoda (spec 2.5).
+	Check func() error
 	// Unpooled, when set, is called on every poll after the position. It
 	// returns how many of this lane's slots are held by holders that have
 	// no ticket here: unpooled runs of an older incoda counted on a pool
@@ -63,6 +67,11 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 		if opt.Killed != nil {
 			if req, ok := opt.Killed(); ok {
 				return &KilledError{Request: req}
+			}
+		}
+		if opt.Check != nil {
+			if err := opt.Check(); err != nil {
+				return err
 			}
 		}
 		idx, slots, live, err := e.Position()

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/lockfile"
@@ -586,7 +587,22 @@ func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	// --exclusive, which is explicit, visible in status, and still
 	// narrows to 1 on purpose. A missing or broken config leaves an
 	// unset count at 1, the safe direction.
+	//
+	// The rules are checked here, under the registry lock, as well as
+	// before: a lane closed, or made to require a reason, after the
+	// run read its config still refuses it (spec 2.5, 4.5). A config
+	// written by a newer incoda may carry rules this binary does not
+	// know, so it fails closed.
 	cfg, cfgErr := q.LoadConfig()
+	var ns *NewerSchemaError
+	switch {
+	case errors.As(cfgErr, &ns):
+		return nil, cfgErr
+	case cfgErr == nil && cfg.Closed != "":
+		return nil, &ClosedError{Key: q.Key, Text: cfg.Closed}
+	case cfgErr == nil && cfg.RequireReason && strings.TrimSpace(t.Reason) == "":
+		return nil, &ReasonRequiredError{Key: q.Key}
+	}
 	switch {
 	case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
 		return nil, NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)

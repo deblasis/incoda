@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/deblasis/incoda/internal/atomicfile"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 const configName = "config.json"
@@ -171,6 +172,23 @@ func (e *SlotsDisagreement) Error() string {
 	}
 	return fmt.Sprintf("queue %q is configured for %d slot(s); --slots %d is not allowed to disagree. %s",
 		e.Key, e.Configured, e.Asked, advice)
+}
+
+// ClosedError is Enroll's refusal on a closed lane. Enroll checks under the
+// registry lock, so a lane closed between a run's plan and its enrollment
+// still refuses it (spec 2.5).
+type ClosedError struct{ Key, Text string }
+
+func (e *ClosedError) Error() string {
+	return fmt.Sprintf("queue %q is closed: %s", e.Key, textsafe.Escape(e.Text))
+}
+
+// ReasonRequiredError is Enroll's refusal of a ticket with no reason on a
+// lane that requires one (spec 4.5).
+type ReasonRequiredError struct{ Key string }
+
+func (e *ReasonRequiredError) Error() string {
+	return fmt.Sprintf("queue %q requires --reason: say what this job is so status can answer \"whose is that and why\"", e.Key)
 }
 
 // LoadConfig reads the queue's config. A missing file is the zero Config
