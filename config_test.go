@@ -24,6 +24,130 @@ func runIncoda(t *testing.T, incoda, state string, args ...string) (string, int)
 	return string(out), code
 }
 
+// testPool is the pool linkTestKeys links test lanes to, widened so that it
+// never serialises lanes a test did not mean to put behind one cap.
+const testPool = "vm"
+
+// linkTestKeys links each project key to testPool, widened to 64 slots,
+// with the user's own command (config --pool). Since spec 4.1 a project
+// lane refuses runs until it is linked, so every test that runs on a
+// project key links it first; a test about pools picks its pools itself.
+func linkTestKeys(t *testing.T, incoda, state string, keys ...string) {
+	t.Helper()
+	if out, code := runIncoda(t, incoda, state, "config", testPool, "--slots", "64"); code != 0 {
+		t.Fatalf("widen %s: %d\n%s", testPool, code, out)
+	}
+	for _, k := range keys {
+		if out, code := runIncoda(t, incoda, state, "config", k, "--pool", testPool); code != 0 {
+			t.Fatalf("link %s: %d\n%s", k, code, out)
+		}
+	}
+}
+
+// TestConfigLinkFlags walks config's link flags (spec 4.3): a first link,
+// the already-linked no-op, link-exists without --replace, --add-pool,
+// --remove-pool (never the last pool), --unlink, --quiet-machine, the
+// pool-mismatch refusals, and the echo and event=link log of each change.
+func TestConfigLinkFlags(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	cfgOf := func() (pools []string, quiet bool) {
+		b, err := os.ReadFile(filepath.Join(laneDir(state, "cap-gate"), "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c struct {
+			Pools []string `json:"pools"`
+			Quiet bool     `json:"quiet_machine"`
+		}
+		if err := json.Unmarshal(b, &c); err != nil {
+			t.Fatal(err)
+		}
+		return c.Pools, c.Quiet
+	}
+	step := func(wantCode int, want string, args ...string) string {
+		t.Helper()
+		out, code := runIncoda(t, incoda, state, append([]string{"config", "cap-gate"}, args...)...)
+		if code != wantCode || !strings.Contains(out, want) {
+			t.Fatalf("config cap-gate %s: want exit %d and %q, got %d:\n%s", strings.Join(args, " "), wantCode, want, code, out)
+		}
+		return out
+	}
+	out := step(0, "link: (none) -> tests\n", "--pool", "tests")
+	if !strings.Contains(out, "  kind: project\n  pools: tests\n  quiet machine: no\n") {
+		t.Fatalf("config shows the link:\n%s", out)
+	}
+	step(0, "incoda: already linked: cap-gate -> tests\n", "--pool", "tests")
+	step(120, `incoda: link-exists: "cap-gate" is linked to tests; changing a link is the user's call: ask them`, "--pool", "builds")
+	step(0, "link: tests -> builds\n", "--pool", "builds", "--replace")
+	step(0, "link: builds -> builds,tests\n", "--add-pool", "tests")
+	step(0, "incoda: already linked: cap-gate -> builds,tests\n", "--add-pool", "tests,builds")
+	step(0, "link: builds,tests -> tests\n", "--remove-pool", "builds")
+	step(120, `incoda: --remove-pool would leave "cap-gate" linked to no pool; use --unlink to remove the link`, "--remove-pool", "tests")
+	step(120, `incoda: pool-mismatch: "nosuch" is not a pool on this machine (pools: builds, computer-use, tests, vm)`, "--add-pool", "nosuch")
+	step(0, "  quiet machine: yes\n", "--quiet-machine")
+	if pools, quiet := cfgOf(); strings.Join(pools, ",") != "tests" || !quiet {
+		t.Fatalf("stored: %v %v", pools, quiet)
+	}
+	step(0, "  quiet machine: no\n", "--quiet-machine=false")
+	step(0, "link: tests -> (none)\n", "--unlink")
+	step(0, "incoda: already unlinked: cap-gate\n", "--unlink")
+	step(0, "  pools: (none: unlinked, runs are refused until it is linked)\n")
+	step(120, "--pool sets the whole link", "--pool", "tests", "--unlink")
+	step(120, "--replace goes with --pool", "--replace")
+	out, code := runIncoda(t, incoda, state, "config", "builds", "--pool", "tests")
+	if code != 120 || !strings.Contains(out, `incoda: pool-mismatch: "builds" is a pool; a pool never links other pools and carries no quiet_machine`) {
+		t.Fatalf("a pool never links: %d\n%s", code, out)
+	}
+	out, code = runIncoda(t, incoda, state, "config", "builds")
+	if code != 0 || !strings.Contains(out, "  kind: pool\n") || strings.Contains(out, "pools:") {
+		t.Fatalf("a pool shows its kind and no link: %d\n%s", code, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(laneDir(state, "cap-gate"), "lane.log"))
+	for _, want := range []string{" by=config old= new=tests", " by=config old=tests new=builds", " by=config old=builds new=builds,tests",
+		" by=config old=builds,tests new=tests", " by=config old=tests new=\n"} {
+		if !strings.Contains(string(b)+"\n", want) {
+			t.Fatalf("lane.log lacks %q:\n%s", want, b)
+		}
+	}
+	if n := strings.Count(string(b), " event=link "); n != 5 {
+		t.Fatalf("%d event=link lines, want one per change (5):\n%s", n, b)
+	}
+}
+
+// TestConcurrentConfigFirstLinksNeverEscalate: agents running the same
+// printed first link at once all succeed; exactly one writes it.
+func TestConcurrentConfigFirstLinksNeverEscalate(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "seed"); code != 0 {
+		t.Fatalf("migrate: %d\n%s", code, out)
+	}
+	var wg sync.WaitGroup
+	outs := make([]string, 4)
+	codes := make([]int, 4)
+	for i := range outs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			outs[i], codes[i] = runIncoda(t, incoda, state, "config", "kf-gate", "--pool", "tests")
+		}(i)
+	}
+	wg.Wait()
+	linked := 0
+	for i := range outs {
+		if codes[i] != 0 {
+			t.Fatalf("writer %d: exit %d\n%s", i, codes[i], outs[i])
+		}
+		if strings.Contains(outs[i], "link: (none) -> tests") {
+			linked++
+		}
+	}
+	if linked != 1 {
+		t.Fatalf("%d writers echoed the link, want 1:\n%s", linked, strings.Join(outs, "\n---\n"))
+	}
+}
+
 // TestQueueConfigSuppliesSlots: callers should not have to agree on --slots
 // by hand. The queue's own config is the default, and three runs that never
 // mention slots overlap exactly as the config allows.
@@ -219,18 +343,30 @@ func TestExclusiveRunWaitsForAnEmptyQueue(t *testing.T) {
 	_ = strconv.Itoa
 }
 
-// TestConfigRefusesControlCharacters: a description is shown in status and
-// in refusals, so it must not carry anything that repaints a terminal.
+// TestConfigRefusesControlCharacters: descriptions and closed texts are
+// shown in status and in refusals, so a write path must refuse anything
+// that repaints a terminal or reorders text, and anything over 200
+// characters, before it writes (spec 4.6). One row per write path.
 func TestConfigRefusesControlCharacters(t *testing.T) {
 	incoda, _ := binaries(t)
 	state := t.TempDir()
-	out, code := runIncoda(t, incoda, state, "config", "badtext", "--description", "red\x1b[31m")
-	if code != 120 || !strings.Contains(out, "incoda: bad-text: description contains control characters") {
-		t.Fatalf("want exit 120 and a bad-text refusal, got %d:\n%s", code, out)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"config", "badtext", "--description", "red\x1b[31m"}, "incoda: bad-text: description contains control characters"},
+		{[]string{"config", "badtext", "--description", "a\u202eb"}, "incoda: bad-text: description contains control characters"},
+		{[]string{"config", "badtext", "--close", "two\nlines"}, "incoda: bad-text: closed contains control characters"},
+		{[]string{"config", "badtext", "--close", "tab\there"}, "incoda: bad-text: closed contains control characters"},
+		{[]string{"config", "badtext", "--description", strings.Repeat("x", 201)}, "incoda: bad-text: description is longer than 200 characters"},
+	} {
+		out, code := runIncoda(t, incoda, state, c.args...)
+		if code != 120 || !strings.Contains(out, c.want) {
+			t.Errorf("%q: want exit 120 and %q, got %d:\n%s", c.args, c.want, code, out)
+		}
 	}
-	out, code = runIncoda(t, incoda, state, "config", "badtext", "--close", "two\nlines")
-	if code != 120 || !strings.Contains(out, "bad-text: closed contains control characters") {
-		t.Fatalf("want exit 120 for --close, got %d:\n%s", code, out)
+	if _, err := os.Stat(laneDir(state, "badtext")); !os.IsNotExist(err) {
+		t.Fatal("a refused write must leave nothing behind")
 	}
 }
 

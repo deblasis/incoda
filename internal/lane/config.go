@@ -200,6 +200,12 @@ func ReadConfig(dir string) (Config, error) {
 	return c, nil
 }
 
+// ErrNoChange, returned by an UpdateConfig callback, means "nothing to
+// write": UpdateConfig stores nothing and returns the config it read with
+// ErrNoChange, so a compare-and-set that finds the value already in place
+// rewrites nothing.
+var ErrNoChange = errors.New("no change")
+
 // UpdateConfig loads the config, applies fn and stores the result, all
 // inside one hold of the registry lock, so two writers changing different
 // fields cannot lose each other's change. The write goes through a temp
@@ -214,6 +220,9 @@ func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 			return err
 		}
 		if err := fn(&c); err != nil {
+			if errors.Is(err, ErrNoChange) {
+				out = c
+			}
 			return err
 		}
 		c.Schema = ConfigSchema
