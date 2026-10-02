@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -40,10 +39,11 @@ var (
 
 // Seams for tests; production never changes them.
 var (
-	exchangeFn             = exchange
-	beforePlace            = func() {}
-	renameDir              = os.Rename
-	notIdleOnRenameFailure = runtime.GOOS == "windows"
+	exchangeFn  = exchange
+	beforePlace = func() {}
+	renameDir   = os.Rename
+	// isNotIdle classifies a refused directory rename (notIdleError).
+	isNotIdle = notIdleError
 )
 
 // FencePlaced reports whether the fence is in place: <state>/queues is a
@@ -73,18 +73,20 @@ func writeFenceNew(stateDir string) error {
 // regular file (an old binary's MkdirAll can recreate queues/ at any moment)
 // is moved to strays/<unix-nanos> first. The decision is made by lstat,
 // never by the rename's errno (APFS answers EEXIST where Linux answers
-// EISDIR). It gives up after maxPlaceTries. It returns the strays it made.
+// EISDIR). It gives up after maxPlaceTries, naming the last rename error.
+// It returns the strays it made.
 func placeFence(stateDir string) ([]string, error) {
 	if err := writeFenceNew(stateDir); err != nil {
 		return nil, err
 	}
 	q := lane.QueuesDir(stateDir)
 	var moved []string
+	var last error
 	for i := 0; i < maxPlaceTries; i++ {
 		if fi, err := os.Lstat(q); err == nil && !fi.Mode().IsRegular() {
 			dst, err := moveToStrays(stateDir, q)
 			if err != nil {
-				if notIdleOnRenameFailure {
+				if isNotIdle(err) {
 					return moved, errNotIdle
 				}
 				return moved, stateErrorf("cannot move %s to strays/: %s", textsafe.Escape(q), textsafe.Escape(err.Error()))
@@ -92,11 +94,11 @@ func placeFence(stateDir string) ([]string, error) {
 			moved = append(moved, dst)
 		}
 		beforePlace()
-		if err := os.Rename(fenceNewPath(stateDir), q); err == nil {
+		if last = os.Rename(fenceNewPath(stateDir), q); last == nil {
 			return moved, nil
 		}
 	}
-	return moved, stateErrorf("cannot place the queues fence")
+	return moved, stateErrorf("cannot place the queues fence: %s", textsafe.Escape(last.Error()))
 }
 
 // moveToStrays renames path to strays/<unix-nanos>, picking the next free

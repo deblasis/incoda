@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -392,9 +391,9 @@ func TestM4NotIdleGoesBackToM2(t *testing.T) {
 		}
 		return os.Rename(from, to)
 	}
-	notIdleOnRenameFailure = true
+	isNotIdle = func(error) bool { return true }
 	defer func() {
-		exchangeFn, renameDir, notIdleOnRenameFailure = exchange, os.Rename, runtime.GOOS == "windows"
+		exchangeFn, renameDir, isNotIdle = exchange, os.Rename, notIdleError
 	}()
 	if _, _, err := ensure(t, state); err != nil {
 		t.Fatal(err)

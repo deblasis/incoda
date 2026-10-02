@@ -13,6 +13,9 @@ import (
 
 func esc(err error) string { return textsafe.Escape(err.Error()) }
 
+// Seam for tests; production never changes it.
+var beforeBootstrapWrite = func(key string) {}
+
 // mergeStrays is M6. Every ticket under strays/ is dead by now (M5 waited
 // for the live ones). A strays/<n>/<K> whose lanes/<K> does not exist is
 // renamed into lanes/; the rest hold only dead tickets and a log fragment,
@@ -100,6 +103,7 @@ func applyBootstrap(stateDir string) error {
 			q.Close()
 			continue
 		}
+		beforeBootstrapWrite(key)
 		_, err = q.UpdateConfig(func(c *lane.Config) error {
 			if c.Slots < 1 {
 				c.Slots = 1
@@ -108,6 +112,12 @@ func applyBootstrap(stateDir string) error {
 		})
 		q.Close()
 		if err != nil {
+			if _, rerr := lane.ReadConfig(q.Dir); rerr != nil {
+				// The config turned unreadable between the check above
+				// and the write (a human editing it): leave it in place,
+				// as M7 leaves every malformed config.
+				continue
+			}
 			return stateErrorf("cannot write the config of pool %q: %s", key, esc(err))
 		}
 	}

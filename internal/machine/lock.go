@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/procinfo"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 const (
@@ -83,7 +85,7 @@ func AcquireLock(stateDir string, o LockOptions) (*Lock, error) {
 	}
 	f, err := lockfile.Open(LockPath(stateDir))
 	if err != nil {
-		return nil, stateErrorf("cannot open %s: %v", LockPath(stateDir), err)
+		return nil, stateErrorf("cannot open %s: %s", textsafe.Escape(LockPath(stateDir)), esc(err))
 	}
 	deadline := lockDeadline(o.Start, o.Wait, time.Now())
 	var printedAt time.Time
@@ -91,13 +93,13 @@ func AcquireLock(stateDir string, o LockOptions) (*Lock, error) {
 		ok, err := f.TryLock()
 		if err != nil {
 			f.Close()
-			return nil, stateErrorf("machine.lock: %v", err)
+			return nil, stateErrorf("machine.lock: %s", esc(err))
 		}
 		if ok {
 			l := &Lock{f: f, op: o.Op, since: time.Now()}
 			if err := l.SetBlockers(nil); err != nil {
 				l.Release()
-				return nil, stateErrorf("cannot write the machine.lock note: %v", err)
+				return nil, stateErrorf("cannot write the machine.lock note: %s", esc(err))
 			}
 			return l, nil
 		}
@@ -144,6 +146,9 @@ func lockTimeout(n Note, ok bool) *Timeout {
 // SetBlockers rewrites the note (Truncate) with this holder's pid, op and
 // start time, plus the older runs it waits for.
 func (l *Lock) SetBlockers(bs []Blocker) error {
+	if l == nil || l.f == nil {
+		return errors.New("machine.lock is not held")
+	}
 	return l.f.Truncate([]byte(Note{PID: os.Getpid(), Op: l.op, Since: l.since, Blockers: bs}.String()))
 }
 

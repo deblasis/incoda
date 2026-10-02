@@ -115,8 +115,11 @@ func TestPlaceFenceGivesUpAfterAHundredTries(t *testing.T) {
 	defer func() { beforePlace = func() {} }()
 	_, err := placeFence(state)
 	var se *StateError
-	if !errors.As(err, &se) || se.Msg != "machine-state: cannot place the queues fence" {
-		t.Fatalf("want the placement refusal, got %v", err)
+	// The refusal names the last rename error, so a human can tell a race
+	// from a permission problem.
+	if !errors.As(err, &se) || !strings.HasPrefix(se.Msg, "machine-state: cannot place the queues fence: rename ") ||
+		!strings.Contains(se.Msg, "queues.new") {
+		t.Fatalf("want the placement refusal with the last rename error, got %v", err)
 	}
 	// The first try finds nothing to move; every later one moves the
 	// directory the previous try's hook recreated.
@@ -135,8 +138,8 @@ func TestPlaceFenceNotIdleWhereADirectoryCannotMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	renameDir = func(string, string) error { return errors.New("sharing violation") }
-	notIdleOnRenameFailure = true
-	defer func() { renameDir = os.Rename; notIdleOnRenameFailure = runtime.GOOS == "windows" }()
+	isNotIdle = func(error) bool { return true }
+	defer func() { renameDir = os.Rename; isNotIdle = notIdleError }()
 	if _, err := placeFence(state); !errors.Is(err, errNotIdle) {
 		t.Fatalf("want errNotIdle, got %v", err)
 	}
