@@ -2,6 +2,7 @@ package runplan
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,5 +382,78 @@ incoda: changing the link is the user's call; ask them.
 		if got := "incoda: " + rf.Msg + "\n"; got != c.want {
 			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
 		}
+	}
+}
+
+// TestChanged: the replan triggers of spec 2.5 and nothing else.
+func TestChanged(t *testing.T) {
+	state, reg := machineDir(t, map[string]string{
+		"p-gate": `{"schema":2,"pools":["builds","tests"]}`,
+	})
+	plan := func(pool ...string) *Plan {
+		t.Helper()
+		p, err := Make(state, reg, Request{Named: []string{"p-gate"}, Pool: pool})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	setReg := func(gen int, pools string) {
+		body := fmt.Sprintf(`{"schema":1,"layout":2,"generation":%d,"pools":[%s]}`, gen, pools)
+		if err := os.WriteFile(machine.RegistryPath(state), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setLink := func(body string) {
+		if err := os.WriteFile(filepath.Join(lane.LaneDir(state, "p-gate"), "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changed := func(p *Plan) string {
+		t.Helper()
+		why, err := p.Changed(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return why
+	}
+	p, sub := plan(), plan("tests")
+	if why := changed(p); why != "" {
+		t.Fatalf("nothing changed: %q", why)
+	}
+	setReg(4, `"builds","computer-use","tests","vm","printer"`)
+	if why := changed(p); why != "" {
+		t.Fatalf("a new generation that leaves the plan's kinds alone is no trigger: %q", why)
+	}
+	setReg(5, `"builds","computer-use","tests","p-gate"`)
+	if why := changed(p); why != `queue "p-gate" became a pool` {
+		t.Fatalf("kind change: %q", why)
+	}
+	setReg(6, `"computer-use","tests","vm"`)
+	if why := changed(p); why != `pool "builds" left the registry` {
+		t.Fatalf("pool removed: %q", why)
+	}
+	setReg(3, `"builds","computer-use","tests","vm"`)
+	setLink(`{"schema":2,"pools":["tests","vm"]}`)
+	if why := changed(p); why != `the link of "p-gate" changed: builds,tests -> tests,vm` {
+		t.Fatalf("link change: %q", why)
+	}
+	if why := changed(sub); why != "" {
+		t.Fatalf("a link change that keeps the --pool subset is no trigger: %q", why)
+	}
+	setLink(`{"schema":2,"pools":["vm"]}`)
+	if why := changed(sub); why != `the link of "p-gate" changed: builds,tests -> vm` {
+		t.Fatalf("a link change beyond the --pool subset: %q", why)
+	}
+	setLink(`{"schema":2,"pools":["builds","tests"]}`)
+	if err := os.MkdirAll(lane.LaneDir(state, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lane.LaneDir(state, "tests"), "config.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var se *machine.StateError
+	if _, err := p.Changed(state); !errors.As(err, &se) || !strings.HasPrefix(se.Msg, `machine-state: queue "p-gate" links "tests": `) {
+		t.Fatalf("a linked pool that stops resolving fails closed: %v", err)
 	}
 }

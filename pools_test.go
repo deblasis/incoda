@@ -239,3 +239,39 @@ func TestPrintedUnlinkedLineRunsAsPrinted(t *testing.T) {
 		t.Fatalf("the command ran with its exact arguments: %+v %v", iv, ok)
 	}
 }
+
+// TestRelinkWhileWaitingReplans: a run waiting on its pool whose link the
+// user changes meanwhile notices at its next verify point (after it gets
+// the old pool), releases everything, says replan:, and runs under the
+// new link (spec 2.5).
+func TestRelinkWhileWaitingReplans(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	mustRun(t, incoda, state, 0, "config", "kf-gate", "--pool", "tests")
+	mustRun(t, incoda, state, 0, "config", "p-gate", "--pool", "tests")
+	h := exec.Command(incoda, "run", "--queue", "kf-gate", "--poll", "50ms", "--quiet", "--", stamp, filepath.Join(t.TempDir(), "h.txt"), "h", "2000")
+	h.Env = laneEnv(state)
+	if err := h.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Process.Kill(); _ = h.Wait() }()
+	waitFor(t, incoda, state, "tests", func(q queueReport) bool { return len(q.Holders) == 1 })
+	var out syncBuffer
+	w := exec.Command(incoda, "run", "--queue", "p-gate", "--wait", "60s", "--poll", "50ms", "--", stamp, filepath.Join(t.TempDir(), "w.txt"), "w", "10")
+	w.Env = laneEnv(state)
+	w.Stdout, w.Stderr = &out, &out
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, incoda, state, "tests", func(q queueReport) bool { return len(q.Waiting) == 1 })
+	mustRun(t, incoda, state, 0, "config", "p-gate", "--pool", "builds", "--replace")
+	if err := w.Wait(); err != nil {
+		t.Fatalf("waiter: %v\n%s", err, out.String())
+	}
+	inOrder(t, out.String(), `acquired queue "tests" (pool, via p-gate; pid `,
+		`incoda: replan: the link of "p-gate" changed: tests -> builds`, `acquired queue "builds" (pool, via p-gate; pid `)
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "p-gate"), "lane.log"))
+	if !strings.Contains(string(log), "event=replan pid=") {
+		t.Fatalf("lane.log:\n%s", log)
+	}
+}

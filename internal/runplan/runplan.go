@@ -307,3 +307,63 @@ func closedRefusal(l Lane) *machine.Refusal {
 func reasonRefusal(l Lane) *machine.Refusal {
 	return &machine.Refusal{Msg: fmt.Sprintf("queue %q requires --reason%s: say what this job is so status can answer \"whose is that and why\"", l.Key, withRole(l))}
 }
+
+// Changed is a verify point of spec 2.5: after each enroll, before waiting
+// on that lane, and once more after the last lane is acquired. It re-reads
+// machine.json and the named project keys' configs and says what changed
+// that makes the plan wrong, or "" when nothing does:
+//
+//  1. generation moved and a lane of the plan changed kind or left the
+//     registry;
+//  2. a named project key's link changed, unless the run's --pool subset
+//     is still part of it (configs are re-read whatever the generation
+//     says, since links live in config.json).
+//
+// Every pool the plan reaches through a link must still resolve; one that
+// does not fails closed with machine-state, as at plan time.
+func (p *Plan) Changed(stateDir string) (string, error) {
+	reg, err := machine.ReadRegistry(stateDir)
+	if errors.Is(err, machine.ErrNoRegistry) {
+		return "", &machine.StateError{Msg: "machine-state: machine.json: it disappeared while this run was planning; run incoda doctor"}
+	}
+	if err != nil {
+		return "", err
+	}
+	if reg.Generation != p.Generation {
+		for _, l := range p.Lanes {
+			switch now := reg.IsPool(l.Key); {
+			case l.Pool && !now:
+				return fmt.Sprintf("pool %q left the registry", l.Key), nil
+			case !l.Pool && now:
+				return fmt.Sprintf("queue %q became a pool", l.Key), nil
+			}
+		}
+	}
+	keys := make([]string, 0, len(p.Links))
+	for k := range p.Links {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		cfg, err := readConfig(stateDir, k)
+		if err != nil {
+			return "", err
+		}
+		was, now := p.Links[k], machine.SortedSet(cfg.Pools)
+		if machine.SameSet(was, now) {
+			continue
+		}
+		if p.Pool != nil && len(was) > 0 && len(now) > 0 && machine.Subset(p.Pool, now) {
+			continue
+		}
+		return fmt.Sprintf("the link of %q changed: %s -> %s", k, machine.SetText(was), machine.SetText(now)), nil
+	}
+	for _, l := range p.Lanes {
+		if l.Pool && len(l.Via) > 0 {
+			if _, err := resolvePool(stateDir, reg, l.Via[0], l.Key); err != nil {
+				return "", err
+			}
+		}
+	}
+	return "", nil
+}

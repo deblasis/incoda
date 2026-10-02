@@ -103,68 +103,6 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	if pool.set {
 		req.Pool = pool.keys
 	}
-	plan, err := planWithFirstLinks(dir, reg, req, machine.Options{
-		Start: start, Wait: wait.d, Poll: *poll, Chain: chain, Stderr: stderr,
-	}, *quiet, stderr, p)
-	if err != nil {
-		return machineExit(err)
-	}
-	var parts, toTake []*lanePart
-	defer func() {
-		for _, pt := range parts {
-			pt.q.Close()
-		}
-	}()
-	for _, l := range plan.Lanes {
-		if pass[l.Key] {
-			if !*quiet {
-				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-					p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", l.Key)))
-			}
-			lane.AppendLog(lane.LaneDir(dir, l.Key), "queue=%s event=reenter pid=%d cmd=%s", l.Key, os.Getpid(), textsafe.LogValue(lane.Ticket{Command: argv}.CommandString()))
-			continue
-		}
-		q, err := lane.Open(dir, l.Key)
-		if err != nil {
-			return exitWith(ExitState, "%v", err)
-		}
-		// Every registry lock wait of this run stays inside its --wait
-		// budget: a stopped incoda keeping a registry lock costs this run
-		// its budget, never more.
-		q.SetBudget(start, wait.d)
-		pt := &lanePart{l: l, key: l.Key, q: q}
-		parts = append(parts, pt)
-		toTake = append(toTake, pt)
-	}
-	// The total order that makes multi-lane runs deadlock-free stops at a
-	// nested run: a parent holding "b" whose recipe now takes "a" is
-	// acquiring out of order, and two such parents can each wait on the
-	// other's lane until --wait expires. It cannot be prevented from here
-	// (the parent's lane is already held), so it is said out loud.
-	for _, pt := range toTake {
-		for h := range live {
-			if runplan.Less(pt.l, runplan.Lane{Key: h, Pool: reg.IsPool(h)}) && !*quiet {
-				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-					p.Yellow(fmt.Sprintf("warning: taking %q while a parent incoda holds %q acquires out of sorted order; two nested runs shaped like this can wait on each other until --wait expires", pt.key, h)))
-			}
-		}
-	}
-	if len(toTake) == 0 {
-		// Every key is the parent's. Nothing to enroll, nothing to watch:
-		// a kill addressed to the parent takes this process with it.
-		res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
-			Env:      childEnv(startEnv, held.Format(inherited.L)),
-			OwnGroup: len(inherited.L) == 0,
-		})
-		if runErr != nil {
-			return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
-		}
-		if res.Code != 0 {
-			return &exitCode{code: res.Code}
-		}
-		return nil
-	}
-
 	host, _ := os.Hostname()
 	cwd := here
 
@@ -174,6 +112,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// caller does not wait a poll interval for nothing.
 	rc := ExitOK
 	var stats lane.Stats
+	var toTake []*lanePart
+	// Deferred first, so it runs last: the queues close after release.
+	defer func() {
+		for _, pt := range toTake {
+			pt.q.Close()
+		}
+	}()
 	released := false
 	release := func() {
 		if released {
@@ -200,7 +145,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// then waiting would let a waiting ticket block later arrivals. The
 	// budget started with the command, so machine.lock and migration waits
 	// above have already spent part of it.
-	for _, pt := range toTake {
+	//
+	// takeLane enrolls on one lane, verifies the plan (spec 2.5), and waits
+	// for the lane. It returns what changed when the plan must be made
+	// again.
+	takeLane := func(plan *runplan.Plan, pt *lanePart) (string, error) {
 		// Enroll's wait for the registry lock ends on an interrupt too, and
 		// says once why it waits when another process keeps that lock (a
 		// stopped incoda), so the wait is never silent.
@@ -237,7 +186,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				rc = ExitInterrupt
-				return exitWith(ExitInterrupt, "interrupted while queueing on %q", pt.key)
+				return "", exitWith(ExitInterrupt, "interrupted while queueing on %q", pt.key)
 			}
 			// The queue's config can change between the pre-check above and
 			// this enrollment; the refusal is the same caller mistake either
@@ -250,19 +199,28 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			switch {
 			case errors.As(err, &sd), errors.As(err, &ce), errors.As(err, &re):
 				rc = ExitUsage
-				return usagef("%v", err)
+				return "", usagef("%v", err)
 			case errors.As(err, &ns):
 				rc = ExitState
-				return exitWith(ExitState, "machine-state: %v", err)
+				return "", exitWith(ExitState, "machine-state: %v", err)
 			}
 			if errors.Is(err, lane.ErrRegistryBusy) {
 				rc = ExitTimeout
-				return exitWith(ExitTimeout, "cannot enter queue %q within --wait: %v. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead", pt.key, err, pt.key)
+				return "", exitWith(ExitTimeout, "cannot enter queue %q within --wait: %v. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead", pt.key, err, pt.key)
 			}
 			rc = ExitState
-			return exitWith(ExitState, "cannot enter queue %q: %v", pt.key, err)
+			return "", exitWith(ExitState, "cannot enter queue %q: %v", pt.key, err)
 		}
 		pt.en = en
+
+		// A verify point: after each enroll, before waiting on the lane.
+		atVerify(dir, pt.key)
+		if why, err := plan.Changed(dir); err != nil {
+			rc = ExitState
+			return "", machineExit(err)
+		} else if why != "" {
+			return why, nil
+		}
 
 		// One --wait budget covers the whole list: a caller asked to wait
 		// thirty minutes for the job, not thirty per key.
@@ -375,13 +333,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if acqErr != nil {
 			if errors.Is(acqErr, context.Canceled) {
 				rc = ExitInterrupt
-				return exitWith(ExitInterrupt, "interrupted while queueing on %q", key)
+				return "", exitWith(ExitInterrupt, "interrupted while queueing on %q", key)
 			}
 			var killed *lane.KilledError
 			if errors.As(acqErr, &killed) {
 				rc = ExitKilled
 				logKill(toTake, killed.Request)
-				return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
+				return "", exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
 					key, textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
 			}
 			var rf *machine.Refusal
@@ -391,7 +349,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				if se != nil {
 					rc = ExitState
 				}
-				return machineExit(acqErr)
+				return "", machineExit(acqErr)
 			}
 			if errors.Is(acqErr, lane.ErrTimeout) {
 				rc = ExitTimeout
@@ -400,12 +358,12 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				if role != "" {
 					named += " (" + role + ")"
 				}
-				return exitWith(ExitTimeout,
+				return "", exitWith(ExitTimeout,
 					"%s still busy after %s. Check `incoda status --queue %s`. Do NOT bypass the lane; surface the wait and coordinate instead",
 					named, wait.d, pt.l.StatusKey())
 			}
 			rc = ExitState
-			return exitWith(ExitState, "%v", acqErr)
+			return "", exitWith(ExitState, "%v", acqErr)
 		}
 
 		if _, _, live, err := en.Position(); err == nil && lane.SlotsDisagree(live) {
@@ -426,6 +384,112 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				what = fmt.Sprintf("acquired queue %q (%s; pid %d)", key, role, os.Getpid())
 			}
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Green(what))
+		}
+		return "", nil
+	}
+
+	for {
+		plan, err := planWithFirstLinks(dir, reg, req, machine.Options{
+			Start: start, Wait: wait.d, Poll: *poll, Chain: chain, Stderr: stderr,
+		}, *quiet, stderr, p)
+		if err != nil {
+			return machineExit(err)
+		}
+		for _, l := range plan.Lanes {
+			if pass[l.Key] {
+				if !*quiet {
+					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+						p.Dim(fmt.Sprintf("queue %q is already held by a parent incoda; running inside its lane", l.Key)))
+				}
+				lane.AppendLog(lane.LaneDir(dir, l.Key), "queue=%s event=reenter pid=%d cmd=%s", l.Key, os.Getpid(), textsafe.LogValue(lane.Ticket{Command: argv}.CommandString()))
+				continue
+			}
+			q, err := lane.Open(dir, l.Key)
+			if err != nil {
+				return exitWith(ExitState, "%v", err)
+			}
+			// Every registry lock wait of this run stays inside its --wait
+			// budget: a stopped incoda keeping a registry lock costs this
+			// run its budget, never more.
+			q.SetBudget(start, wait.d)
+			toTake = append(toTake, &lanePart{l: l, key: l.Key, q: q})
+		}
+		// The total order that makes multi-lane runs deadlock-free stops
+		// at a nested run: a parent holding "b" whose recipe now takes "a"
+		// is acquiring out of order, and two such parents can each wait on
+		// the other's lane until --wait expires. It cannot be prevented
+		// from here (the parent's lane is already held), so it is said out
+		// loud.
+		for _, pt := range toTake {
+			for h := range live {
+				if runplan.Less(pt.l, runplan.Lane{Key: h, Pool: reg.IsPool(h)}) && !*quiet {
+					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+						p.Yellow(fmt.Sprintf("warning: taking %q while a parent incoda holds %q acquires out of sorted order; two nested runs shaped like this can wait on each other until --wait expires", pt.key, h)))
+				}
+			}
+		}
+		if len(toTake) == 0 {
+			// Every lane is the parent's. Nothing to enroll, nothing to
+			// watch: a kill addressed to the parent takes this process with
+			// it.
+			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
+				Env:      childEnv(startEnv, held.Format(inherited.L)),
+				OwnGroup: len(inherited.L) == 0,
+			})
+			if runErr != nil {
+				return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
+			}
+			if res.Code != 0 {
+				return &exitCode{code: res.Code}
+			}
+			return nil
+		}
+
+		why := ""
+		for _, pt := range toTake {
+			if why, err = takeLane(plan, pt); err != nil {
+				return err
+			}
+			if why != "" {
+				break
+			}
+		}
+		if why == "" {
+			// The final verify, after the last lane is acquired and before
+			// the child starts. Later link or registry changes do not
+			// affect the running job (spec 2.5).
+			atVerify(dir, "")
+			if why, err = plan.Changed(dir); err != nil {
+				rc = ExitState
+				return machineExit(err)
+			}
+		}
+		if why == "" {
+			break
+		}
+		// A replan releases every ticket this run holds, says what
+		// changed, and plans again from scratch inside the same --wait
+		// budget. The run loses its FIFO places (spec 2.5).
+		for i := len(toTake) - 1; i >= 0; i-- {
+			pt := toTake[i]
+			if pt.en != nil {
+				pt.q.Logf("queue=%s event=replan pid=%d why=%s", pt.key, os.Getpid(), textsafe.LogValue(why))
+				pt.en.Release(ExitOK)
+			}
+			pt.q.Close()
+		}
+		toTake = nil
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow("replan: "+why))
+		// Replans share the one budget: a link or registry that changes at
+		// every verify point cannot keep this run replanning for ever.
+		if wait.d >= 0 && time.Since(start) >= wait.d {
+			rc = ExitTimeout
+			return exitWith(ExitTimeout,
+				"the plan changed and the --wait budget of %s is spent. Check `incoda status`. Do NOT bypass the lane; surface the wait and coordinate instead",
+				wait.d)
+		}
+		if reg, err = machine.ReadRegistry(dir); err != nil {
+			return machineExit(err)
 		}
 	}
 
@@ -543,8 +607,13 @@ func planWithFirstLinks(dir string, reg *machine.Registry, req runplan.Request, 
 	}
 }
 
-// beforeFirstLink is a seam for tests; production never changes it.
-var beforeFirstLink = func(dir, key string) {}
+// Seams for tests; production never changes them. atVerify runs before
+// each verify point with the lane just enrolled, or "" before the final
+// verify.
+var (
+	beforeFirstLink = func(dir, key string) {}
+	atVerify        = func(dir, key string) {}
+)
 
 // carriedFlags is every flag the caller gave except --queue and --pool, in
 // flag-name order, as a printed fix line repeats them (spec 2.6); --wait
