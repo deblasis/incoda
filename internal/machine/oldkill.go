@@ -81,6 +81,22 @@ func noLongerHolds(pid int, key string) *Refusal {
 	return &Refusal{Msg: fmt.Sprintf("kill: pid %d no longer holds %q", pid, key)}
 }
 
+func chainRefusal(reason string) *Refusal {
+	return &Refusal{Msg: fmt.Sprintf("kill: cannot verify this process's ancestors (%s); run kill from a plain terminal outside the job", reason)}
+}
+
+func stopRefusal(pid int, err error) *Refusal {
+	return &Refusal{Msg: fmt.Sprintf("kill: cannot stop pid %d (%s); stop its job by hand, then rerun", pid, textsafe.Escape(err.Error()))}
+}
+
+func recheckFailed(pid int, err error) *StateError {
+	return &StateError{Msg: fmt.Sprintf("kill: cannot re-check the ticket of older incoda pid %d (%s); nothing was killed", pid, textsafe.Escape(err.Error()))}
+}
+
+func keptChanging(pid int) *StateError {
+	return &StateError{Msg: fmt.Sprintf("kill: the job of older incoda pid %d kept changing; nothing was killed; rerun", pid)}
+}
+
 func listingRefusal(pid int, err error) *Refusal {
 	return &Refusal{Msg: fmt.Sprintf("kill: cannot list the job of older incoda pid %d (%s); stop its job by hand, then rerun", pid, textsafe.Escape(err.Error()))}
 }

@@ -28,12 +28,33 @@ type fakeProcs struct {
 	later   []procinfo.Proc // added on the second listing
 	lists   int
 	signals []string
+	// stopErr fails a SIGSTOP of that pid; onList changes the table
+	// before each listing; starts overrides what lookup reports.
+	stopErr map[int]error
+	onList  func(n int, procs map[int]procinfo.Proc)
+	starts  map[int]uint64
+}
+
+func (f *fakeProcs) lookup(pid int) (procinfo.Proc, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.procs[pid]
+	if !ok {
+		return procinfo.Proc{}, procinfo.ErrNoProcess
+	}
+	if st, ok := f.starts[pid]; ok {
+		p.Start = st
+	}
+	return p, nil
 }
 
 func (f *fakeProcs) list() ([]procinfo.Proc, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++
+	if f.onList != nil {
+		f.onList(f.lists, f.procs)
+	}
 	if f.lists == 2 {
 		for _, p := range f.later {
 			f.procs[p.PID] = p
@@ -49,7 +70,14 @@ func (f *fakeProcs) list() ([]procinfo.Proc, error) {
 func (f *fakeProcs) signal(pid int, sig unix.Signal) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.stopErr[pid]; err != nil && sig == unix.SIGSTOP {
+		return err
+	}
 	f.signals = append(f.signals, fmt.Sprintf("%d:%d", pid, sig))
+	if sig == unix.SIGKILL {
+		delete(f.procs, pid)
+		return nil
+	}
 	if p, ok := f.procs[pid]; ok && sig == unix.SIGSTOP {
 		p.State = 'T'
 		f.procs[pid] = p
@@ -320,20 +348,20 @@ func TestKillOldHolderAbortsResumeEverything(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(j *testJob)
-		check func(t *testing.T, err error)
+		check func(t *testing.T, j *testJob, err error)
 		walks bool // the abort comes after the walk stopped the descendants
 	}{
 		{"re-check error", func(j *testJob) {
 			ticketHeldFn = func(KillTarget) (bool, error) { return false, errors.New("EIO") }
-		}, func(t *testing.T, err error) {
+		}, func(t *testing.T, j *testJob, err error) {
 			var se *StateError
-			if !errors.As(err, &se) || !strings.Contains(se.Msg, "cannot re-check the ticket") {
+			if !errors.As(err, &se) || se.Msg != fmt.Sprintf("kill: cannot re-check the ticket of older incoda pid %d (EIO); nothing was killed", j.root) {
 				t.Fatalf("want the exit-122 state error, got %T %v", err, err)
 			}
 		}, false},
 		{"no longer holds", func(j *testJob) {
 			ticketHeldFn = func(KillTarget) (bool, error) { return false, nil }
-		}, func(t *testing.T, err error) {
+		}, func(t *testing.T, j *testJob, err error) {
 			var r *Refusal
 			if !errors.As(err, &r) || !strings.Contains(r.Msg, `no longer holds "old"`) {
 				t.Fatalf("want the exit-120 refusal, got %T %v", err, err)
@@ -342,7 +370,7 @@ func TestKillOldHolderAbortsResumeEverything(t *testing.T) {
 		{"listing fails", func(j *testJob) {
 			ticketHeldFn = j.heldUntilReaped
 			listFn = func() ([]procinfo.Proc, error) { return nil, errors.New("sysctl refused") }
-		}, func(t *testing.T, err error) {
+		}, func(t *testing.T, j *testJob, err error) {
 			var r *Refusal
 			if !errors.As(err, &r) || !strings.Contains(r.Msg, "cannot list the job") {
 				t.Fatalf("want the listing refusal, got %T %v", err, err)
@@ -351,7 +379,7 @@ func TestKillOldHolderAbortsResumeEverything(t *testing.T) {
 		{"record write fails", func(j *testJob) {
 			ticketHeldFn = j.heldUntilReaped
 			writeOrphanFn = func(string, *Orphan) (string, error) { return "", errors.New("disk full") }
-		}, func(t *testing.T, err error) {
+		}, func(t *testing.T, j *testJob, err error) {
 			var se *StateError
 			if !errors.As(err, &se) || !strings.Contains(se.Msg, "nothing was terminated") {
 				t.Fatalf("want the record state error, got %T %v", err, err)
@@ -366,7 +394,7 @@ func TestKillOldHolderAbortsResumeEverything(t *testing.T) {
 			tc.setup(j)
 			state := t.TempDir()
 			_, err := KillOldHolder(state, j.target(t), procinfo.ParentChain())
-			tc.check(t, err)
+			tc.check(t, j, err)
 			j.assertRunning(t, 4)
 			stops, conts := countSig(*sent, unix.SIGSTOP), countSig(*sent, unix.SIGCONT)
 			if countSig(*sent, unix.SIGKILL) != 0 || stops != conts || (tc.walks && stops != 4) || (!tc.walks && stops != 1) {
@@ -393,4 +421,249 @@ func TestKillOldHolderRefusesAnAncestor(t *testing.T) {
 		t.Fatalf("signals %v", *sent)
 	}
 	j.assertRunning(t, 4)
+}
+
+// fakeKill wires the kill engine to a fake process table (pids far above
+// any real pid_max, so nothing real is ever signalled) and returns the
+// table. The ticket reads held until the old incoda is SIGKILLed.
+func fakeKill(t *testing.T, procs ...procinfo.Proc) *fakeProcs {
+	t.Helper()
+	killSentinel(t)
+	f := &fakeProcs{procs: map[int]procinfo.Proc{}}
+	for _, p := range procs {
+		f.procs[p.PID] = p
+	}
+	root := procs[0].PID
+	listFn, signalFn, lookupFn = f.list, f.signal, f.lookup
+	ticketHeldFn = func(KillTarget) (bool, error) {
+		_, err := f.lookup(root)
+		return err == nil, nil
+	}
+	settle, gone := walkSettle, treeGoneWait
+	walkSettle, treeGoneWait = 200*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() {
+		listFn, signalFn, lookupFn, ticketHeldFn = procinfo.List, unix.Kill, procinfo.Lookup, ticketHeld
+		walkSettle, treeGoneWait = settle, gone
+	})
+	return f
+}
+
+func fp(pid, ppid, pgid int, st byte) procinfo.Proc {
+	return procinfo.Proc{PID: pid, PPID: ppid, PGID: pgid, Start: uint64(pid) * 10, State: st}
+}
+
+func fakeTarget(t *testing.T, pid int) KillTarget {
+	return KillTarget{Kind: TargetOld, Key: "old", Dir: t.TempDir(), Ticket: "x.ticket", PID: pid}
+}
+
+// assertResumed fails unless every SIGSTOP was matched by a SIGCONT of the
+// same pid and nothing was SIGKILLed.
+func (f *fakeProcs) assertResumed(t *testing.T, wantStops int) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stops := map[string]int{}
+	n := 0
+	for _, s := range f.signals {
+		pid, sig, _ := strings.Cut(s, ":")
+		switch sig {
+		case fmt.Sprint(int(unix.SIGSTOP)):
+			stops[pid]++
+			n++
+		case fmt.Sprint(int(unix.SIGCONT)):
+			stops[pid]--
+		case fmt.Sprint(int(unix.SIGKILL)):
+			t.Fatalf("an abort sent SIGKILL: %v", f.signals)
+		}
+	}
+	for pid, c := range stops {
+		if c != 0 {
+			t.Fatalf("pid %s stopped and not resumed: %v", pid, f.signals)
+		}
+	}
+	if n != wantStops {
+		t.Fatalf("%d SIGSTOPs, want %d: %v", n, wantStops, f.signals)
+	}
+}
+
+const fr = 5000100 // the fake old incoda
+
+// TestKillOldHolderRefusesAnUnverifiedChain: a parent chain that failed
+// partway, stops short of pid 1 or is empty is refused before any signal.
+func TestKillOldHolderRefusesAnUnverifiedChain(t *testing.T) {
+	for _, tc := range []struct {
+		chain  procinfo.Chain
+		reason string
+	}{
+		{procinfo.Chain{PIDs: []int{77}, Err: errors.New("lookup refused")}, "lookup refused"},
+		{procinfo.Chain{PIDs: []int{77, 78}}, "the parent chain stops at pid 78"},
+		{procinfo.Chain{}, "no parent chain"},
+	} {
+		f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'))
+		_, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), tc.chain)
+		var r *Refusal
+		want := "kill: cannot verify this process's ancestors (" + tc.reason + "); run kill from a plain terminal outside the job"
+		if !errors.As(err, &r) || r.Msg != want {
+			t.Fatalf("got %T %v, want %q", err, err, want)
+		}
+		if len(f.signals) != 0 || f.lists != 0 {
+			t.Fatalf("signals %v, listings %d: nothing may happen before the chain is verified", f.signals, f.lists)
+		}
+	}
+}
+
+// TestKillOldHolderFindsAnAncestorInTheListing: the chain says nothing,
+// but the listing shows the old incoda is an ancestor of kill: refused as
+// in step 0, everything resumed, kill's ancestor never stopped.
+func TestKillOldHolderFindsAnAncestorInTheListing(t *testing.T) {
+	self := os.Getpid()
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'), fp(fr+2, fr, fr, 'S'), procinfo.Proc{PID: self, PPID: fr + 1, PGID: fr, Start: 1, State: 'R'})
+	_, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	var r *Refusal
+	if !errors.As(err, &r) || r.Msg != fmt.Sprintf("kill: pid %d is an ancestor of this process; run kill from outside its job", fr) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	f.assertResumed(t, 1)
+}
+
+// TestKillOldHolderStopFailure: a descendant that cannot be stopped
+// (EPERM) aborts the walk at once with everything resumed.
+func TestKillOldHolderStopFailure(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'), fp(fr+2, fr+1, fr, 'S'))
+	f.stopErr = map[int]error{fr + 2: unix.EPERM}
+	_, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	var r *Refusal
+	if !errors.As(err, &r) || r.Msg != fmt.Sprintf("kill: cannot stop pid %d (operation not permitted); stop its job by hand, then rerun", fr+2) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	f.assertResumed(t, 2)
+}
+
+// TestWalkTreeSkipsAPidThatIsGone: ESRCH on SIGSTOP neither stops nor
+// records the pid; its children are still walked.
+func TestWalkTreeSkipsAPidThatIsGone(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'T'), fp(fr+1, fr, fr, 'S'), fp(fr+2, fr+1, fr, 'S'))
+	f.stopErr = map[int]error{fr + 1: unix.ESRCH}
+	stopped := []int{fr}
+	desc, _, err := walkTree(fr, map[int]bool{os.Getpid(): true}, &stopped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(stopped) != fmt.Sprint([]int{fr, fr + 2}) || len(desc) != 1 || desc[0].PID != fr+2 {
+		t.Fatalf("stopped %v, desc %v", stopped, desc)
+	}
+}
+
+// TestKillOldHolderJobKeepsChanging: a tree that forks a new process on
+// every listing past walkSettle is abandoned, resumed, and nothing killed.
+func TestKillOldHolderJobKeepsChanging(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'))
+	f.onList = func(n int, procs map[int]procinfo.Proc) {
+		p := fp(fr+1+n, fr+n, fr, 'R')
+		procs[p.PID] = p
+	}
+	_, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	var se *StateError
+	if !errors.As(err, &se) || se.Msg != fmt.Sprintf("kill: the job of older incoda pid %d kept changing; nothing was killed; rerun", fr) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if f.lists < 3 {
+		t.Fatalf("only %d listings", f.lists)
+	}
+	f.assertResumed(t, len(f.signals)/2)
+}
+
+// TestKillOldHolderRootLeavesTheListing: the old incoda vanishing during
+// the walk aborts with everything resumed.
+func TestKillOldHolderRootLeavesTheListing(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'), fp(fr+2, fr+1, fr, 'S'))
+	f.onList = func(n int, procs map[int]procinfo.Proc) {
+		if n == 2 {
+			delete(procs, fr)
+		}
+	}
+	_, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	var r *Refusal
+	if !errors.As(err, &r) || r.Msg != fmt.Sprintf("kill: pid %d no longer holds %q", fr, "old") {
+		t.Fatalf("got %T %v", err, err)
+	}
+	f.assertResumed(t, 3)
+}
+
+// TestKillOldHolderRechecksStartTimes: a group leader, a descendant or the
+// old incoda whose start time no longer matches is not signalled in step 5.
+func TestKillOldHolderRechecksStartTimes(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr+1, 'S'), fp(fr+2, fr+1, fr+1, 'S'), fp(fr+3, fr, fr, 'S'))
+	stopped := false
+	f.onList = func(n int, procs map[int]procinfo.Proc) {
+		if n > 1 {
+			stopped = true
+		}
+	}
+	// After the walk, pids fr+1 (a group leader) and fr+3 read as other
+	// incarnations; fr+2 and the old incoda still match.
+	lookupFn = func(pid int) (procinfo.Proc, error) {
+		p, err := f.lookup(pid)
+		if err == nil && stopped && (pid == fr+1 || pid == fr+3) {
+			p.Start++
+		}
+		return p, err
+	}
+	state := t.TempDir()
+	_, err := KillOldHolder(state, fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kills := map[string]bool{}
+	for _, s := range f.signals {
+		if pid, sig, _ := strings.Cut(s, ":"); sig == fmt.Sprint(int(unix.SIGKILL)) {
+			kills[pid] = true
+		}
+	}
+	want := map[string]bool{fmt.Sprint(fr + 2): true, fmt.Sprint(fr): true}
+	if fmt.Sprint(kills) != fmt.Sprint(want) {
+		t.Fatalf("SIGKILLs %v, want %v (signals %v)", kills, want, f.signals)
+	}
+
+	// The old incoda reused: its SIGKILL is skipped too.
+	f = fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'))
+	n := 0
+	lookupFn = func(pid int) (procinfo.Proc, error) {
+		p, err := f.lookup(pid)
+		if pid == fr {
+			n++
+			if n > 1 {
+				p.Start++
+			}
+		}
+		return p, err
+	}
+	ticketHeldFn = func(KillTarget) (bool, error) { return n < 2, nil }
+	if _, err := KillOldHolder(t.TempDir(), fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range f.signals {
+		if s == fmt.Sprintf("%d:%d", fr, unix.SIGKILL) {
+			t.Fatalf("SIGKILLed a reused old incoda pid: %v", f.signals)
+		}
+	}
+}
+
+// TestKillOldHolderTreeNotGone: a tree still there after treeGoneWait
+// exits 122 and keeps the record.
+func TestKillOldHolderTreeNotGone(t *testing.T) {
+	f := fakeKill(t, fp(fr, 1, fr, 'S'), fp(fr+1, fr, fr, 'S'))
+	ticketHeldFn = func(KillTarget) (bool, error) { return true, nil }
+	state := t.TempDir()
+	_, err := KillOldHolder(state, fakeTarget(t, fr), procinfo.Chain{PIDs: []int{1}})
+	var se *StateError
+	if !errors.As(err, &se) || se.Msg != fmt.Sprintf(`kill: older incoda pid %d was sent SIGKILL but %d (the older incoda) still run; the orphan record keeps "old" busy until they exit`, fr, fr) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if es := orphanFiles(t, state); len(es) != 1 {
+		t.Fatalf("the record must stay: %v", es)
+	}
+	if !strings.Contains(fmt.Sprint(f.signals), fmt.Sprintf("%d:%d", fr, unix.SIGKILL)) {
+		t.Fatalf("signals %v", f.signals)
+	}
 }
