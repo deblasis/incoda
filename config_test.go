@@ -464,3 +464,29 @@ func TestLogLineStaysOneLine(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigEchoEscapesAHandEditedLink: a link read back from a
+// hand-edited config.json is printed escaped by config's link: echo and
+// its link-exists refusal.
+func TestConfigEchoEscapesAHandEditedLink(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "seed"); code != 0 {
+		t.Fatalf("migrate: %d\n%s", code, out)
+	}
+	dir := laneDir(state, "cap-gate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"schema":2,"pools":["t\u001bx"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runIncoda(t, incoda, state, "config", "cap-gate", "--pool", "tests")
+	if code != 120 || !strings.Contains(out, `link-exists: "cap-gate" is linked to t\x1bx;`) || strings.Contains(out, "\x1b") {
+		t.Fatalf("link-exists: %d %q", code, out)
+	}
+	out, code = runIncoda(t, incoda, state, "config", "cap-gate", "--pool", "tests", "--replace")
+	if code != 0 || !strings.Contains(out, `link: t\x1bx -> tests`) || strings.Contains(out, "\x1b") {
+		t.Fatalf("link echo: %d %q", code, out)
+	}
+}

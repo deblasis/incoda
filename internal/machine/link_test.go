@@ -114,3 +114,39 @@ func TestConcurrentFirstLinksToOneSetNeverEscalate(t *testing.T) {
 		t.Fatalf("%d writers changed the link, want exactly 1", changed)
 	}
 }
+
+// TestHandEditedLinkIsEscaped: pool names read back from a hand-edited
+// config.json reach a terminal escaped (the link-conflict set) and lane.log
+// through LogValue (event=link old=), never as raw control bytes.
+func TestHandEditedLinkIsEscaped(t *testing.T) {
+	state := t.TempDir()
+	if _, _, err := ensure(t, state); err != nil {
+		t.Fatal(err)
+	}
+	dir := lane.LaneDir(state, "cap-gate")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/config.json", []byte(`{"schema":2,"pools":["t\u001bx"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Start: time.Now(), Wait: 10 * time.Second, Poll: 20 * time.Millisecond}
+	_, err := WriteFirstLinks(state, "run", o, []FirstLink{{Key: "cap-gate", Pools: []string{"tests"}}})
+	var rf *Refusal
+	if !errors.As(err, &rf) || !strings.Contains(rf.Msg, `link-conflict: "cap-gate" was just linked to t\x1bx by `) || strings.Contains(rf.Msg, "\x1b") {
+		t.Fatalf("want an escaped link-conflict, got %q", err)
+	}
+	if _, err := WriteLink(state, "cap-gate", "test", o, func(_ *Registry, c *lane.Config) error {
+		c.Pools = []string{"tests"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(lane.LogPath(dir))
+	if !strings.Contains(string(b), ` by=test old="t\\x1bx" new=tests`) || strings.Contains(string(b), "\x1b") {
+		t.Fatalf("want old= through LogValue:\n%q", b)
+	}
+	if got := LinkedLine("cap-gate", []string{"t\x1bx"}, false); got != `cap-gate -> t\x1bx` {
+		t.Fatalf("LinkedLine = %q", got)
+	}
+}

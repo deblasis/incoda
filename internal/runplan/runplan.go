@@ -180,6 +180,14 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 		l := lanes[k]
 		link := machine.SortedSet(l.Cfg.Pools)
 		p.Links[k] = link
+		// The stored link is validated first: a refusal below prints it,
+		// so every name in it must be a registered pool (a valid key)
+		// before it reaches a terminal (spec 4.6).
+		for _, pool := range link {
+			if _, err := resolvePool(stateDir, reg, k, pool); err != nil {
+				return nil, err
+			}
+		}
 		use := link
 		switch {
 		case len(link) == 0:
@@ -194,11 +202,6 @@ func Make(stateDir string, reg *machine.Registry, req Request) (*Plan, error) {
 				return nil, poolMismatch(stateDir, reg, req, k, link, unlinked, len(projects))
 			}
 			use = req.Pool
-		}
-		for _, pool := range link {
-			if _, err := resolvePool(stateDir, reg, k, pool); err != nil {
-				return nil, err
-			}
 		}
 		for _, pool := range use {
 			pl, err := linkedPool(stateDir, reg, lanes, k, pool)

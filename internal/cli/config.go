@@ -147,11 +147,11 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		}
 		switch {
 		case !machine.SameSet(res.Old.Pools, res.New.Pools):
-			fmt.Fprintf(stdout, "link: %s -> %s\n", machine.SetText(res.Old.Pools), machine.SetText(res.New.Pools))
+			fmt.Fprintf(stdout, "link: %s -> %s\n", textsafe.Escape(machine.SetText(res.Old.Pools)), textsafe.Escape(machine.SetText(res.New.Pools)))
 		case edit.touchesPools() && len(res.New.Pools) == 0:
 			fmt.Fprintf(stderr, "incoda: already unlinked: %s\n", key)
 		case edit.touchesPools():
-			fmt.Fprintf(stderr, "incoda: already linked: %s -> %s\n", key, machine.SetText(res.New.Pools))
+			fmt.Fprintf(stderr, "incoda: already linked: %s -> %s\n", key, textsafe.Escape(machine.SetText(res.New.Pools)))
 		}
 	case apply(&lane.Config{}):
 		q, err := lane.Open(dir, key)

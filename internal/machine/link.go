@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // SortedSet returns names sorted with duplicates dropped; nil stays nil.
@@ -162,10 +163,21 @@ func writeLinkHeld(stateDir, key, by string, o Options, reg *Registry, fn func(r
 	}
 	res.New, res.Changed = cfg, true
 	if !SameSet(res.Old.Pools, cfg.Pools) {
+		// Pool names come from config.json as stored (or hand-edited), so
+		// they go through LogValue; an empty side stays empty (old=).
 		q.Logf("queue=%s event=link pid=%d by=%s old=%s new=%s", key, os.Getpid(), by,
-			strings.Join(SortedSet(res.Old.Pools), ","), strings.Join(SortedSet(cfg.Pools), ","))
+			logSet(res.Old.Pools), logSet(cfg.Pools))
 	}
 	return res, nil
+}
+
+// logSet is a set of pools as one lane.log value: empty for no pools,
+// else the comma-joined names through textsafe.LogValue.
+func logSet(pools []string) string {
+	if len(pools) == 0 {
+		return ""
+	}
+	return textsafe.LogValue(strings.Join(SortedSet(pools), ","))
 }
 
 // FirstLink is a link a run writes on an unlinked key: Key gets Pools,
@@ -250,7 +262,7 @@ func linkConflict(stateDir, key string, now []string) *Refusal {
 	if pid, ok := LastLinker(stateDir, key); ok {
 		by = fmt.Sprintf("pid %d", pid)
 	}
-	return &Refusal{Msg: fmt.Sprintf("link-conflict: %q was just linked to %s by %s; rerun without --pool", key, SetText(now), by)}
+	return &Refusal{Msg: fmt.Sprintf("link-conflict: %q was just linked to %s by %s; rerun without --pool", key, textsafe.Escape(SetText(now)), by)}
 }
 
 // LastLinker reads the pid of the last event=link line in a lane's log, so
@@ -279,9 +291,10 @@ func LastLinker(stateDir, key string) (int, bool) {
 }
 
 // LinkedLine is the informational line of a link a run or init wrote:
-// "<key> -> <pools>", plus ", quiet_machine" when that is set too.
+// "<key> -> <pools>", plus ", quiet_machine" when that is set too. The
+// pools are escaped: they are read back from config.json.
 func LinkedLine(key string, pools []string, quiet bool) string {
-	s := key + " -> " + SetText(pools)
+	s := key + " -> " + textsafe.Escape(SetText(pools))
 	if quiet {
 		s += ", quiet_machine"
 	}

@@ -586,3 +586,19 @@ func TestFixLineChecksTheLaneSetItTakes(t *testing.T) {
 		}
 	}
 }
+
+// TestStoredLinkIsValidatedBeforePoolMismatch: a hand-edited link naming
+// something that is not a pool fails closed (machine-state) before a
+// pool-mismatch could print it, and its name is never printed raw.
+func TestStoredLinkIsValidatedBeforePoolMismatch(t *testing.T) {
+	state, reg := machineDir(t, map[string]string{
+		"polymatto": "{\"schema\":2,\"pools\":[\"builds\",\"t\\u001bx\"]}",
+		"builds":    `{"schema":2}`,
+		"vm":        `{"schema":2}`,
+	})
+	_, err := Make(state, reg, Request{Named: []string{"polymatto"}, Pool: []string{"vm"}, Reason: "r"})
+	var se *machine.StateError
+	if !errors.As(err, &se) || !strings.HasPrefix(se.Msg, `machine-state: queue "polymatto" links "t\x1bx": it is not a pool on this machine`) || strings.Contains(se.Msg, "\x1b") {
+		t.Fatalf("want machine-state before pool-mismatch, got %q", err)
+	}
+}

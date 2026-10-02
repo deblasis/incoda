@@ -6,6 +6,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // poolsValue parses a comma-separated set of keys (--pool and its alias
@@ -80,7 +81,7 @@ func (e linkEdit) apply(key string, cur lane.Config) ([]string, bool, error) {
 	switch {
 	case e.set != nil:
 		if linked && !machine.SameSet(pools, e.set) && !e.replace {
-			return nil, false, &machine.Refusal{Msg: fmt.Sprintf("link-exists: %q is linked to %s; changing a link is the user's call: ask them", key, machine.SetText(pools))}
+			return nil, false, &machine.Refusal{Msg: fmt.Sprintf("link-exists: %q is linked to %s; changing a link is the user's call: ask them", key, textsafe.Escape(machine.SetText(pools)))}
 		}
 		pools = machine.SortedSet(e.set)
 	case e.unlink:
