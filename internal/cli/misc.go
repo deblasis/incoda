@@ -127,7 +127,7 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
 			continue
 		}
-		snap, err := q.Observe(0)
+		snap, err := q.ObserveBy(0, time.Now().Add(lane.ViewProbeWait))
 		q.Close()
 		if err != nil {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
@@ -201,7 +201,10 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 // an older incoda with its whole job). With no live ticket it refuses
 // nothing.
 func upgradePending(v machine.View, key string) error {
-	live, err := lane.ProbeLane(filepath.Join(v.Root, key))
+	live, err := lane.ProbeLane(filepath.Join(v.Root, key), time.Now().Add(lane.OneShotProbeWait))
+	if err == nil && lane.AnyCannotTell(live) {
+		err = lane.ErrRegistryBusy
+	}
 	if err != nil {
 		return exitWith(ExitState, "cannot probe queue %q: %s", key, textsafe.Escape(err.Error()))
 	}
@@ -306,7 +309,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	// strays/ belongs to M5 and M6.
 	cleanErr := ""
 	if view, err := machine.Inspect(dir); err == nil && view.Migrated {
-		if err := machine.CleanStrays(dir); err != nil {
+		if err := machine.CleanStrays(dir, time.Now().Add(lane.ViewProbeWait)); err != nil {
 			cleanErr = "cannot clean strays/: " + textsafe.Escape(err.Error())
 		}
 	}

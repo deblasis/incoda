@@ -118,6 +118,16 @@ func (q *Queue) withRegistry(fn func() error) error {
 	return fn()
 }
 
+// withRegistryBy is withRegistry for a read-only view: it waits for the
+// registry lock only until deadline and fails with ErrRegistryBusy past it.
+func (q *Queue) withRegistryBy(deadline time.Time, fn func() error) error {
+	if err := LockBy(q.registry, deadline); err != nil {
+		return fmt.Errorf("registry lock: %w", err)
+	}
+	defer q.registry.Unlock()
+	return fn()
+}
+
 // Logf appends one line to the queue's handoff log. Log failures are never
 // fatal: the log is history for humans, not state the algorithm reads. A
 // read-only handle writes nothing.
@@ -355,11 +365,23 @@ type Snapshot struct {
 // lock), so the snapshot can never pair one era's tickets with another era's
 // count.
 func (q *Queue) Observe(logLines int) (*Snapshot, error) {
+	return q.observe(logLines, q.withRegistry)
+}
+
+// ObserveBy is Observe for status, watch and queues: it waits for the
+// registry lock only until deadline, so a lock another process keeps for
+// ever (a stopped incoda) fails the observation with ErrRegistryBusy
+// instead of hanging the view.
+func (q *Queue) ObserveBy(logLines int, deadline time.Time) (*Snapshot, error) {
+	return q.observe(logLines, func(fn func() error) error { return q.withRegistryBy(deadline, fn) })
+}
+
+func (q *Queue) observe(logLines int, with func(func() error) error) (*Snapshot, error) {
 	var live []Entry
 	var slots int
 	var cfg Config
 	var cfgErr error
-	err := q.withRegistry(func() error {
+	err := with(func() error {
 		var e error
 		live, slots, e = q.scanLocked(time.Now())
 		if e != nil {

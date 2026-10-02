@@ -73,7 +73,7 @@ func TestRemoveIfIdle(t *testing.T) {
 	q.Close()
 	var kept []string
 	keep := func(p string) { kept = append(kept, p) }
-	if ok, err := RemoveIfIdle(q.Dir, keep); !ok || err != nil {
+	if ok, err := RemoveIfIdle(q.Dir, soon(), keep); !ok || err != nil {
 		t.Fatalf("dead lane: %v %v", ok, err)
 	}
 	if ExistsIn(root, "dead") || len(kept) != 1 || kept[0] != LogPath(q.Dir) {
@@ -90,10 +90,10 @@ func TestRemoveIfIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Release(0)
-	if ok, err := RemoveIfIdle(live.Dir, keep); ok || err != nil || !ExistsIn(root, "live") {
+	if ok, err := RemoveIfIdle(live.Dir, soon(), keep); ok || err != nil || !ExistsIn(root, "live") {
 		t.Fatalf("live lane: %v %v", ok, err)
 	}
-	if ok, err := RemoveIfIdle(filepath.Join(root, "missing"), keep); ok || err != nil {
+	if ok, err := RemoveIfIdle(filepath.Join(root, "missing"), soon(), keep); ok || err != nil {
 		t.Fatalf("missing lane: %v %v", ok, err)
 	}
 }

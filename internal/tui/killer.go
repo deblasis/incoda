@@ -20,6 +20,10 @@ import (
 // one.
 const killedExit = 124
 
+// killProbeWait bounds the probes that look for a kill target, the default
+// --wait of incoda kill.
+const killProbeWait = 5 * time.Second
+
 // Killer is what the kill prompt talks to. It is an interface so the model
 // can be driven in tests without a state directory or a process to end.
 type Killer interface {
@@ -60,7 +64,7 @@ func (k LaneKiller) target(key string, pid int) (machine.KillTarget, error) {
 	if err != nil {
 		return machine.KillTarget{}, err
 	}
-	t, err := machine.FindKillTarget(k.Dir, v, key, pid)
+	t, err := machine.FindKillTarget(k.Dir, v, key, pid, lane.ProbeDeadline(time.Time{}, killProbeWait))
 	if err != nil {
 		return machine.KillTarget{}, err
 	}

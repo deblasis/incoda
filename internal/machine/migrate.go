@@ -101,7 +101,7 @@ func runMigration(stateDir string, lk *Lock, o Options) (*Registry, error) {
 				// A re-fence on a migrated layout deletes every stray
 				// lane whose tickets are all dead (spec 2.3); live ones
 				// stay and are counted by acquisitions.
-				if err := CleanStrays(stateDir); err != nil {
+				if err := CleanStrays(stateDir, lane.ProbeDeadline(budgetDeadline(o.Start, o.Wait), lane.PollProbeWait)); err != nil {
 					return nil, stateErrorf("cannot clean strays/: %s", esc(err))
 				}
 			}
@@ -160,7 +160,7 @@ type notIdleWait struct{ printed bool }
 func (w *notIdleWait) wait(stateDir string, lk *Lock, o Options) error {
 	var bs []Blocker
 	if kindOf(lane.QueuesDir(stateDir)) == aDir {
-		bs, _ = findBlockers(stateDir, phaseM2)
+		bs, _ = findBlockers(stateDir, phaseM2, lane.ProbeDeadline(budgetDeadline(o.Start, o.Wait), lane.PollProbeWait))
 		_ = lk.SetBlockers(bs)
 	}
 	if !w.printed {

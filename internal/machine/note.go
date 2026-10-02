@@ -21,6 +21,10 @@ type Blocker struct {
 	// (an orphan record, spec 3.2): it is waited for, but there is no
 	// participant left to kill.
 	Orphan bool
+	// Unknown marks a lane whose registry lock another process kept past
+	// the probe's deadline (lane.ErrRegistryBusy): it is waited for as
+	// live, it has no pid, and there is nothing to name in a stop line.
+	Unknown bool
 }
 
 // Note is the line the machine.lock holder writes into the lock file, so
@@ -38,11 +42,16 @@ type Note struct {
 func (n Note) String() string {
 	s := fmt.Sprintf("pid=%d op=%s since=%s", n.PID, n.Op, n.Since.UTC().Format(time.RFC3339))
 	if len(n.Blockers) > 0 {
-		parts := make([]string, len(n.Blockers))
-		for i, b := range n.Blockers {
-			parts[i] = fmt.Sprintf("%d:%s", b.PID, b.Key)
+		var parts []string
+		for _, b := range n.Blockers {
+			// A lane that cannot be told has no pid to note.
+			if b.PID > 0 {
+				parts = append(parts, fmt.Sprintf("%d:%s", b.PID, b.Key))
+			}
 		}
-		s += " blockers=" + strings.Join(parts, ",")
+		if len(parts) > 0 {
+			s += " blockers=" + strings.Join(parts, ",")
+		}
 	}
 	return s
 }
@@ -121,6 +130,10 @@ func ReadNote(stateDir string) (Note, bool) {
 func blockerList(bs []Blocker) string {
 	parts := make([]string, len(bs))
 	for i, b := range bs {
+		if b.Unknown {
+			parts[i] = fmt.Sprintf("%s (%s)", b.Key, lane.ErrRegistryBusy)
+			continue
+		}
 		parts[i] = fmt.Sprintf("%s pid %d", b.Key, b.PID)
 	}
 	return strings.Join(parts, ", ")

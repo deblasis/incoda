@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
 )
@@ -49,8 +50,11 @@ func (t KillTarget) Old() bool { return t.Kind == TargetOld }
 // layout v allows one: lanes/<key> on a migrated layout, queues/<key> while
 // queues/ is a directory, the root a migration has moved the lanes to, and
 // every strays/<n>/<key>. Every probe is create-free (spec 2.6 step 2); it
-// never writes, migrates or takes machine.lock.
-func FindKillTarget(stateDir string, v View, key string, pid int) (KillTarget, error) {
+// never writes, migrates or takes machine.lock, and waits for a registry
+// lock only until deadline. When pid is not found and some lane could not
+// be told (lane.ErrRegistryBusy), it fails with that error rather than
+// report no participant.
+func FindKillTarget(stateDir string, v View, key string, pid int, deadline time.Time) (KillTarget, error) {
 	type place struct {
 		root string
 		kind TargetKind
@@ -74,9 +78,10 @@ func FindKillTarget(stateDir string, v View, key string, pid int) (KillTarget, e
 			places = append(places, place{filepath.Join(StraysDir(stateDir), b.Name()), TargetOld})
 		}
 	}
+	var busy string
 	for _, pl := range places {
 		dir := filepath.Join(pl.root, key)
-		live, err := lane.ProbeLane(dir)
+		live, err := lane.ProbeLane(dir, deadline)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -84,10 +89,17 @@ func FindKillTarget(stateDir string, v View, key string, pid int) (KillTarget, e
 			return KillTarget{}, fmt.Errorf("%s: %w", dir, err)
 		}
 		for _, p := range live {
+			if p.CannotTell() {
+				busy = dir
+				continue
+			}
 			if p.PID() == pid {
 				return KillTarget{Kind: pl.kind, Key: key, Root: pl.root, Dir: dir, Ticket: p.Name, PID: pid, Command: p.Ticket.Command}, nil
 			}
 		}
+	}
+	if busy != "" {
+		return KillTarget{}, fmt.Errorf("%s: %w", busy, lane.ErrRegistryBusy)
 	}
 	return KillTarget{Kind: TargetNone, Key: key, PID: pid}, nil
 }

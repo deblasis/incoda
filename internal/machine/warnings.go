@@ -2,6 +2,7 @@ package machine
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/deblasis/incoda/internal/procinfo"
 )
@@ -33,17 +34,18 @@ type Holder struct {
 // StatusWarnings is the warning block at the end of plain status (spec
 // 5.3): every live unpooled holder, a missing fence on a migrated layout,
 // and every holder among holders (plus the unpooled ones) that is in the
-// stopped state. It only reads: no lock, no cleanup.
-func StatusWarnings(stateDir string, v View, holders []Holder) []string {
+// stopped state. It only reads: no lock, no cleanup. Its probes wait for a
+// registry lock only until deadline.
+func StatusWarnings(stateDir string, v View, holders []Holder, deadline time.Time) []string {
 	var lines []string
 	if v.Migrated {
-		us, err := ScanUnpooled(stateDir, false)
+		us, err := ScanUnpooled(stateDir, false, deadline)
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("cannot scan for unpooled runs: %s", esc(err)))
 		}
 		for _, u := range us {
 			lines = append(lines, u.Line())
-			if u.Where != "orphans" {
+			if u.Where != "orphans" && !u.Unknown {
 				holders = append(holders, Holder{Key: u.Key, PID: u.PID})
 			}
 		}
@@ -53,7 +55,7 @@ func StatusWarnings(stateDir string, v View, holders []Holder) []string {
 	}
 	seen := map[int]bool{}
 	for _, h := range holders {
-		if seen[h.PID] {
+		if h.PID <= 0 || seen[h.PID] {
 			continue
 		}
 		seen[h.PID] = true

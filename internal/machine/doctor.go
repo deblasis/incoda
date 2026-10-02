@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -35,9 +36,12 @@ type Health struct {
 	Attention []string
 }
 
-// Diagnose reads the layout like Inspect: no lock, no writes.
+// Diagnose reads the layout like Inspect: no lock, no writes. Its lane
+// probes share one deadline of lane.ViewProbeWait; a lane whose registry
+// lock another process keeps past it is reported as cannot tell.
 func Diagnose(stateDir string) Health {
 	var h Health
+	deadline := time.Now().Add(lane.ViewProbeWait)
 	reg, err := ReadRegistry(stateDir)
 	if errors.Is(err, ErrNoRegistry) && scanLayout(stateDir).row() == RowRegistryLost {
 		// A migration may have committed between the two looks.
@@ -57,7 +61,7 @@ func Diagnose(stateDir string) Health {
 			h.Problems = append(h.Problems, fmt.Sprintf("fence missing: %s is not a regular file, so an older incoda can run outside the pools; the next run or config re-places it", textsafe.Escape(lane.QueuesDir(stateDir))))
 		}
 		h.Attention = append(h.Attention, unreadableConfigs(stateDir)...)
-		describeHolders(stateDir, &h, lane.LanesDir(stateDir), true)
+		describeHolders(stateDir, &h, lane.LanesDir(stateDir), true, deadline)
 	case !errors.Is(err, ErrNoRegistry):
 		h.Layout = "2 (machine.json unusable)"
 		h.Problems = append(h.Problems, strings.TrimPrefix(err.Error(), "machine-state: "))
@@ -76,12 +80,12 @@ func Diagnose(stateDir string) Health {
 			if st.Queues == aDir {
 				h.Layout = "1 (queues/)"
 				h.Attention = append(h.Attention, banner(stateDir))
-				describeHolders(stateDir, &h, lane.QueuesDir(stateDir), false)
+				describeHolders(stateDir, &h, lane.QueuesDir(stateDir), false, deadline)
 			} else {
 				h.Layout = "none yet (the next mutating incoda command creates layout 2)"
 			}
 		default:
-			describeHolders(stateDir, &h, unmigratedRoot(stateDir, st), false)
+			describeHolders(stateDir, &h, unmigratedRoot(stateDir, st), false, deadline)
 			h.Layout = "upgrade unfinished"
 			if _, ok := migrationNote(stateDir); ok {
 				h.Problems = append(h.Problems, fmt.Sprintf("migration in progress (%s): %s", row, banner(stateDir)))
@@ -109,13 +113,16 @@ func unreadableConfigs(stateDir string) []string {
 // describeHolders fills in strays/, orphans/, the live unpooled holders
 // (on a migrated layout) and every live ticket holder in the stopped state
 // (spec 5.5). root is where the lanes are now. It only reads.
-func describeHolders(stateDir string, h *Health, root string, migrated bool) {
+func describeHolders(stateDir string, h *Health, root string, migrated bool, deadline time.Time) {
 	batches, _ := lane.ListIn(StraysDir(stateDir))
 	sort.Strings(batches)
 	for _, b := range batches {
 		keys, _ := lane.ListIn(filepath.Join(StraysDir(stateDir), b))
 		for _, k := range keys {
-			live, err := lane.ProbeLane(filepath.Join(StraysDir(stateDir), b, k))
+			live, err := lane.ProbeLane(filepath.Join(StraysDir(stateDir), b, k), deadline)
+			if err == nil && lane.AnyCannotTell(live) {
+				err = lane.ErrRegistryBusy
+			}
 			if err != nil {
 				h.Strays = append(h.Strays, fmt.Sprintf("%s/%s: cannot probe (%s)", b, k, esc(err)))
 				continue
@@ -136,27 +143,31 @@ func describeHolders(stateDir string, h *Health, root string, migrated bool) {
 	}
 	var holders []Holder
 	if migrated {
-		us, err := ScanUnpooled(stateDir, false)
+		us, err := ScanUnpooled(stateDir, false, deadline)
 		if err != nil {
 			h.Attention = append(h.Attention, fmt.Sprintf("cannot scan for unpooled runs: %s", esc(err)))
 		}
 		for _, u := range us {
 			h.Attention = append(h.Attention, fmt.Sprintf("%s (%s): %s; new runs on its pools wait for it", u.Line(), u.Where, u.Command))
-			if u.Where != "orphans" {
+			if u.Where != "orphans" && !u.Unknown {
 				holders = append(holders, Holder{Key: u.Key, PID: u.PID})
 			}
 		}
 	}
 	keys, _ := lane.ListIn(root)
 	for _, k := range keys {
-		live, _ := lane.ProbeLane(filepath.Join(root, k))
+		live, _ := lane.ProbeLane(filepath.Join(root, k), deadline)
 		for _, p := range live {
+			if p.CannotTell() {
+				h.Attention = append(h.Attention, fmt.Sprintf("queue %s: %s", k, lane.ErrRegistryBusy))
+				continue
+			}
 			holders = append(holders, Holder{Key: k, PID: p.PID()})
 		}
 	}
 	seen := map[int]bool{}
 	for _, hd := range holders {
-		if seen[hd.PID] {
+		if hd.PID <= 0 || seen[hd.PID] {
 			continue
 		}
 		seen[hd.PID] = true

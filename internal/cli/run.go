@@ -231,14 +231,21 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		var countUnpooled func() (int, error)
 		if reg.IsPool(key) {
 			countUnpooled = func() (int, error) {
-				all, err := machine.ScanUnpooled(dir, true)
+				// The probes of one poll wait for a stray's registry
+				// lock at most PollProbeWait and never past the budget:
+				// a lock held for ever reads as one held slot.
+				var end time.Time
+				if wait.d >= 0 {
+					end = start.Add(wait.d)
+				}
+				all, err := machine.ScanUnpooled(dir, true, lane.ProbeDeadline(end, lane.PollProbeWait))
 				if err != nil {
 					return 0, &machine.StateError{Msg: "machine-state: cannot scan for unpooled runs: " + textsafe.Escape(err.Error())}
 				}
 				mine := machine.ChargedTo(dir, reg, key, all)
 				if !chain.Skip {
 					for _, u := range mine {
-						if chain.Contains(u.PID) {
+						if !u.Unknown && chain.Contains(u.PID) {
 							return 0, machine.UpgradeBlocked(u.PID, u.Key)
 						}
 					}

@@ -60,7 +60,7 @@ func TestOrphanRecordIsLiveUntilItsTreeIsEmpty(t *testing.T) {
 	if err != nil || len(live) != 1 || live[0].Key != "builds" || live[0].File != filepath.Base(path) {
 		t.Fatalf("LiveOrphans = %+v %v", live, err)
 	}
-	bs, err := findBlockers(state, phaseM2)
+	bs, err := findBlockers(state, phaseM2, soon())
 	if err != nil || len(bs) != 1 || !bs[0].Orphan || bs[0].PID != 999990 ||
 		bs[0].Command != "zig build (its job is still exiting after a kill: pids "+strconv.Itoa(p.PID)+")" {
 		t.Fatalf("findBlockers = %+v %v", bs, err)
@@ -155,7 +155,7 @@ func TestOrphanAndTicketOfOnePidAreOneBlocker(t *testing.T) {
 		Descendants: []OrphanProc{{PID: p.PID, Start: p.Start}}}); err != nil {
 		t.Fatal(err)
 	}
-	bs, err := findBlockers(state, phaseM2)
+	bs, err := findBlockers(state, phaseM2, soon())
 	if err != nil || len(bs) != 1 || bs[0].Orphan {
 		t.Fatalf("findBlockers = %+v %v", bs, err)
 	}

@@ -88,7 +88,7 @@ func TestScanUnpooledCountsStraysQueuesAndOrphans(t *testing.T) {
 	}
 
 	before := machineSnapshot(t, state)
-	us, err := ScanUnpooled(state, false)
+	us, err := ScanUnpooled(state, false, soon())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestScanUnpooledCountsStraysQueuesAndOrphans(t *testing.T) {
 		t.Fatal("a scan without clean must delete nothing")
 	}
 
-	if _, err := ScanUnpooled(state, true); err != nil {
+	if _, err := ScanUnpooled(state, true, soon()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(batch, "done")); !os.IsNotExist(err) {
@@ -131,7 +131,7 @@ func TestCleanStraysRemovesAnEmptyBatchButNotStrays(t *testing.T) {
 	state, _ := migrated(t)
 	batch := filepath.Join(StraysDir(state), "1")
 	holdTicket(t, batch, "k", 1234, "x")()
-	if err := CleanStrays(state); err != nil {
+	if err := CleanStrays(state, soon()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(batch); !os.IsNotExist(err) {

@@ -150,23 +150,23 @@ func TestProbeLaneFindsLiveTicketsAndCreatesNothing(t *testing.T) {
 	}
 
 	before := treeSnapshot(t, root)
-	live, err := ProbeLane(q.Dir)
+	live, err := ProbeLane(q.Dir, soon())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(live) != 1 || live[0].Name != en.Name() || live[0].PID() != os.Getpid() || live[0].Ticket.CommandString() != "zig build" {
 		t.Fatalf("ProbeLane = %+v", live)
 	}
-	if p := ProbeTicket(q.Dir, en.Name()); !p.Live {
+	if p := ProbeTicket(q.Dir, en.Name(), soon()); !p.Live {
 		t.Fatal("ProbeTicket: the enrolled ticket is live")
 	}
-	if p := ProbeTicket(q.Dir, dead); p.Live {
+	if p := ProbeTicket(q.Dir, dead, soon()); p.Live {
 		t.Fatal("ProbeTicket: an unlocked ticket is dead")
 	}
 	sameTree(t, "a probe", before, treeSnapshot(t, root))
 
 	ghost := filepath.Join(root, "ghost")
-	if live, err := ProbeLane(ghost); err != nil || len(live) != 0 {
+	if live, err := ProbeLane(ghost, soon()); err != nil || len(live) != 0 {
 		t.Fatalf("a missing lane holds nothing: %v %v", live, err)
 	}
 	if _, err := os.Lstat(ghost); !errors.Is(err, os.ErrNotExist) {

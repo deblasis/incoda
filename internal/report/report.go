@@ -55,6 +55,10 @@ type Queue struct {
 	Holders        []lane.Entry `json:"holders"`
 	Waiting        []lane.Entry `json:"waiting"`
 	RecentEvents   []string     `json:"recent_events"`
+	// ProbeError is set when the queue could not be read because another
+	// process kept its registry lock past the view's deadline (a stopped
+	// incoda): the queue is then reported busy, never free.
+	ProbeError string `json:"probe_error,omitempty"`
 }
 
 // StateDirSource names how the state directory was resolved.
@@ -87,6 +91,9 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 	if !v.Migrated {
 		mode = lane.ReadOnly
 	}
+	// One deadline bounds every registry lock this view waits for, so a
+	// lock another process keeps for ever cannot hang status or watch.
+	deadline := time.Now().Add(lane.ViewProbeWait)
 	host, _ := os.Hostname()
 	rep := &Report{
 		Schema:         1,
@@ -123,8 +130,14 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 			rep.Queues = append(rep.Queues, qr)
 			continue
 		}
-		snap, err := q.Observe(events)
+		snap, err := q.ObserveBy(events, deadline)
 		q.Close()
+		if errors.Is(err, lane.ErrRegistryBusy) {
+			qr.EffectiveSlots = 1
+			qr.ProbeError = lane.ErrRegistryBusy.Error()
+			rep.Queues = append(rep.Queues, qr)
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot read queue %q: %w", key, err)
 		}
@@ -143,6 +156,6 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 			holders = append(holders, machine.Holder{Key: qr.Key, PID: e.Ticket.PID})
 		}
 	}
-	rep.Warnings = machine.StatusWarnings(stateDir, v, holders)
+	rep.Warnings = machine.StatusWarnings(stateDir, v, holders, deadline)
 	return rep, nil
 }

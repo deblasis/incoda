@@ -2,6 +2,7 @@ package held
 
 import (
 	"errors"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -104,7 +105,7 @@ func Verify(stateDir, raw string, chain procinfo.Chain) Result {
 // The probe itself is lane.ProbeTicket, shared with the migration's idle
 // checks; a probe that failed counts as dead here, as it did in plan 1.
 func probe(stateDir string, e Entry) (live bool, payloadPID int, perr error) {
-	p := lane.ProbeTicket(lane.LaneDir(stateDir, e.Key), e.Ticket)
+	p := lane.ProbeTicket(lane.LaneDir(stateDir, e.Key), e.Ticket, time.Now().Add(lane.PollProbeWait))
 	if !p.Live {
 		return false, 0, nil
 	}

@@ -59,7 +59,7 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	t, err := machine.FindKillTarget(dir, v, key, *pid)
+	t, err := machine.FindKillTarget(dir, v, key, *pid, lane.ProbeDeadline(time.Time{}, *wait))
 	if err != nil {
 		return exitWith(ExitState, "cannot look for pid %d on queue %q: %s", *pid, key, textsafe.Escape(err.Error()))
 	}

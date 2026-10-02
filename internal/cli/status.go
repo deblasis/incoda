@@ -109,6 +109,10 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
 		return
 	}
+	if qr.ProbeError != "" {
+		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(qr.ProbeError))
+		return
+	}
 	if qr.Free {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+"  "+p.Dim(fmt.Sprintf("(%d slot(s))", qr.EffectiveSlots)))
 	} else {

@@ -57,18 +57,25 @@ func laneDirsFor(stateDir string, ph phase) ([]string, error) {
 // findBlockers probes every ticket the phase covers and returns the live
 // ones, plus every orphan record whose tree still runs (deleting the
 // others), sorted by key then pid, one entry per key and pid.
-func findBlockers(stateDir string, ph phase) ([]Blocker, error) {
+//
+// Every lane probe waits for its registry lock only until deadline; a lane
+// whose lock another process keeps past it is an Unknown blocker.
+func findBlockers(stateDir string, ph phase, deadline time.Time) ([]Blocker, error) {
 	dirs, err := laneDirsFor(stateDir, ph)
 	if err != nil {
 		return nil, err
 	}
 	var bs []Blocker
 	for _, d := range dirs {
-		live, err := lane.ProbeLane(d)
+		live, err := lane.ProbeLane(d, deadline)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", d, err)
 		}
 		for _, p := range live {
+			if p.CannotTell() {
+				bs = append(bs, Blocker{Key: filepath.Base(d), Unknown: true, Command: lane.ErrRegistryBusy.Error()})
+				continue
+			}
 			cmd := "(unreadable ticket)"
 			if p.PayloadErr == nil && p.ProbeErr == nil {
 				cmd = p.Ticket.CommandString()
@@ -82,7 +89,9 @@ func findBlockers(stateDir string, ph phase) ([]Blocker, error) {
 	}
 	seen := map[string]bool{}
 	for _, b := range bs {
-		seen[fmt.Sprintf("%s/%d", b.Key, b.PID)] = true
+		if !b.Unknown {
+			seen[fmt.Sprintf("%s/%d", b.Key, b.PID)] = true
+		}
 	}
 	for _, o := range orphans {
 		if seen[fmt.Sprintf("%s/%d", o.Key, o.PID)] {
@@ -108,7 +117,7 @@ func waitIdle(stateDir string, lk *Lock, o Options, ph phase) error {
 	deadline := budgetDeadline(o.Start, o.Wait)
 	printed, noted := false, false
 	for {
-		bs, err := findBlockers(stateDir, ph)
+		bs, err := findBlockers(stateDir, ph, lane.ProbeDeadline(deadline, lane.PollProbeWait))
 		if err != nil {
 			return stateErrorf("cannot probe the tickets of older runs: %s", textsafe.Escape(err.Error()))
 		}
@@ -120,7 +129,7 @@ func waitIdle(stateDir string, lk *Lock, o Options, ph phase) error {
 		}
 		if !o.Chain.Skip {
 			for _, b := range bs {
-				if o.Chain.Contains(b.PID) {
+				if !b.Unknown && o.Chain.Contains(b.PID) {
 					return upgradeBlocked(b.PID, b.Key)
 				}
 			}
@@ -157,11 +166,15 @@ func upgradeTimeoutLines(bs []Blocker, ph phase, waited time.Duration) []string 
 func blockerLines(bs []Blocker, ph phase) []string {
 	var lines []string
 	for _, b := range bs {
+		if b.Unknown {
+			lines = append(lines, fmt.Sprintf("  %s: %s", b.Key, b.Command))
+			continue
+		}
 		lines = append(lines, fmt.Sprintf("  %s pid %d: %s", b.Key, b.PID, b.Command))
 	}
 	var stops []string
 	for _, b := range bs {
-		if !b.Orphan {
+		if !b.Orphan && !b.Unknown {
 			stops = append(stops, "  "+killLine(b))
 		}
 	}

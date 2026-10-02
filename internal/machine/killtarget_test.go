@@ -18,7 +18,7 @@ func TestFindKillTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := machineSnapshot(t, state)
-		tg, err := FindKillTarget(state, v, key, pid)
+		tg, err := FindKillTarget(state, v, key, pid, soon())
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -76,7 +76,7 @@ func TestFindBlockersM2(t *testing.T) {
 	holdTicket(t, q, "kungfoo-ui", 5120, "just", "ui")
 	holdTicket(t, q, "builds", 4711, "zig", "build", "-Denable-llvm")
 	holdTicket(t, q, "idle", 6000, "x")() // released at once: a dead ticket
-	bs, err := findBlockers(state, phaseM2)
+	bs, err := findBlockers(state, phaseM2, soon())
 	if err != nil {
 		t.Fatal(err)
 	}

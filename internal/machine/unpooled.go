@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/textsafe"
@@ -23,10 +24,17 @@ type Unpooled struct {
 	Command string
 	// Where is "strays/<n>", "queues" or "orphans".
 	Where string
+	// Unknown marks a lane whose registry lock another process kept past
+	// the probe's deadline (lane.ErrRegistryBusy). It counts as one held
+	// slot, the safe direction, and has no pid.
+	Unknown bool
 }
 
 // Line is how busy lines and status name it.
 func (u Unpooled) Line() string {
+	if u.Unknown {
+		return fmt.Sprintf("unpooled lane of an older incoda: %s/%s: %s", u.Where, u.Key, lane.ErrRegistryBusy)
+	}
 	return fmt.Sprintf("unpooled run by an older incoda: pid %d, key %s", u.PID, u.Key)
 }
 
@@ -47,9 +55,13 @@ func UpgradeBlocked(pid int, key string) *Refusal { return upgradeBlocked(pid, k
 // empty, and deletes orphan records whose tree is empty. It never deletes
 // strays/ itself (a re-fence may be moving a directory into it).
 //
+// Every registry lock it takes (probe and cleanup) is waited for only
+// until deadline; a lane whose lock is still held then is an Unknown
+// holder and is not cleaned.
+//
 // Call it only on a migrated layout: during a migration strays/ belongs to
 // M5 and M6.
-func ScanUnpooled(stateDir string, clean bool) ([]Unpooled, error) {
+func ScanUnpooled(stateDir string, clean bool, deadline time.Time) ([]Unpooled, error) {
 	var out []Unpooled
 	batches, err := os.ReadDir(StraysDir(stateDir))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -60,19 +72,19 @@ func ScanUnpooled(stateDir string, clean bool) ([]Unpooled, error) {
 			continue
 		}
 		batch := filepath.Join(StraysDir(stateDir), b.Name())
-		found, err := probeRoot(batch, "strays/"+b.Name())
+		found, err := probeRoot(batch, "strays/"+b.Name(), deadline)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, found...)
 		if clean {
-			if err := cleanBatch(stateDir, batch); err != nil {
+			if err := cleanBatch(stateDir, batch, deadline); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if kindOf(lane.QueuesDir(stateDir)) == aDir {
-		found, err := probeRoot(lane.QueuesDir(stateDir), "queues")
+		found, err := probeRoot(lane.QueuesDir(stateDir), "queues", deadline)
 		if err != nil {
 			return nil, err
 		}
@@ -90,7 +102,7 @@ func ScanUnpooled(stateDir string, clean bool) ([]Unpooled, error) {
 
 // probeRoot probes every lane directory in root. A directory deleted by a
 // concurrent cleaner between the listing and the probe holds nothing.
-func probeRoot(root, where string) ([]Unpooled, error) {
+func probeRoot(root, where string, deadline time.Time) ([]Unpooled, error) {
 	keys, err := lane.ListIn(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -100,7 +112,7 @@ func probeRoot(root, where string) ([]Unpooled, error) {
 	}
 	var out []Unpooled
 	for _, k := range keys {
-		live, err := lane.ProbeLane(filepath.Join(root, k))
+		live, err := lane.ProbeLane(filepath.Join(root, k), deadline)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -108,6 +120,10 @@ func probeRoot(root, where string) ([]Unpooled, error) {
 			return nil, fmt.Errorf("%s/%s: %w", where, k, err)
 		}
 		for _, p := range live {
+			if p.CannotTell() {
+				out = append(out, Unpooled{Key: k, Command: lane.ErrRegistryBusy.Error(), Where: where, Unknown: true})
+				continue
+			}
 			cmd := "(unreadable ticket)"
 			if p.PayloadErr == nil && p.ProbeErr == nil {
 				cmd = p.Ticket.CommandString()
@@ -120,8 +136,8 @@ func probeRoot(root, where string) ([]Unpooled, error) {
 
 // CleanStrays deletes every fully dead lane directory under strays/ (see
 // ScanUnpooled), without listing anything. A re-fence and doctor use it on
-// a migrated layout.
-func CleanStrays(stateDir string) error {
+// a migrated layout. Registry locks are waited for only until deadline.
+func CleanStrays(stateDir string, deadline time.Time) error {
 	batches, err := os.ReadDir(StraysDir(stateDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -131,7 +147,7 @@ func CleanStrays(stateDir string) error {
 	}
 	for _, b := range batches {
 		if b.IsDir() {
-			if err := cleanBatch(stateDir, filepath.Join(StraysDir(stateDir), b.Name())); err != nil {
+			if err := cleanBatch(stateDir, filepath.Join(StraysDir(stateDir), b.Name()), deadline); err != nil {
 				return err
 			}
 		}
@@ -142,7 +158,7 @@ func CleanStrays(stateDir string) error {
 // cleanBatch deletes every fully dead lane directory of one strays batch,
 // passing its log fragment to lanes/<K>/lane.log when that lane exists,
 // and then the batch itself if nothing is left in it.
-func cleanBatch(stateDir, batch string) error {
+func cleanBatch(stateDir, batch string, deadline time.Time) error {
 	keys, err := lane.ListIn(batch)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -151,7 +167,7 @@ func cleanBatch(stateDir, batch string) error {
 		return fmt.Errorf("%s: %w", batch, err)
 	}
 	for _, k := range keys {
-		_, err := lane.RemoveIfIdle(filepath.Join(batch, k), func(logPath string) {
+		_, err := lane.RemoveIfIdle(filepath.Join(batch, k), deadline, func(logPath string) {
 			if lane.Exists(stateDir, k) {
 				appendFragment(logPath, lane.LogPath(lane.LaneDir(stateDir, k)))
 			}
@@ -175,7 +191,9 @@ func dedupeUnpooled(us []Unpooled) []Unpooled {
 	})
 	var out []Unpooled
 	for i, u := range us {
-		if i > 0 && u.Key == us[i-1].Key && u.PID == us[i-1].PID {
+		// Unknown lanes (pid 0) are kept apart: two batches holding the
+		// same key are two slots.
+		if i > 0 && !u.Unknown && u.Key == us[i-1].Key && u.PID == us[i-1].PID {
 			continue
 		}
 		out = append(out, u)
