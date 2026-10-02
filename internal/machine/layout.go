@@ -35,10 +35,11 @@ func kindOf(path string) entryKind {
 	}
 }
 
-// layoutState is what lstat finds at the five names the migration uses.
+// layoutState is what lstat finds at the names the migration uses
+// (machine.json is read, not stat'ed, by every caller).
 type layoutState struct {
-	Queues, QueuesNew     entryKind
-	Lanes, Plan, Registry bool
+	Queues, QueuesNew entryKind
+	Lanes, Plan       bool
 }
 
 func scanLayout(stateDir string) layoutState {
@@ -47,7 +48,6 @@ func scanLayout(stateDir string) layoutState {
 		QueuesNew: kindOf(fenceNewPath(stateDir)),
 		Lanes:     kindOf(lane.LanesDir(stateDir)) == aDir,
 		Plan:      kindOf(planPath(stateDir)) == aFile,
-		Registry:  kindOf(RegistryPath(stateDir)) != absent,
 	}
 }
 
@@ -146,11 +146,24 @@ func Inspect(stateDir string) (View, error) {
 			}
 			return View{}, registryLostError()
 		}
-		v := View{Root: lane.QueuesDir(stateDir), Banner: banner(stateDir)}
-		if st.Queues != aDir && st.Lanes {
-			v.Root = lane.LanesDir(stateDir)
-		}
-		return v, nil
+		return View{Root: unmigratedRoot(stateDir, st), Banner: banner(stateDir)}, nil
+	}
+}
+
+// unmigratedRoot is where the lanes of a layout without machine.json are
+// right now. Before the fence it is the old queues/. Once the fence is a
+// file the lanes are in queues.new/ (row 3: swapped, not yet renamed) or in
+// lanes/ (every later row; in row 6 lanes/ does not exist yet and holds
+// nothing). Reading the fence file as a lanes root would list nothing and
+// report a lane free while an older run still holds it.
+func unmigratedRoot(stateDir string, st layoutState) string {
+	switch {
+	case st.Queues == aFile && st.QueuesNew == aDir:
+		return fenceNewPath(stateDir)
+	case st.Queues == aDir:
+		return lane.QueuesDir(stateDir)
+	default:
+		return lane.LanesDir(stateDir)
 	}
 }
 

@@ -569,3 +569,68 @@ func TestCommitRefencesWhenTheFenceVanishedDuringM5(t *testing.T) {
 		t.Fatalf("machine.log:\n%s", b)
 	}
 }
+
+// TestInspectRootFollowsTheLanesThroughAMigration: a read-only command
+// must read the lanes wherever the migration has put them, never the
+// fence file. In row 3 (swapped, not yet renamed) they are in queues.new/;
+// in row 6 (a fence without lanes/) there are none yet; in every other
+// row with the fence placed they are in lanes/.
+func TestInspectRootFollowsTheLanesThroughAMigration(t *testing.T) {
+	fence := func(t *testing.T, s string) {
+		if err := os.WriteFile(lane.QueuesDir(s), []byte(FenceText), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s string)
+		row   Row
+		root  func(s string) string
+	}{
+		{"row 1, not started", func(t *testing.T, s string) {}, RowNotStarted, lane.QueuesDir},
+		{"row 3, swapped", func(t *testing.T, s string) {
+			if err := writePlan(s); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(lane.QueuesDir(s), fenceNewPath(s)); err != nil {
+				t.Fatal(err)
+			}
+			fence(t, s)
+		}, RowSwapped, fenceNewPath},
+		{"row 6, a fence without lanes/", func(t *testing.T, s string) {
+			if err := os.RemoveAll(lane.QueuesDir(s)); err != nil {
+				t.Fatal(err)
+			}
+			fence(t, s)
+		}, RowFenceNoLanes, lane.LanesDir},
+		{"row 7, resume at M5", func(t *testing.T, s string) {
+			if err := writePlan(s); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(lane.QueuesDir(s), lane.LanesDir(s)); err != nil {
+				t.Fatal(err)
+			}
+			fence(t, s)
+		}, RowResume, lane.LanesDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			seedOld(t, state)
+			tc.setup(t, state)
+			if got := scanLayout(state).row(); got != tc.row {
+				t.Fatalf("classified as %v, want %v", got, tc.row)
+			}
+			before := machineSnapshot(t, state)
+			v, err := Inspect(state)
+			if err != nil || v.Migrated || v.Root != tc.root(state) {
+				t.Fatalf("Inspect = %+v %v, want root %s", v, err, tc.root(state))
+			}
+			if fmt.Sprint(before) != fmt.Sprint(machineSnapshot(t, state)) {
+				t.Fatal("Inspect wrote to the state directory")
+			}
+			if tc.row == RowSwapped && !lane.ExistsIn(v.Root, "alpha") {
+				t.Fatal("the lanes in queues.new/ must be visible")
+			}
+		})
+	}
+}
