@@ -216,7 +216,7 @@ func TestEmptyDirRaceSendsTheFirstOldRunToStrays(t *testing.T) {
 	if !released.Load() {
 		t.Fatal("the migration committed while the early run was live")
 	}
-	if !strings.Contains(out, "early pid 999998: make") || !strings.Contains(out, "incoda kill --queue early --pid 999998 --reason 'incoda upgrade'\n") {
+	if !strings.Contains(out, "early pid 999998: make") || !strings.Contains(out, KillLine("early", 999998, UpgradeReason, false)+"\n") {
 		t.Fatalf("M5 must name the early run with its stop line:\n%s", out)
 	}
 	assertMigrated(t, state, false)

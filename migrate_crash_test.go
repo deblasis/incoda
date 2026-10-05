@@ -233,7 +233,7 @@ func TestFenceRacesSendANewQueuesDirToStrays(t *testing.T) {
 			if err := os.WriteFile(pause, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			waitForText(t, &errBuf, "incoda:   incoda kill --queue late --pid 999998 --reason 'incoda upgrade'\n")
+			waitForText(t, &errBuf, "incoda:   "+machine.KillLine("late", 999998, machine.UpgradeReason, false)+"\n")
 			if !machine.FencePlaced(state) {
 				t.Fatal("the fence must be in place while M5 waits")
 			}

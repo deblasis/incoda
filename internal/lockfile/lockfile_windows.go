@@ -13,37 +13,33 @@ import (
 // process can unlink the ticket once its owner is gone. Without share-delete an
 // open handle on Windows makes the path undeletable, which would reintroduce
 // exactly the stale-state problem we are removing.
+//
+// A handle opened for writing asks Windows to update the parent directory's
+// mtime on open, which makes a read-only command that merely opens a lane's
+// registry lock look like it wrote to the state directory. openExistingLockable
+// therefore asks for read access only.
 func openLockable(path string) (*os.File, error) {
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	h, err := windows.CreateFile(
-		p,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_ALWAYS,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		0,
-	)
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
-	}
-	return os.NewFile(uintptr(h), path), nil
+	return openWindows(path, windows.OPEN_ALWAYS, windows.GENERIC_READ|windows.GENERIC_WRITE)
 }
 
+// openExistingLockable opens without write access: nothing writes through this
+// handle (only Truncate does, and no read-only caller does), and asking for
+// GENERIC_WRITE makes Windows update the parent directory's mtime on open.
 func openExistingLockable(path string) (*os.File, error) {
+	return openWindows(path, windows.OPEN_EXISTING, windows.GENERIC_READ)
+}
+
+func openWindows(path string, disposition, access uint32) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
 	h, err := windows.CreateFile(
 		p,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
-		windows.OPEN_EXISTING,
+		disposition,
 		windows.FILE_ATTRIBUTE_NORMAL,
 		0,
 	)
