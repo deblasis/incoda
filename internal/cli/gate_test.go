@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func fakeSleep(cur *time.Time) func(time.Duration) error {
 func TestGateWindowResetsOnHot(t *testing.T) {
 	cur := time.Now()
 	sample, _ := fakeSampler([]float64{10, 10, 90, 10, 10, 10}, nil, &cur, 10*time.Second)
-	cfg := GateConfig{MaxCPU: 30, IdleFor: 20 * time.Second, Poll: time.Millisecond}
+	cfg := GateConfig{MaxCPU: 30, IdleFor: 20 * time.Second, Poll: time.Millisecond, Sleep: fakeSleep(&cur)}
 	res, err := waitForIdle(context.Background(), cfg, sample,
 		func() time.Time { return cur },
 		func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
@@ -57,7 +58,7 @@ func TestGateWindowResetsOnHot(t *testing.T) {
 func TestGateDurZeroSingleSample(t *testing.T) {
 	cur := time.Now()
 	sample, _ := fakeSampler([]float64{10}, nil, &cur, time.Millisecond)
-	cfg := GateConfig{MaxCPU: 30, IdleFor: 0, Poll: time.Millisecond}
+	cfg := GateConfig{MaxCPU: 30, IdleFor: 0, Poll: time.Millisecond, Sleep: fakeSleep(&cur)}
 	res, err := waitForIdle(context.Background(), cfg, sample,
 		func() time.Time { return cur },
 		func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
@@ -351,7 +352,7 @@ func TestGateImmediatePassOnIdle(t *testing.T) {
 	// waitForIdle with the shared budget deadline.
 	cur := time.Now()
 	sample, calls := fakeSampler([]float64{5}, nil, &cur, time.Millisecond)
-	cfg := GateConfig{MaxCPU: 30, IdleFor: 0, Poll: time.Millisecond}
+	cfg := GateConfig{MaxCPU: 30, IdleFor: 0, Poll: time.Millisecond, Sleep: fakeSleep(&cur)}
 	_, err := waitForIdle(context.Background(), cfg, sample,
 		func() time.Time { return cur },
 		func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
@@ -398,6 +399,7 @@ func TestGateFlagValidation(t *testing.T) {
 		{"max-cpu negative", []string{"run", "--queue", "k", "--max-cpu", "-5", "--", "true"}, "--max-cpu", ""},
 		{"max-cpu NaN", []string{"run", "--queue", "k", "--max-cpu", "NaN", "--", "true"}, "--max-cpu", ""},
 		{"max-cpu +Inf", []string{"run", "--queue", "k", "--max-cpu", "+Inf", "--", "true"}, "--max-cpu", ""},
+		{"max-cpu over 100", []string{"run", "--queue", "k", "--max-cpu", "101", "--", "true"}, "--max-cpu", ""},
 		{"negative idle-for", []string{"run", "--queue", "k", "--max-cpu", "30", "--idle-for", "-5s", "--", "true"}, "--idle-for", ""},
 		{"dur exceeds wait", []string{"run", "--queue", "k", "--wait", "30s", "--max-cpu", "30", "--idle-for", "2m", "--", "true"}, "--idle-for", ""},
 		{"overflow idle-for", []string{"run", "--queue", "k", "--max-cpu", "30", "--idle-for", "99999999999", "--", "true"}, "--idle-for", ""},
@@ -416,5 +418,88 @@ func TestGateFlagValidation(t *testing.T) {
 				t.Fatalf("stderr must not mention %q:\n%s", tc.absent, stderr.String())
 			}
 		})
+	}
+}
+
+func TestGateUnsupportedOS(t *testing.T) {
+	for _, tc := range []struct {
+		goos string
+		want bool
+	}{
+		{"linux", false},
+		{"darwin", false},
+		{"windows", false},
+		{"plan9", true},
+		{"js", true},
+		{"wasip1", true},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			if got := gateUnsupportedOS(tc.goos); got != tc.want {
+				t.Fatalf("gateUnsupportedOS(%q)=%v, want %v", tc.goos, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGateSleepErrorPropagates(t *testing.T) {
+	sentinel := errors.New("sleep boom")
+	sleepErr := func(cur *time.Time) func(time.Duration) error {
+		return func(d time.Duration) error {
+			*cur = cur.Add(d)
+			return sentinel
+		}
+	}
+	t.Run("idle sample", func(t *testing.T) {
+		cur := time.Now()
+		sample, _ := fakeSampler([]float64{10}, nil, &cur, time.Millisecond)
+		cfg := GateConfig{MaxCPU: 30, IdleFor: time.Second, Poll: time.Millisecond, Sleep: sleepErr(&cur)}
+		_, err := waitForIdle(context.Background(), cfg, sample,
+			func() time.Time { return cur },
+			func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
+			func() error { return nil },
+			nil, cur.Add(time.Minute))
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("sleep error on the idle path must propagate: %v", err)
+		}
+	})
+	t.Run("error sample", func(t *testing.T) {
+		cur := time.Now()
+		sample, _ := fakeSampler([]float64{0}, map[int]bool{0: true}, &cur, time.Millisecond)
+		cfg := GateConfig{MaxCPU: 30, IdleFor: time.Second, Poll: time.Millisecond, Sleep: sleepErr(&cur)}
+		_, err := waitForIdle(context.Background(), cfg, sample,
+			func() time.Time { return cur },
+			func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
+			func() error { return nil },
+			nil, cur.Add(time.Minute))
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("sleep error on the unavailable path must propagate: %v", err)
+		}
+	})
+}
+
+// A gated --quiet run stays silent on stderr but still logs gate-wait to
+// lane.log: the log is the record, quiet only mutes chatter.
+func TestGateQuietStillLogsWait(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /usr/bin/true")
+	}
+	dir := t.TempDir()
+	t.Setenv("INCODA_DIR", dir)
+	if code := Main([]string{"config", "q-gate-quiet", "--pool", "tests"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("link: %d", code)
+	}
+	var stderr bytes.Buffer
+	begin := time.Now()
+	if code := Main([]string{"run", "--queue", "q-gate-quiet", "--max-cpu", "100", "--idle-for", "1s", "--quiet", "--", "true"}, io.Discard, &stderr); code != 0 {
+		t.Fatalf("gated quiet run exited %d:\n%s", code, stderr.String())
+	}
+	if d := time.Since(begin); d > 30*time.Second {
+		t.Fatalf("took %s", d)
+	}
+	if log := laneLog(dir, "q-gate-quiet"); !strings.Contains(log, "event=gate-wait") {
+		t.Fatalf("quiet gate must still log gate-wait:\n%s", log)
+	}
+	if strings.Contains(stderr.String(), "waiting for idle") {
+		t.Fatalf("quiet must suppress gate chatter on stderr:\n%s", stderr.String())
 	}
 }

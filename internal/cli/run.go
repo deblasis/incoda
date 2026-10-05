@@ -552,7 +552,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					"still waiting for idle (cpu>=%.0f%% for %s) after %s. Do NOT bypass the lane; surface the wait and coordinate instead",
 					gate.MaxCPU, gate.IdleFor, wait.d)
 			}
-			if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+			if gateUnsupportedOS(runtime.GOOS) {
 				// No CPU readout on this OS: say so loudly (past --quiet),
 				// log the pass, and sample nothing.
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
@@ -884,6 +884,17 @@ func waitBudget(d time.Duration) string {
 		return ""
 	default:
 		return fmt.Sprintf(", limit %s", d)
+	}
+}
+
+// gateUnsupportedOS reports whether the load gate has no CPU readout on
+// the named GOOS. Extracted for tests; the call site passes runtime.GOOS.
+func gateUnsupportedOS(goos string) bool {
+	switch goos {
+	case "linux", "darwin", "windows":
+		return false
+	default:
+		return true
 	}
 }
 
