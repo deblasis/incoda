@@ -70,6 +70,23 @@ func TestGateTransientErrorPauses(t *testing.T) {
 	}
 }
 
+func TestGateImmediatePassOnIdle(t *testing.T) {
+	// End-to-end through Main with a stubbed sampler is heavy; this pins the
+	// wiring contract instead: GateConfig derived from flags must reach
+	// waitForIdle with the shared budget deadline.
+	cur := time.Now()
+	sample, calls := fakeSampler([]float64{5}, nil, &cur, time.Millisecond)
+	cfg := GateConfig{MaxCPU: 30, IdleFor: 0, Poll: time.Millisecond}
+	_, err := waitForIdle(context.Background(), cfg, sample,
+		func() time.Time { return cur },
+		func() (lane.KillRequest, bool) { return lane.KillRequest{}, false },
+		func() error { return nil },
+		nil, cur.Add(time.Second))
+	if err != nil || *calls != 1 {
+		t.Fatalf("idle gate must pass on first sample: calls=%d err=%v", *calls, err)
+	}
+}
+
 func TestGateFlagValidation(t *testing.T) {
 	t.Setenv("INCODA_DIR", t.TempDir())
 	for _, tc := range []struct {

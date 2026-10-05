@@ -567,6 +567,9 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	if len(en.ticket.Via) > 0 {
 		extra += " via=" + strings.Join(en.ticket.Via, ",")
 	}
+	if en.ticket.MaxCPUPct > 0 {
+		extra += fmt.Sprintf(" maxcpu=%.1f idlefor=%s", en.ticket.MaxCPUPct, time.Duration(en.ticket.IdleForNanos).String())
+	}
 	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), textsafe.LogValue(en.ticket.CommandString()))
 	return en, nil
 }
@@ -709,6 +712,22 @@ func (e *Enrollment) MarkAcquired() {
 	b, _ := json.Marshal(e.ticket)
 	_ = e.q.withRegistry(func() error { return e.lock.Truncate(b) })
 	e.q.Logf("queue=%s event=acquire pid=%d%s cmd=%s", e.q.Key, e.ticket.PID, e.ticket.attribution(), textsafe.LogValue(e.ticket.CommandString()))
+}
+
+// MarkGateStart records when the load-gate wait began, persisting it in the
+// ticket payload under the registry lock like MarkAcquired.
+func (e *Enrollment) MarkGateStart() {
+	e.ticket.GateStartNano = time.Now().UnixNano()
+	b, _ := json.Marshal(e.ticket)
+	_ = e.q.withRegistry(func() error { return e.lock.Truncate(b) })
+}
+
+// MarkGateDone records when the load-gate wait ended, persisting it in the
+// ticket payload under the registry lock like MarkAcquired.
+func (e *Enrollment) MarkGateDone() {
+	e.ticket.GateDoneNano = time.Now().UnixNano()
+	b, _ := json.Marshal(e.ticket)
+	_ = e.q.withRegistry(func() error { return e.lock.Truncate(b) })
 }
 
 // ForceRelease deletes every ticket in the queue. It refuses while any live
