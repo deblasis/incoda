@@ -40,7 +40,7 @@ func usagef(format string, args ...any) error {
 const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI test runs)
 
 usage:
-  incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
+  incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once | --plain]
   incoda queues

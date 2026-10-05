@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"sort"
@@ -42,6 +43,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
 	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
 	exclusive := fs.Bool("exclusive", false, "hold the queue alone: the effective slot count is 1 while this run is live")
+	maxCPU := fs.Float64("max-cpu", 0, "start only after whole-machine CPU% stays below this percent for --idle-for (requires --idle-for)")
+	idleFor := &waitValue{}
+	fs.Var(idleFor, "idle-for", "how long CPU must stay below --max-cpu before starting: a Go duration (2m) or bare seconds; 0 means one below-threshold sample passes")
 	reason := fs.String("reason", "", "free-text note shown in status")
 	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "who queued this (a session id, a worktree name); defaults to $INCODA_OWNER")
 	poll := fs.Duration("poll", 500*time.Millisecond, "how often to re-check position while queued")
@@ -53,7 +57,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
 	fs.Var(pool, "pools", "alias of --pool")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -66,6 +70,38 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	if *slots < 0 {
 		return usagef("--slots must be at least 1, or 0 for the queue's default, got %d", *slots)
 	}
+	gate := GateConfig{Poll: *poll, Notify: 60 * time.Second}
+	// Explicit --max-cpu 0 must be rejected, so givenness comes from Visit:
+	// *maxCPU == 0 alone cannot distinguish "not given" from "--max-cpu 0".
+	maxCPUGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-cpu" {
+			maxCPUGiven = true
+		}
+	})
+	if idleFor.set && !maxCPUGiven {
+		return usagef("--idle-for needs --max-cpu: pass both, e.g. --max-cpu 30 --idle-for 2m")
+	}
+	if maxCPUGiven {
+		if math.IsNaN(*maxCPU) || math.IsInf(*maxCPU, 0) || *maxCPU <= 0 || *maxCPU > 100 {
+			return usagef("--max-cpu must be > 0 and <= 100, got %v", *maxCPU)
+		}
+		gate.MaxCPU = *maxCPU
+		if idleFor.set {
+			// waitValue keeps --wait semantics (negative bare seconds =
+			// forever), so negativity is refused here, after parsing. This
+			// also catches a gigantic bare-seconds value whose nanos
+			// product wrapped int64 into the negative range.
+			if idleFor.d < 0 {
+				return usagef("--idle-for must be >= 0, got %s", idleFor.raw)
+			}
+			gate.IdleFor = idleFor.d
+		}
+		if wait.d >= 0 && gate.IdleFor > wait.d {
+			return usagef("--idle-for %s cannot exceed the --wait budget of %s", gate.IdleFor, wait.d)
+		}
+	}
+	_ = gate // wired to the gate call site in Task 4
 	p := paletteFor(stderr, *noColor)
 	keys, err := resolveKeys(*queue)
 	if err != nil {

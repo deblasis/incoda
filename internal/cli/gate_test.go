@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -66,5 +67,25 @@ func TestGateTransientErrorPauses(t *testing.T) {
 		nil, cur.Add(time.Second))
 	if err != nil {
 		t.Fatalf("single transient error must pause, not admit or fail: %v", err)
+	}
+}
+
+func TestGateFlagValidation(t *testing.T) {
+	t.Setenv("INCODA_DIR", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"idle-for without max-cpu", []string{"run", "--queue", "k", "--idle-for", "10s", "--", "true"}},
+		{"max-cpu zero", []string{"run", "--queue", "k", "--max-cpu", "0", "--", "true"}},
+		{"max-cpu over 100", []string{"run", "--queue", "k", "--max-cpu", "101", "--", "true"}},
+		{"negative idle-for", []string{"run", "--queue", "k", "--max-cpu", "30", "--idle-for", "-5s", "--", "true"}},
+		{"dur exceeds wait", []string{"run", "--queue", "k", "--wait", "30s", "--max-cpu", "30", "--idle-for", "2m", "--", "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := Main(tc.args, io.Discard, io.Discard); code != ExitUsage {
+				t.Fatalf("got exit %d, want usage refusal (%d)", code, ExitUsage)
+			}
+		})
 	}
 }
