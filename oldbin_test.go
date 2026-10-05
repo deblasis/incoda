@@ -46,19 +46,19 @@ func oldBinary(t *testing.T, tag string) string {
 			return
 		}
 		untar.Stdin = pipe
-		var errs strings.Builder
-		archive.Stderr, untar.Stderr = &errs, &errs
+		var archiveErrs, untarErrs strings.Builder
+		archive.Stderr, untar.Stderr = &archiveErrs, &untarErrs
 		if err := untar.Start(); err != nil {
 			ob.err = err
 			return
 		}
 		if err := archive.Run(); err != nil {
 			_ = untar.Wait()
-			ob.err = fmt.Errorf("git archive %s: %v\n%s", tag, err, errs.String())
+			ob.err = fmt.Errorf("git archive %s: %v\n%s%s", tag, err, archiveErrs.String(), untarErrs.String())
 			return
 		}
 		if err := untar.Wait(); err != nil {
-			ob.err = fmt.Errorf("tar: %v\n%s", err, errs.String())
+			ob.err = fmt.Errorf("tar: %v\n%s%s", err, archiveErrs.String(), untarErrs.String())
 			return
 		}
 		ob.path = filepath.Join(filepath.Dir(incoda), "incoda-"+tag+filepath.Ext(incoda))
