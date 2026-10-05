@@ -20,7 +20,7 @@ func TestForceReleaseLiveRefusedDuringTheUpgrade(t *testing.T) {
 		release := holdOldTicket(t, filepath.Join(state, "queues"), "held", 999999, "zig", "build")
 		out, code := runIncoda(t, incoda, state, "force-release", "--queue", "held", "--live")
 		want := "incoda: upgrade-pending: force-release --live would hide a running job from the upgrade; ask the user before stopping another session's job; they can run:\n" +
-			"incoda:   incoda kill --queue held --pid 999999 --reason 'incoda upgrade'\n"
+			"incoda:   " + machine.KillLine("held", 999999, machine.UpgradeReason, false) + "\n"
 		if code != 120 || out != want {
 			t.Fatalf("want exit 120 and\n%s\ngot %d:\n%s", want, code, out)
 		}
@@ -46,7 +46,7 @@ func TestForceReleaseLiveRefusedDuringTheUpgrade(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, code := runIncoda(t, incoda, state, "force-release", "--queue", "slip", "--live")
-		if code != 120 || !strings.HasSuffix(out, "incoda:   incoda kill --queue slip --pid 999998 --reason 'incoda upgrade'\n") {
+		if code != 120 || !strings.HasSuffix(out, "incoda:   "+machine.KillLine("slip", 999998, machine.UpgradeReason, false)+"\n") {
 			t.Fatalf("want exit 120 with the stop line, got %d:\n%s", code, out)
 		}
 	})

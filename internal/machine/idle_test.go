@@ -61,14 +61,15 @@ func takeLock(t *testing.T, state string) *Lock {
 	return lk
 }
 
-const specWait = `incoda: upgrade-wait: state upgrade waits for 2 run(s) by an older incoda:
-incoda:   builds pid 4711: zig build -Denable-llvm
-incoda:   kungfoo-ui pid 5120: just ui
-incoda: ask the user before stopping another session's job; they can run:
-incoda:   incoda kill --queue builds --pid 4711 --reason 'incoda upgrade'
-incoda:   incoda kill --queue kungfoo-ui --pid 5120 --reason 'incoda upgrade'
-incoda: do not force-release them: the job keeps running and the upgrade would overlap it.
-`
+// specWait is the wait text of spec 3.3. The stop lines are rendered for the
+// user's shell, so they are built by KillLine rather than pasted as POSIX text.
+var specWait = "incoda: upgrade-wait: state upgrade waits for 2 run(s) by an older incoda:\n" +
+	"incoda:   builds pid 4711: zig build -Denable-llvm\n" +
+	"incoda:   kungfoo-ui pid 5120: just ui\n" +
+	"incoda: ask the user before stopping another session's job; they can run:\n" +
+	"incoda:   " + KillLine("builds", 4711, UpgradeReason, false) + "\n" +
+	"incoda:   " + KillLine("kungfoo-ui", 5120, UpgradeReason, false) + "\n" +
+	"incoda: do not force-release them: the job keeps running and the upgrade would overlap it.\n"
 
 func TestFindBlockersM2(t *testing.T) {
 	state := t.TempDir()
@@ -178,8 +179,8 @@ func TestWaitIdleM5ProbesLanesAndStrays(t *testing.T) {
 		"incoda: upgrade-wait: state upgrade waits for 2 run(s) by an older incoda:\n",
 		"incoda:   late pid 6002: make\n",
 		"incoda:   slip pid 6001: just gate\n",
-		"incoda:   incoda kill --queue late --pid 6002 --reason 'incoda upgrade'\n",
-		"incoda:   incoda kill --queue slip --pid 6001 --reason 'incoda upgrade'\n",
+		"incoda:   " + KillLine("late", 6002, UpgradeReason, false) + "\n",
+		"incoda:   " + KillLine("slip", 6001, UpgradeReason, false) + "\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

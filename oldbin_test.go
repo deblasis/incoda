@@ -75,6 +75,25 @@ func oldBinary(t *testing.T, tag string) string {
 	return ob.path
 }
 
+// refusedFence reports whether out is an older incoda refusing to work on a
+// state directory whose queues/ is the migration fence. The exit code is the
+// contract (122); the text is whatever the OS said about the path, which
+// differs between Unix (ENOTDIR, "not a directory") and Windows
+// (ERROR_PATH_NOT_FOUND, "cannot find the path").
+func refusedFence(out string) bool {
+	for _, s := range []string{
+		"not a directory",
+		"cannot find the path specified",
+		"cannot find the path",
+		"not a directory.",
+	} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func countTicketsIn(dir string) int {
 	entries, _ := os.ReadDir(dir)
 	n := 0
@@ -145,7 +164,12 @@ func TestOldBinariesStopAtTheFence(t *testing.T) {
 					if code := exitCodeOf(err); code != 122 {
 						t.Fatalf("%s %v (INCODA_HELD=%q): want exit 122, got %d:\n%s", tc.tag, args, held, code, out)
 					}
-					if args[0] != "doctor" && !strings.Contains(string(out), "not a directory") {
+					// The old binary refuses because the fence is a file
+					// where its layout wants a directory. Exit 122 is the
+					// contract; the wording is the OS's (ENOTDIR says "not a
+					// directory" on Unix, "cannot find the path" on
+					// Windows), so assert the refusal, not one shell's text.
+					if args[0] != "doctor" && !refusedFence(string(out)) {
 						t.Fatalf("%s %v: want the not-a-directory refusal:\n%s", tc.tag, args, out)
 					}
 				}
@@ -184,7 +208,9 @@ func TestMigrationWaitsForAnOldRun(t *testing.T) {
 			for _, want := range []string{
 				"incoda: upgrade-wait: state upgrade waits for 1 run(s) by an older incoda:\n",
 				fmt.Sprintf("incoda:   oldq pid %d: ", o.Process.Pid),
-				fmt.Sprintf("incoda:   incoda kill --queue oldq --pid %d --reason 'incoda upgrade'\n", o.Process.Pid),
+				// The stop line is rendered for the shell the user is in,
+				// so PowerShell gets quoted words (machine.KillLine).
+				fmt.Sprintf("incoda:   %s\n", machine.KillLine("oldq", o.Process.Pid, machine.UpgradeReason, false)),
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("missing %q in:\n%s", want, out)
@@ -245,7 +271,7 @@ func TestMigrationWaitsForAnOldRunThatSlipsIn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitForText(t, &mErr, fmt.Sprintf("incoda:   incoda kill --queue slip --pid %d --reason 'incoda upgrade'\n", o.Process.Pid))
+	waitForText(t, &mErr, fmt.Sprintf("incoda:   %s\n", machine.KillLine("slip", o.Process.Pid, machine.UpgradeReason, false)))
 	if !machine.FencePlaced(state) {
 		t.Fatal("M5 waits behind the fence")
 	}

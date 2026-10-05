@@ -498,7 +498,7 @@ func TestMigrationTimesOutWhileAnOldTicketIsHeld(t *testing.T) {
 	for _, want := range []string{
 		"incoda: upgrade-timeout: state upgrade still waits for 1 run(s) by an older incoda after 1s:\n",
 		"incoda:   held pid 999999: zig build\n",
-		"incoda:   incoda kill --queue held --pid 999999 --reason 'incoda upgrade'\n",
+		"incoda:   " + machine.KillLine("held", 999999, machine.UpgradeReason, false) + "\n",
 		"incoda: upgrade the older incoda on PATH; see incoda doctor\n",
 	} {
 		if !strings.Contains(out, want) {
