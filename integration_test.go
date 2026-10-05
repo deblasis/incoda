@@ -881,9 +881,6 @@ func TestChildProcessTreeDiesWithIncoda(t *testing.T) {
 	state := t.TempDir()
 	stamps := t.TempDir()
 	marker := filepath.Join(stamps, "tree.txt")
-	// A project lane refuses to run until it is linked to a pool (spec 4.1),
-	// so the victim needs a link or it never enrolls and holds nothing.
-	linkTestKeys(t, incoda, state, "tree")
 
 	victim := exec.Command(incoda, "run", "--queue", "tree", "--quiet",
 		"--", stamp, marker, "tree", "8000")

@@ -272,7 +272,7 @@ func TestKillAfterTheFenceDuringTheUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := strconv.Itoa(o.Process.Pid)
-	waitForText(t, &mErr, machine.KillLine("slip", o.Process.Pid, machine.UpgradeReason, false)+"\n")
+	waitForText(t, &mErr, "incoda kill --queue slip --pid "+pid+" --reason 'incoda upgrade'\n")
 
 	out, code := runIncoda(t, incoda, state, "kill", "--queue", "slip", "--pid", pid, "--reason", "incoda upgrade")
 	if code != 0 {

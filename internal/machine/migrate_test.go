@@ -447,12 +447,20 @@ func TestFallbackRaceSendsTheNewQueuesDirToStrays(t *testing.T) {
 	}
 }
 
+// machineSnapshot renders the files under root: path, mode, size and mtime.
+// Directory mtimes are deliberately excluded: on Windows, opening a file by
+// its long name materialises its 8.3 short-name entry, which modifies the
+// parent directory entry and bumps the parent directory's mtime with no
+// write at all, so a purely read-only Inspect would look like it wrote.
 func machineSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			return nil
 		}
 		fi, err := d.Info()
 		if err != nil {

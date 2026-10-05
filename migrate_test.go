@@ -83,12 +83,21 @@ func assertLayout2(t *testing.T, state string, seeded bool) {
 
 // treeState maps every path under root to its mode, size and modification
 // time, so a test can prove a command wrote nothing.
+// treeState renders the files under root: path, mode, size and mtime.
+// Directory mtimes are deliberately not compared. On Windows, opening a file
+// by its long name materialises its 8.3 short-name entry, which modifies the
+// parent directory entry and so bumps the parent directory's mtime with no
+// write of any kind: a read-only command then looks like it changed the state
+// directory. Files are the invariant; a directory's timestamp is not.
 func treeState(t *testing.T, root string) string {
 	t.Helper()
 	var b strings.Builder
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			return nil
 		}
 		fi, err := d.Info()
 		if err != nil {
@@ -489,7 +498,7 @@ func TestMigrationTimesOutWhileAnOldTicketIsHeld(t *testing.T) {
 	for _, want := range []string{
 		"incoda: upgrade-timeout: state upgrade still waits for 1 run(s) by an older incoda after 1s:\n",
 		"incoda:   held pid 999999: zig build\n",
-		"incoda:   " + machine.KillLine("held", 999999, machine.UpgradeReason, false) + "\n",
+		"incoda:   incoda kill --queue held --pid 999999 --reason 'incoda upgrade'\n",
 		"incoda: upgrade the older incoda on PATH; see incoda doctor\n",
 	} {
 		if !strings.Contains(out, want) {

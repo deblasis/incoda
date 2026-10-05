@@ -12,12 +12,19 @@ import (
 
 // treeSnapshot maps every path under root to its mode, size and
 // modification time, so a test can prove that nothing was written.
+// treeSnapshot records the files under root: mode, size and mtime. Directory
+// mtimes are excluded because on Windows opening a file by its long name
+// materialises its 8.3 short-name entry, which modifies the parent directory
+// entry and bumps the parent directory's mtime without writing anything.
 func treeSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			return nil
 		}
 		fi, err := d.Info()
 		if err != nil {

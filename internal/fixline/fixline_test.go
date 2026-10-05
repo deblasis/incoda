@@ -289,13 +289,8 @@ func TestPastedLineReproducesArgvAndDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Windows PowerShell 5.1 strips an embedded double quote from an argument
-	// passed to a native program, so a value carrying one is exactly the
-	// class Problem() refuses rather than one it renders (spec 9). Only the
-	// shell that can pass them on intact is exercised.
-	argv := []string{"it's", "a;b", "$(echo pwned)", "two words", "back`tick", `a\b`, `grep 'a\.b'`, "--"}
+	argv := []string{"it's", `say "hi"`, "a;b", "$(echo pwned)", "two words", "back`tick", `a\b`, `grep 'a\.b'`, "--"}
 	if Native() == POSIX {
-		argv = append([]string{`say "hi"`}, argv...)
 		argv = append(argv, `C:\Program Files\x\`, "")
 	}
 	r := Run{Queue: []string{"cap-gate"}, Pool: []string{"tests"},
