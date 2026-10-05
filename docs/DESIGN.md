@@ -336,7 +336,7 @@ interface; scripts may rely on them.
 |---|---|
 | *child's* | `run` succeeded in acquiring; this is the command's own status |
 | `120` | usage error: bad flags, missing or invalid queue key, a run on a closed queue or without a required `--reason`, or a `force-release` refused because the queue has live participants |
-| `121` | `--wait` elapsed while still queued |
+| `121` | `--wait` elapsed while still queued or waiting for idle |
 | `122` | state directory or OS file locking unusable |
 | `123` | the lane was acquired but the command could not be started |
 | `124` | the run was killed through the lane; stderr names who and why |
@@ -387,6 +387,41 @@ Gloss, Bubbles) for the `watch` screen only. Everything the lane does still
 compiles from `x/sys` alone; the screen is a leaf. Building
 requires Go 1.27.0 or newer; with `GOTOOLCHAIN=auto` (the default) the
 toolchain is fetched automatically.
+
+## Load-gated start
+
+`run --max-cpu PCT --idle-for DUR` starts a run only after whole-machine CPU
+utilization stays strictly below `PCT` for `DUR`, checked once after the FIFO
+slot is acquired. The gate is advisory: it never takes, holds, or frees a
+slot, and runs without the flags bypass it entirely.
+
+Sampling, not continuous measurement. The gate polls (every `--poll`, 500 ms
+by default); each sample diffs OS CPU counters over ~100 ms. Between polls
+the machine is unobserved, so a spike shorter than the poll interval may
+never appear in a sample.
+
+Strict `<` with reset. A sample at or above `PCT` discards the window; the
+clock restarts at the next below-threshold sample. A newcomer pays the full
+`DUR` even if the machine has been idle for longer: the window starts when
+its own gate starts, after acquire. Successive gated runs likewise each pay
+their own window, up to N×`DUR` serially in the worst case.
+
+One gate per run, after every lane is held. A multi-key run waits once, not
+once per key, and the gate shares the single `--wait` budget: expiry exits
+121 with `reason=idle-gate` in the log. On a multi-slot queue every waiter
+evaluates the same machine state, so a completed window can admit several
+gated waiters together (a herd); the slots still bound how many run.
+
+Fail-open, not fail-closed. A sample error (unreadable counters) pauses
+without disturbing the window; only five consecutive errors give up and let
+the run proceed, logged with `unavailable=true`. A killed or closed lane
+still aborts the wait; the gate adds no new way to be stuck.
+
+What the percentage cannot see. It is a share of all cores, capped at 100:
+one saturated core on a many-core box reads low, and per-core pressure is
+invisible. On Linux iowait counts as idle. A fully re-entrant run (nothing
+acquired, inside a parent lane) skips the gate: the parent's lane already
+admitted the tree.
 
 ## Release and install
 

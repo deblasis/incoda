@@ -76,8 +76,9 @@ exit codes:
   <child>  run passes the command's own exit status through unchanged
   120      usage error (bad flags, missing/invalid queue key, refused force-release),
            or a refusal such as upgrade-blocked
-  121      --wait elapsed while still queued, waiting for machine.lock, or
-           waiting for older incoda runs before the state upgrade
+  121      --wait elapsed while still queued, waiting for machine.lock,
+           waiting for older incoda runs before the state upgrade, or
+           waiting for idle
   122      state directory, machine.json or OS file locking unusable
   123      lane acquired but the command could not be started
   124      the run was killed through the lane (incoda kill); stderr says by whom and why

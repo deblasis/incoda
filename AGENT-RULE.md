@@ -48,6 +48,9 @@ incoda watch                         # live overview of every queue; enter opens
   own.
 - `--wait` defaults to 30 minutes. `--wait 0` fails immediately instead of
   queueing, which is occasionally what you want in a script.
+- A background job that can wait for a quiet machine adds
+  `--max-cpu 30 --idle-for 2m`: it starts only after whole-machine CPU stays
+  below 30% for 2 minutes, inside the same `--wait` budget.
 - Do not pass `--slots`. The queue's own config carries the number
   (`incoda config <KEY>` shows it), and on a configured queue a disagreeing
   `--slots` is refused outright.

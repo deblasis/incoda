@@ -97,7 +97,7 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. |
+| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, and a closing message that refuses every run. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
@@ -107,7 +107,8 @@ Linux) and nothing is ever resolved from the working directory.
 | `incoda doctor` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. |
 
 `run` passes the child's own exit code through unchanged. Lane-level failures
-use a separate band, documented and stable: `120` usage, `121` wait elapsed,
+use a separate band, documented and stable: `120` usage, `121` wait elapsed
+while still queued or waiting for idle,
 `122` state unusable, `123` spawn failure, `124` killed through the lane,
 `125` a kill that was not acknowledged, `130` interrupted while queueing.
 
