@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,9 +45,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
 	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
 	exclusive := fs.Bool("exclusive", false, "hold the queue alone: the effective slot count is 1 while this run is live")
-	maxCPU := fs.Float64("max-cpu", 0, "start only after whole-machine CPU% stays below this percent for --idle-for (requires --idle-for)")
+	maxCPU := fs.Float64("max-cpu", 0, "start only after whole-machine CPU% stays below this percent for --idle-for (--idle-for is optional and defaults to 0)")
 	idleFor := &waitValue{}
-	fs.Var(idleFor, "idle-for", "how long CPU must stay below --max-cpu before starting: a Go duration (2m) or bare seconds; 0 means one below-threshold sample passes")
+	fs.Var(idleFor, "idle-for", "how long CPU must stay below --max-cpu before starting (requires --max-cpu): a Go duration (2m) or bare seconds; 0 means one below-threshold sample passes")
 	reason := fs.String("reason", "", "free-text note shown in status")
 	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "who queued this (a session id, a worktree name); defaults to $INCODA_OWNER")
 	poll := fs.Duration("poll", 500*time.Millisecond, "how often to re-check position while queued")
@@ -59,6 +60,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	fs.Var(pool, "pools", "alias of --pool")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "Runs without --max-cpu bypass the load gate entirely; a gated run shares its --wait budget between queueing and waiting for idle (expiry exits 121).\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -89,6 +91,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 		gate.MaxCPU = *maxCPU
 		if idleFor.set {
+			// A bare-seconds value that fits int64 can still overflow
+			// int64 nanos when multiplied by a second; refuse it here
+			// rather than letting the window wrap. (waitValue keeps its
+			// --wait semantics; this guard is gate-local.)
+			if n, aerr := strconv.Atoi(strings.TrimSpace(idleFor.raw)); aerr == nil && int64(n) > math.MaxInt64/int64(time.Second) {
+				return usagef("--idle-for is too large to represent: %s", idleFor.raw)
+			}
 			// waitValue keeps --wait semantics (negative bare seconds =
 			// forever), so negativity is refused here, after parsing. This
 			// also catches a gigantic bare-seconds value whose nanos
@@ -98,7 +107,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 			gate.IdleFor = idleFor.d
 		}
-		if wait.d >= 0 && gate.IdleFor > wait.d {
+		// A zero --wait leaves no budget for any gate wait, so DUR > 0 is
+		// not refused here: it fails at once with 121 past the lanes.
+		if wait.d > 0 && gate.IdleFor > wait.d {
 			return usagef("--idle-for %s cannot exceed the --wait budget of %s", gate.IdleFor, wait.d)
 		}
 	}
@@ -479,7 +490,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if len(toTake) == 0 {
 			// Every lane is the parent's. Nothing to enroll, nothing to
 			// watch: a kill addressed to the parent takes this process with
-			// it.
+			// it. The gate is skipped: the parent's lane already admitted
+			// this tree (documented bypass; each lane already logged
+			// event=reenter above).
+			if gate.MaxCPU > 0 && !*quiet {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+					p.Dim("load gate skipped: running inside a parent lane (re-entrant)"))
+			}
 			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
@@ -506,6 +523,147 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// The final verify, after the last lane is acquired and before
 			// the child starts. Later link or registry changes do not
 			// affect the running job (spec 2.5).
+			atVerify(dir, "")
+			if why, err = plan.Changed(dir); err != nil {
+				rc = ExitState
+				return machineExit(err)
+			}
+		}
+		if why == "" && gate.MaxCPU > 0 {
+			// The load gate: one wait after every lane is held, before the
+			// child starts. The run holds its acquired slots throughout;
+			// the head of the lane waiting for idle blocks the lane (no
+			// overtake). The gate shares the single --wait budget encoded
+			// in deadline below; expiry exits 121 through gateGiveup.
+			var deadline time.Time
+			if wait.d >= 0 {
+				deadline = start.Add(wait.d)
+			}
+			gate.Poll = *poll
+			for _, pt := range toTake {
+				pt.en.MarkGateStart()
+			}
+			gateGiveup := func() error {
+				rc = ExitTimeout
+				for _, pt := range toTake {
+					pt.q.Logf("queue=%s event=giveup pid=%d waited=%s reason=idle-gate", pt.key, os.Getpid(), wait.d)
+				}
+				return exitWith(ExitTimeout,
+					"still waiting for idle (cpu>=%.0f%% for %s) after %s. Do NOT bypass the lane; surface the wait and coordinate instead",
+					gate.MaxCPU, gate.IdleFor, wait.d)
+			}
+			if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+				// No CPU readout on this OS: say so loudly (past --quiet),
+				// log the pass, and sample nothing.
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+					p.Yellow(fmt.Sprintf("warning: CPU readout unavailable on %s; load gate disabled for this run", runtime.GOOS)))
+				for _, pt := range toTake {
+					pt.en.MarkGateDone()
+					pt.q.Logf("queue=%s event=gate-pass pid=%d maxcpu=%.1f idlefor=%s cpu=unavailable unavailable=true reason=cpu-unavailable", pt.key, os.Getpid(), gate.MaxCPU, gate.IdleFor.String())
+				}
+			} else {
+				if wait.d == 0 && gate.IdleFor > 0 {
+					// No budget for any gate wait: sample nothing, give up
+					// at once. (DUR == 0 needs exactly one sample, which
+					// waitForIdle still takes at the deadline.)
+					return gateGiveup()
+				}
+				passed, gerr := waitForIdle(ctx, gate, sysinfo.ReadCPU, time.Now,
+					func() (lane.KillRequest, bool) {
+						for _, h := range toTake {
+							if h.en == nil {
+								continue
+							}
+							if req, ok := h.en.KillRequested(); ok {
+								return req, true
+							}
+						}
+						return lane.KillRequest{}, false
+					},
+					func() error {
+						var cerr error
+						for _, pt := range toTake {
+							// First error wins: every lane's verdict is
+							// reported, but the wait ends on the first.
+							if e := waitingCheck(pt.q.Dir, pt.key); e != nil && cerr == nil {
+								cerr = e
+							}
+						}
+						return cerr
+					},
+					func(cpu float64, waited time.Duration) {
+						cpuStr := "unavailable"
+						if cpu >= 0 {
+							cpuStr = fmt.Sprintf("%.1f", cpu)
+						}
+						for _, pt := range toTake {
+							pt.q.Logf("queue=%s event=gate-wait pid=%d cpu=%s waited=%s", pt.key, os.Getpid(), cpuStr, waited.Round(time.Second))
+						}
+						if *quiet {
+							return
+						}
+						var msg string
+						if cpu < 0 {
+							msg = fmt.Sprintf("waiting for idle: cpu unavailable (read failed), need <%.0f%% for %s, waited %s%s",
+								gate.MaxCPU, gate.IdleFor, waited.Round(time.Second), waitBudget(wait.d))
+						} else {
+							msg = fmt.Sprintf("waiting for idle: cpu %.0f%% >= %.0f%% (need <%.0f%% for %s), waited %s%s",
+								cpu, gate.MaxCPU, gate.MaxCPU, gate.IdleFor, waited.Round(time.Second), waitBudget(wait.d))
+						}
+						fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+							p.Yellow(msg))
+					}, deadline)
+				if gerr != nil {
+					if errors.Is(gerr, context.Canceled) {
+						rc = ExitInterrupt
+						return exitWith(ExitInterrupt, "interrupted while waiting for idle")
+					}
+					var killed *lane.KilledError
+					if errors.As(gerr, &killed) {
+						rc = ExitKilled
+						logKill(toTake, killed.Request)
+						return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while waiting for idle by %s: %s",
+							textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
+					}
+					var rf *machine.Refusal
+					var se *machine.StateError
+					if errors.As(gerr, &rf) || errors.As(gerr, &se) {
+						rc = ExitUsage
+						if se != nil {
+							rc = ExitState
+						}
+						return machineExit(gerr)
+					}
+					if errors.Is(gerr, lane.ErrTimeout) {
+						return gateGiveup()
+					}
+					rc = ExitState
+					return exitWith(ExitState, "%v", gerr)
+				}
+				for _, pt := range toTake {
+					pt.en.MarkGateDone()
+				}
+				if passed.Unavailable {
+					// Fail-open: the readout never answered. Say so loudly
+					// (past --quiet), log the pass without a measured cpu
+					// value, and print no success line.
+					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+						p.Yellow(fmt.Sprintf("warning: CPU readout unavailable (%d consecutive errors); load gate disabled for this run", consecutiveGateErrors)))
+					for _, pt := range toTake {
+						pt.q.Logf("queue=%s event=gate-pass pid=%d maxcpu=%.1f idlefor=%s cpu=unavailable unavailable=true reason=cpu-unavailable", pt.key, os.Getpid(), gate.MaxCPU, gate.IdleFor.String())
+					}
+				} else {
+					for _, pt := range toTake {
+						pt.q.Logf("queue=%s event=gate-pass pid=%d maxcpu=%.1f idlefor=%s cpu=%.1f unavailable=false", pt.key, os.Getpid(), gate.MaxCPU, gate.IdleFor.String(), passed.LastCPU)
+					}
+					if !*quiet {
+						fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+							p.Green(fmt.Sprintf("load gate passed (cpu %.0f%% < %.0f%% for %s)", passed.LastCPU, gate.MaxCPU, gate.IdleFor)))
+					}
+				}
+			}
+			// The gate took time; verify again before the child starts. A
+			// change replans within the same budget through the path below.
 			atVerify(dir, "")
 			if why, err = plan.Changed(dir); err != nil {
 				rc = ExitState
@@ -541,96 +699,6 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		}
 		if reg, err = runplan.ReadRegistry(dir); err != nil {
 			return machineExit(err)
-		}
-	}
-
-	if gate.MaxCPU > 0 {
-		if len(toTake) == 0 {
-			// Fully re-entrant: nothing acquired, gate skipped (documented
-			// bypass — the parent's lane already admitted this tree).
-			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-				p.Dim("load gate skipped: running inside a parent lane (re-entrant)"))
-		} else {
-			// Shared budget is encoded in deadline below (start + --wait);
-			// no separate gate clock.
-			var deadline time.Time
-			if wait.d >= 0 {
-				deadline = start.Add(wait.d)
-			}
-			gate.Poll = *poll
-			for _, pt := range toTake {
-				pt.en.MarkGateStart()
-			}
-			passed, gerr := waitForIdle(ctx, gate, sysinfo.ReadCPU, time.Now,
-				func() (lane.KillRequest, bool) {
-					for _, h := range toTake {
-						if h.en == nil {
-							continue
-						}
-						if req, ok := h.en.KillRequested(); ok {
-							return req, true
-						}
-					}
-					return lane.KillRequest{}, false
-				},
-				func() error {
-					var cerr error
-					for _, pt := range toTake {
-						if e := waitingCheck(pt.q.Dir, pt.key); e != nil {
-							cerr = e
-						}
-					}
-					return cerr
-				},
-				func(cpu float64, waited time.Duration) {
-					if *quiet {
-						return
-					}
-					fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-						p.Yellow(fmt.Sprintf("waiting for idle: cpu %.0f%% >= %.0f%% (need <%.0f%% for %s), waited %s%s",
-							cpu, gate.MaxCPU, gate.MaxCPU, gate.IdleFor, waited.Round(time.Second), waitBudget(wait.d))))
-				}, deadline)
-			if gerr != nil {
-				if errors.Is(gerr, context.Canceled) {
-					rc = ExitInterrupt
-					return exitWith(ExitInterrupt, "interrupted while waiting for idle")
-				}
-				var killed *lane.KilledError
-				if errors.As(gerr, &killed) {
-					rc = ExitKilled
-					logKill(toTake, killed.Request)
-					return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while waiting for idle by %s: %s",
-						textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
-				}
-				var rf *machine.Refusal
-				var se *machine.StateError
-				if errors.As(gerr, &rf) || errors.As(gerr, &se) {
-					rc = ExitUsage
-					if se != nil {
-						rc = ExitState
-					}
-					return machineExit(gerr)
-				}
-				if errors.Is(gerr, lane.ErrTimeout) {
-					rc = ExitTimeout
-					for _, pt := range toTake {
-						pt.q.Logf("queue=%s event=giveup pid=%d waited=%s reason=idle-gate", pt.key, os.Getpid(), wait.d)
-					}
-					return exitWith(ExitTimeout,
-						"still waiting for idle (cpu>=%.0f%% for %s) after %s. Do NOT bypass the lane; surface the wait and coordinate instead",
-						gate.MaxCPU, gate.IdleFor, wait.d)
-				}
-				rc = ExitState
-				return exitWith(ExitState, "%v", gerr)
-			}
-			for _, pt := range toTake {
-				pt.en.MarkGateDone()
-				pt.q.Logf("queue=%s event=gate-pass pid=%d maxcpu=%.1f idlefor=%s cpu=%.1f unavailable=%v", pt.key, os.Getpid(), gate.MaxCPU, gate.IdleFor.String(), passed.LastCPU, passed.Unavailable)
-			}
-			if !*quiet {
-				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-					p.Green(fmt.Sprintf("load gate passed (cpu %.0f%% < %.0f%% for %s)", passed.LastCPU, gate.MaxCPU, gate.IdleFor)))
-			}
 		}
 	}
 

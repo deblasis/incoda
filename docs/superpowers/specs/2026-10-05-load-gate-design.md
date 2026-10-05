@@ -27,17 +27,20 @@ point-in-time admission, not a load guarantee (no cgroups, no throttle).
   sample passes.
 - `--idle-for` without `--max-cpu`: exit 120. `--max-cpu` alone defaults
   `--idle-for 0`.
-- `DUR > --wait` with finite `--wait`: exit 120 at parse (even zero slot
-  wait could never satisfy it). Infinite `--wait` (`< 0`): gate unbounded.
+- `DUR > --wait` with positive finite `--wait`: exit 120 at parse (the
+  window could never fit). Infinite `--wait` (`< 0`): gate unbounded.
   `--wait 0` with `DUR > 0`: immediate 121 without sampling (no budget for
-  any wait); `DUR = 0`: exactly one sample, then run or 121.
+  any wait); `DUR = 0`: exactly one sample even at the spent deadline (the
+  deadline is enforced only after the first sample), then run or 121.
 - Help: `run -h` documents both flags, the bypass, and that 121 covers
   FIFO + gate waits. Root usage exit-code line updated.
 
 ## Mechanism
 
 - Single gate after ALL lanes are acquired, before the final
-  `plan.Changed` and child start. Not per lane. Fully re-entrant runs
+  `plan.Changed` and child start. Not per lane. The gate takes time, so
+  `plan.Changed` runs again after the gate passes; a change replans within
+  the same budget like any other verify point. Fully re-entrant runs
   (every key inherited) skip the gate and log it; partial re-entry still
   gates once at the end.
 - Gate loop predicate order per poll (same as `Acquire`): own
@@ -63,9 +66,10 @@ point-in-time admission, not a load guarantee (no cgroups, no throttle).
 - Errors: failure = `!HaveUsage || Err != ""`. A stale `lastPct` returned
   with `HaveUsage=true` counts as a valid sample. A transient failure
   pauses (sample skipped, window preserved) and retries within budget. Only
-  after 5 consecutive failures — or structurally unsupported GOOS — does it
-  warn loudly and proceed (`event=gate-pass reason=cpu-unavailable`),
-  bypassing `--quiet` like the slots warning. Unsupported OS is documented
+  after 5 consecutive failures does it warn loudly and proceed
+  (`event=gate-pass reason=cpu-unavailable`), bypassing `--quiet` like the
+  slots warning. A structurally unsupported GOOS takes the same loud-proceed
+  path without sampling at all. Unsupported OS is documented
   as gating-disabled.
 - CPU% limits documented: all-cores normalization (30% of 32 cores ≈ 9.6
   busy cores); Linux iowait counts as idle; single-core saturation reads
@@ -75,12 +79,15 @@ point-in-time admission, not a load guarantee (no cgroups, no throttle).
 
 ## State, log, status
 
-- Ticket: additive numeric fields only (`max_cpu_pct`, `idle_for_ns`,
+- Ticket: additive numeric fields only (`max_cpu_pct`, `idle_for_nanos`,
   `gate_start_nano`/`gate_done_nano`), `omitempty`; `effectiveSlots` and
   `SlotsDisagree` ignore them. Never raw flag strings.
-- Logs (`textsafe`-escaped): `event=gate-wait` (first + every 60 s Notify,
+- Logs (`textsafe`-escaped, always written even under `--quiet`):
+  `event=gate-wait` (first + every 60 s Notify; only the stderr line is
   suppressed under `--quiet`) and `event=gate-pass` with
-  `maxcpu=`/`idlefor=`/`cpu=`; expiry reuses `event=giveup`.
+  `maxcpu=`/`idlefor=`/`cpu=` (`cpu=unavailable` plus
+  `reason=cpu-unavailable` on the fail-open path, which prints a warning
+  instead of the success line); expiry reuses `event=giveup`.
 - `MarkAcquired` stays at FIFO acquire (`Holding` untouched); gate
   timestamps let `status`/`watch` split `held` vs `gate-wait`. `dur=`
   includes gate wait. Mixed-gate lanes get a `status` warning line.

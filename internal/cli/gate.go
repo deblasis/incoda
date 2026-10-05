@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
@@ -17,6 +16,9 @@ type GateConfig struct {
 	IdleFor time.Duration
 	Poll    time.Duration
 	Notify  time.Duration
+	// Sleep waits between polls. Nil means a real wait honoring ctx and the
+	// deadline; tests inject a fake that advances a fake clock.
+	Sleep func(d time.Duration) error
 }
 
 // GatePassed records how the gate was satisfied (for logs/status).
@@ -36,14 +38,23 @@ const consecutiveGateErrors = 5
 // killed() reports (returns *lane.KilledError), or check() fails (returned
 // as is). onWait fires on the first poll and every Notify. Sample errors
 // pause (window preserved); only consecutiveGateErrors in a row fail open.
+//
+// A spent deadline admits no sample when IdleFor > 0 (instant ErrTimeout),
+// but with IdleFor 0 the first sample still runs: one below-threshold sample
+// passes even at the deadline.
 func waitForIdle(ctx context.Context, cfg GateConfig, sample func() sysinfo.CPU, now func() time.Time, killed func() (lane.KillRequest, bool), check func() error, onWait func(cpu float64, waited time.Duration), deadline time.Time) (GatePassed, error) {
 	if cfg.Poll <= 0 {
 		cfg.Poll = 500 * time.Millisecond
+	}
+	sleep := cfg.Sleep
+	if sleep == nil {
+		sleep = func(d time.Duration) error { return sleepCtx(ctx, d, now, deadline) }
 	}
 	start := now()
 	var windowStart time.Time
 	var haveWindow bool
 	errs := 0
+	samples := 0
 	notified := false
 	var lastNotify time.Time
 	var lastCPU float64
@@ -61,10 +72,11 @@ func waitForIdle(ctx context.Context, cfg GateConfig, sample func() sysinfo.CPU,
 				return GatePassed{}, err
 			}
 		}
-		if !deadline.IsZero() && !now().Before(deadline) {
+		if !deadline.IsZero() && !now().Before(deadline) && (cfg.IdleFor != 0 || samples != 0) {
 			return GatePassed{}, lane.ErrTimeout
 		}
 		c := sample()
+		samples++
 		if !c.HaveUsage || c.Err != "" {
 			errs++
 			if errs >= consecutiveGateErrors {
@@ -76,7 +88,7 @@ func waitForIdle(ctx context.Context, cfg GateConfig, sample func() sysinfo.CPU,
 				notified = true
 				lastNotify = now()
 			}
-			if err := sleepCtx(ctx, cfg.Poll, now, deadline); err != nil {
+			if err := sleep(cfg.Poll); err != nil {
 				return GatePassed{}, err
 			}
 			continue
@@ -99,7 +111,7 @@ func waitForIdle(ctx context.Context, cfg GateConfig, sample func() sysinfo.CPU,
 			notified = true
 			lastNotify = now()
 		}
-		if err := sleepCtx(ctx, cfg.Poll, now, deadline); err != nil {
+		if err := sleep(cfg.Poll); err != nil {
 			return GatePassed{}, err
 		}
 	}
@@ -124,5 +136,3 @@ func sleepCtx(ctx context.Context, d time.Duration, now func() time.Time, deadli
 		return nil
 	}
 }
-
-var _ = errors.Is

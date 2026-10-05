@@ -172,6 +172,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 			if e.Ticket.Reason != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("reason:"), e.Ticket.Reason)
 			}
+			if e.Ticket.MaxCPUPct > 0 {
+				fmt.Fprintf(w, "        %s %s\n", p.Dim("gate:"), gateText(e.Ticket))
+			}
 			if e.PayloadError != "" {
 				fmt.Fprintf(w, "  %s\n", p.Red(fmt.Sprintf("      ticket unreadable: %s", e.PayloadError)))
 			}

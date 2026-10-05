@@ -392,13 +392,15 @@ toolchain is fetched automatically.
 
 `run --max-cpu PCT --idle-for DUR` starts a run only after whole-machine CPU
 utilization stays strictly below `PCT` for `DUR`, checked once after the FIFO
-slot is acquired. The gate is advisory: it never takes, holds, or frees a
-slot, and runs without the flags bypass it entirely.
+slot is acquired. The gate is advisory: it never takes or frees a
+slot — the run holds its acquired slot(s) while the gate waits — and runs
+without the flags bypass it entirely.
 
 Sampling, not continuous measurement. The gate polls (every `--poll`, 500 ms
-by default); each sample diffs OS CPU counters over ~100 ms. Between polls
-the machine is unobserved, so a spike shorter than the poll interval may
-never appear in a sample.
+by default). Only the cold first sample of the process establishes its
+baseline over ~100 ms; steady-state samples diff OS CPU counters spanning
+~one poll interval. Between polls the machine is unobserved, so a spike
+shorter than the poll interval may never appear in a sample.
 
 Strict `<` with reset. A sample at or above `PCT` discards the window; the
 clock restarts at the next below-threshold sample. A newcomer pays the full
