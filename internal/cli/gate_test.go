@@ -373,7 +373,10 @@ func TestPaintEventGateVerbs(t *testing.T) {
 		t.Fatalf("gate-wait must survive paintEvent: %q", got)
 	}
 	t.Setenv("CLICOLOR_FORCE", "1")
-	p := colorize.For(io.Discard)
+	// Forced, not For: For(io.Discard) is Plain on Windows (no console to
+	// prepare), which would assert platform console behavior instead of the
+	// verb-to-color mapping this test owns.
+	p := colorize.Forced()
 	if got := paintEvent(p, passLine); !strings.Contains(got, "\x1b[32mevent=gate-pass") {
 		t.Fatalf("gate-pass must paint green: %q", got)
 	}

@@ -26,6 +26,10 @@ import (
 // Plain is a palette that never paints.
 var Plain = Palette{}
 
+// Forced returns a palette with painting enabled, for tests that assert a
+// color mapping without a terminal. Production code uses For.
+func Forced() Palette { return Palette{enabled: true} }
+
 // Palette paints strings with SGR attributes, or returns them unchanged when
 // color is off. A Palette is immutable and safe to share.
 type Palette struct {
