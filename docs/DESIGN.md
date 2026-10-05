@@ -177,6 +177,57 @@ from the existing ordering: an exclusive arrival waits for the holders ahead
 of it to leave (a running participant is never revoked), holds alone, and the
 count goes back up when it releases.
 
+## System pools
+
+Serialising per project only answers "do these two builds of *this* repo
+collide". It does not answer "do these four builds, from four repos, each in
+its own worktree, all driving the one GPU". Per-key lanes are too narrow for
+machine-wide resources, and one global lane is too broad: it would serialise
+work that shares nothing.
+
+So a key has a **kind**, recorded per machine in `<state>/machine.json`: a
+*project lane* (yours) or a *pool* (the machine's). The four registered pools
+are `builds`, `computer-use`, `tests` and `vm`. Kind lives in
+`machine.json`, never in a lane's own config, because it is a fact about the
+machine rather than about the lane, and because changing it has to be safe
+while runs are live.
+
+**Links.** A project lane names the pools its jobs take
+(`incoda config KEY --pool builds,tests`), and that link is stored in the
+lane's `config.json` next to `slots`. `status` and `config` show it as
+`pools:`, and `quiet machine:` when it is set. An **unlinked** lane refuses
+every run (exit 120) with the exact command that makes the link, because
+picking a pool is the user's call: the tool does not guess, and `--pool` on a
+run cannot silently create a link to the wrong resource. A run may pass
+`--pool` to take a *subset* of the link for itself; a run on an unlinked lane
+may pass a set equal to its machine's suggestion, which becomes the lane's
+first link under one `machine.lock` hold, logged as `event=link`. Two writers
+racing the same first link with different sets is a refusal
+(`link-conflict`), not a last-writer-wins.
+
+**The lane set of a run** is the named keys plus every linked pool they bring
+in, deduplicated, and the order is total: project lanes first by key, then
+pools by key. Every run sorts the same way, so two multi-lane runs can never
+each hold what the other waits for, which is what lets `--queue a,b` exist at
+all. Pools are taken one at a time in that order, and a run is verified after
+each enrollment: if a link or a kind changed, the run releases everything it
+holds, says why (`replan: ...`) and plans again inside its `--wait` budget.
+
+**quiet-machine** (`config KEY --quiet-machine`) makes every run on that
+project lane take its pools with `Exclusive` tickets, so while it waits for
+the second pool it still holds the first alone: a measurement job wants the
+resource drained, not merely its own slot free. It is part of the link (a
+change is logged as `event=link ... quiet_machine=`), and pools themselves
+carry neither `quiet_machine` nor links.
+
+**Old runs and strays.** A run of an older `incoda` holds no pool tickets, so
+it is invisible to a pool that would otherwise be busy. During the state
+upgrade such runs are found first, then any run that appeared in between is
+traced under `<state>/strays/<n>/<key>/`; those participants count as held
+slots on the pool they would have taken, and a run that finds one of its own
+ancestors is refused at once (`upgrade-blocked`) instead of waiting for it for
+ever.
+
 ## Several keys in one run
 
 `--queue a,b` enrolls on every key named and runs the command once all are

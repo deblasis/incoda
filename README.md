@@ -57,6 +57,25 @@ block each other. There is no default key: an unkeyed `run` is refused, because
 two unrelated projects silently sharing one lane is exactly the failure this
 tool prevents.
 
+**Pools.** A key is either a project lane or a machine-wide pool. The four
+pools are registered per machine in `machine.json` (`builds`,
+`computer-use`, `tests`, `vm`); each guards one resource and is shared by every
+project on the box. A project lane is linked to the pools its jobs actually
+use, and a run takes its project lanes first and then the linked pools, one at
+a time in sorted order. Until the link is set the lane is **unlinked** and
+every run on it is refused with the command that makes the link, because
+guessing which pool a job belongs to is the user's call and not the tool's:
+
+```bash
+incoda config my-app-build --pool builds   # link it; --replace / --add-pool / --remove-pool / --unlink
+incoda run --queue my-app-build -- zig build   # now runs, holding my-app-build and builds
+incoda run --queue my-app-build --pool builds -- dotnet test   # this run only takes that pool
+```
+
+`--quiet-machine` makes every run on a lane hold its pools exclusively while
+it waits for the rest, which is what a measurement job needs: it wants the
+pools drained, not merely its own slot.
+
 **Slots.** Each queue has a slot count, default 1: plain mutual exclusion.
 `incoda config builds --slots 2` lets two holders run at once, and the config
 is the width, in both directions: every `run` on that key takes the
@@ -97,14 +116,14 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
-| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, and a closing message that refuses every run. |
+| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
+| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
-| `incoda doctor` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. |
+| `incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. `--rebuild-registry` rewrites the machine registry after one was lost or damaged, holding every lane still while it checks. |
 
 `run` passes the child's own exit code through unchanged. Lane-level failures
 use a separate band, documented and stable: `120` usage, `121` wait elapsed
