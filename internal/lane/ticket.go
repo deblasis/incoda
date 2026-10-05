@@ -44,6 +44,16 @@ type Ticket struct {
 	Via []string `json:"via,omitempty"`
 	// Wait is the run's --wait as given; empty when it was not given.
 	Wait string `json:"wait,omitempty"`
+	// MaxCPUPct, when set with IdleForNanos, gates this run's start on
+	// whole-machine CPU utilization staying strictly below it for the window.
+	// Zero means no gate. Purely advisory; never affects slot width.
+	MaxCPUPct float64 `json:"max_cpu_pct,omitempty"`
+	// IdleForNanos is the sustained window in nanoseconds. Zero with MaxCPUPct
+	// means one below-threshold sample passes.
+	IdleForNanos int64 `json:"idle_for_nanos,omitempty"`
+	// GateStartNano/GateDoneNano bracket the gate wait for status/log.
+	GateStartNano int64 `json:"gate_start_nano,omitempty"`
+	GateDoneNano  int64 `json:"gate_done_nano,omitempty"`
 }
 
 // attribution is the k=v block every lifecycle line (enqueue/acquire/release)
