@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -84,6 +86,25 @@ func TestGateImmediatePassOnIdle(t *testing.T) {
 		nil, cur.Add(time.Second))
 	if err != nil || *calls != 1 {
 		t.Fatalf("idle gate must pass on first sample: calls=%d err=%v", *calls, err)
+	}
+}
+
+func TestPaintEventGateVerbs(t *testing.T) {
+	passLine := "2026-10-05 10:00:00 queue=k event=gate-pass pid=1 maxcpu=30.0 idlefor=2m0s cpu=12.0 unavailable=false"
+	if got := paintEvent(colorize.Plain, passLine); got != passLine {
+		t.Fatalf("gate-pass must survive paintEvent under Plain unchanged: %q", got)
+	}
+	waitLine := "2026-10-05 10:00:00 queue=k event=gate-wait pid=1 maxcpu=30.0 cpu=95.0"
+	if got := paintEvent(colorize.Plain, waitLine); !strings.Contains(got, "event=gate-wait") {
+		t.Fatalf("gate-wait must survive paintEvent: %q", got)
+	}
+	t.Setenv("CLICOLOR_FORCE", "1")
+	p := colorize.For(io.Discard)
+	if got := paintEvent(p, passLine); !strings.Contains(got, "\x1b[32mevent=gate-pass") {
+		t.Fatalf("gate-pass must paint green: %q", got)
+	}
+	if got := paintEvent(p, waitLine); !strings.Contains(got, "\x1b[33mevent=gate-wait") {
+		t.Fatalf("gate-wait must paint yellow: %q", got)
 	}
 }
 
