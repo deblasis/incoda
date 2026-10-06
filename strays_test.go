@@ -45,6 +45,13 @@ func startOldRunAfterFenceDeletion(t *testing.T, tag, key string, args ...string
 // on builds, names it on its busy line, and starts only after it ended;
 // the dead stray lane is then deleted and its log kept.
 func TestFenceDeletionWithALiveStrayIsCounted(t *testing.T) {
+	// A live stray exists only where the fence swap can rename queues/
+	// underneath an open ticket handle. Windows refuses that rename, so the
+	// re-fence waits for the holder and no live stray ever appears there
+	// (errNotIdle, by design); this test pins the Unix behaviour.
+	if runtime.GOOS == "windows" {
+		t.Skip("live strays are a Unix relocation; Windows waits for the holder instead (see fenceMigration)")
+	}
 	incoda, stamp := binaries(t)
 	stamps := t.TempDir()
 	o, state := startOldRunAfterFenceDeletion(t, "v0.6.0", "builds", stamp, filepath.Join(stamps, "old.txt"), "old", "2500")
@@ -84,6 +91,12 @@ func TestFenceDeletionWithALiveStrayIsCounted(t *testing.T) {
 // no lane of the new layout counts on every pool, so a run on a linked
 // project lane waits for it through its pool too.
 func TestUnknownStrayKeyCountsOnEveryPool(t *testing.T) {
+	// As above: a live run counted from strays/ requires the fence swap to
+	// have relocated queues/ while the run held its ticket open, which
+	// Windows refuses by design.
+	if runtime.GOOS == "windows" {
+		t.Skip("live strays are a Unix relocation; Windows waits for the holder instead (see fenceMigration)")
+	}
 	incoda, stamp := binaries(t)
 	o, state := startOldRunAfterFenceDeletion(t, "v0.6.0", "oldjob", stamp, filepath.Join(t.TempDir(), "old.txt"), "old", "30000")
 	// config re-places the fence, which moves queues/ to strays/.

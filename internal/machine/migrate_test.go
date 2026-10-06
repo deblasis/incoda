@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -209,6 +210,14 @@ func TestEnsureFailsClosedOnABadRegistry(t *testing.T) {
 }
 
 func TestEnsureRefencesAMigratedLayout(t *testing.T) {
+	// The re-fence moves queues/ to strays/ while a ticket in it is still
+	// live. Unix renames a directory with open files; Windows refuses the
+	// rename while the holder's handle is open, so the fence swap there
+	// waits for the holder instead (errNotIdle, by design). The live-stray
+	// relocation this test pins is a Unix property.
+	if runtime.GOOS == "windows" {
+		t.Skip("live strays are a Unix relocation; Windows waits for the holder instead (see fenceMigration)")
+	}
 	state := t.TempDir()
 	if _, _, err := ensure(t, state); err != nil {
 		t.Fatal(err)
@@ -584,7 +593,7 @@ func TestCommitRefencesWhenTheFenceVanishedDuringM5(t *testing.T) {
 	}
 	if !strings.Contains(out, "incoda: upgrade-wait: state upgrade waits for 1 run(s) by an older incoda:\n") ||
 		!strings.Contains(out, "slipped pid 999999: zig build") ||
-		!strings.Contains(out, "incoda kill --queue slipped --pid 999999 --reason 'incoda upgrade'\n") {
+		!strings.Contains(out, KillLine("slipped", 999999, UpgradeReason, false)+"\n") {
 		t.Fatalf("output:\n%s", out)
 	}
 	assertMigrated(t, state, true)
