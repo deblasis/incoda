@@ -14,6 +14,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // soon is a probe deadline no healthy test gets near.
@@ -215,7 +216,11 @@ func TestStrayCleanupFailureIsLoggedNotFatal(t *testing.T) {
 		t.Fatalf("a failed cleanup must not fail CleanStrays: %v", err)
 	}
 	b, _ := os.ReadFile(MachineLogPath(state))
-	want := fmt.Sprintf("event=cleanup-failed pid=%d path=%s err=", os.Getpid(), filepath.Join(batch, "dead"))
+	// The path goes through the same log-quoting the writer uses: on Windows
+	// it carries backslashes, which are escaped, so a hand-built path would
+	// assert the POSIX spelling of a Windows path.
+	want := fmt.Sprintf("event=cleanup-failed pid=%d path=%s err=", os.Getpid(),
+		textsafe.LogValue(filepath.Join(batch, "dead")))
 	if n := strings.Count(string(b), want); n != 2 || !strings.Contains(string(b), `err="injected \"failure\""`) {
 		t.Fatalf("want two escaped cleanup-failed lines, got:\n%s", b)
 	}
