@@ -177,6 +177,57 @@ from the existing ordering: an exclusive arrival waits for the holders ahead
 of it to leave (a running participant is never revoked), holds alone, and the
 count goes back up when it releases.
 
+## System pools
+
+Serialising per project only answers "do these two builds of *this* repo
+collide". It does not answer "do these four builds, from four repos, each in
+its own worktree, all driving the one GPU". Per-key lanes are too narrow for
+machine-wide resources, and one global lane is too broad: it would serialise
+work that shares nothing.
+
+So a key has a **kind**, recorded per machine in `<state>/machine.json`: a
+*project lane* (yours) or a *pool* (the machine's). The four registered pools
+are `builds`, `computer-use`, `tests` and `vm`. Kind lives in
+`machine.json`, never in a lane's own config, because it is a fact about the
+machine rather than about the lane, and because changing it has to be safe
+while runs are live.
+
+**Links.** A project lane names the pools its jobs take
+(`incoda config KEY --pool builds,tests`), and that link is stored in the
+lane's `config.json` next to `slots`. `status` and `config` show it as
+`pools:`, and `quiet machine:` when it is set. An **unlinked** lane refuses
+every run (exit 120) with the exact command that makes the link, because
+picking a pool is the user's call: the tool does not guess, and `--pool` on a
+run cannot silently create a link to the wrong resource. A run may pass
+`--pool` to take a *subset* of the link for itself; a run on an unlinked lane
+may pass a set equal to its machine's suggestion, which becomes the lane's
+first link under one `machine.lock` hold, logged as `event=link`. Two writers
+racing the same first link with different sets is a refusal
+(`link-conflict`), not a last-writer-wins.
+
+**The lane set of a run** is the named keys plus every linked pool they bring
+in, deduplicated, and the order is total: project lanes first by key, then
+pools by key. Every run sorts the same way, so two multi-lane runs can never
+each hold what the other waits for, which is what lets `--queue a,b` exist at
+all. Pools are taken one at a time in that order, and a run is verified after
+each enrollment: if a link or a kind changed, the run releases everything it
+holds, says why (`replan: ...`) and plans again inside its `--wait` budget.
+
+**quiet-machine** (`config KEY --quiet-machine`) makes every run on that
+project lane take its pools with `Exclusive` tickets, so while it waits for
+the second pool it still holds the first alone: a measurement job wants the
+resource drained, not merely its own slot free. It is part of the link (a
+change is logged as `event=link ... quiet_machine=`), and pools themselves
+carry neither `quiet_machine` nor links.
+
+**Old runs and strays.** A run of an older `incoda` holds no pool tickets, so
+it is invisible to a pool that would otherwise be busy. During the state
+upgrade such runs are found first, then any run that appeared in between is
+traced under `<state>/strays/<n>/<key>/`; those participants count as held
+slots on the pool they would have taken, and a run that finds one of its own
+ancestors is refused at once (`upgrade-blocked`) instead of waiting for it for
+ever.
+
 ## Several keys in one run
 
 `--queue a,b` enrolls on every key named and runs the command once all are
@@ -336,7 +387,7 @@ interface; scripts may rely on them.
 |---|---|
 | *child's* | `run` succeeded in acquiring; this is the command's own status |
 | `120` | usage error: bad flags, missing or invalid queue key, a run on a closed queue or without a required `--reason`, or a `force-release` refused because the queue has live participants |
-| `121` | `--wait` elapsed while still queued |
+| `121` | `--wait` elapsed while still queued or waiting for idle |
 | `122` | state directory or OS file locking unusable |
 | `123` | the lane was acquired but the command could not be started |
 | `124` | the run was killed through the lane; stderr names who and why |
@@ -387,6 +438,43 @@ Gloss, Bubbles) for the `watch` screen only. Everything the lane does still
 compiles from `x/sys` alone; the screen is a leaf. Building
 requires Go 1.27.0 or newer; with `GOTOOLCHAIN=auto` (the default) the
 toolchain is fetched automatically.
+
+## Load-gated start
+
+`run --max-cpu PCT --idle-for DUR` starts a run only after whole-machine CPU
+utilization stays strictly below `PCT` for `DUR`, checked once after the FIFO
+slot is acquired. The gate is advisory: it never takes or frees a
+slot — the run holds its acquired slot(s) while the gate waits — and runs
+without the flags bypass it entirely.
+
+Sampling, not continuous measurement. The gate polls (every `--poll`, 500 ms
+by default). Only the cold first sample of the process establishes its
+baseline over ~100 ms; steady-state samples diff OS CPU counters spanning
+~one poll interval. Between polls the machine is unobserved, so a spike
+shorter than the poll interval may never appear in a sample.
+
+Strict `<` with reset. A sample at or above `PCT` discards the window; the
+clock restarts at the next below-threshold sample. A newcomer pays the full
+`DUR` even if the machine has been idle for longer: the window starts when
+its own gate starts, after acquire. Successive gated runs likewise each pay
+their own window, up to N×`DUR` serially in the worst case.
+
+One gate per run, after every lane is held. A multi-key run waits once, not
+once per key, and the gate shares the single `--wait` budget: expiry exits
+121 with `reason=idle-gate` in the log. On a multi-slot queue every waiter
+evaluates the same machine state, so a completed window can admit several
+gated waiters together (a herd); the slots still bound how many run.
+
+Fail-open, not fail-closed. A sample error (unreadable counters) pauses
+without disturbing the window; only five consecutive errors give up and let
+the run proceed, logged with `unavailable=true`. A killed or closed lane
+still aborts the wait; the gate adds no new way to be stuck.
+
+What the percentage cannot see. It is a share of all cores, capped at 100:
+one saturated core on a many-core box reads low, and per-core pressure is
+invisible. On Linux iowait counts as idle. A fully re-entrant run (nothing
+acquired, inside a parent lane) skips the gate: the parent's lane already
+admitted the tree.
 
 ## Release and install
 

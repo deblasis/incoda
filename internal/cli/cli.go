@@ -40,22 +40,24 @@ func usagef(format string, args ...any) error {
 const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI test runs)
 
 usage:
-  incoda run --queue KEY[,KEY...] [--slots N] [--exclusive] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
+  incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once | --plain]
   incoda queues
-  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open]
+  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--wait DUR]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
-  incoda doctor
+  incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]
   incoda version
 
 The queue key comes from --queue or the INCODA_QUEUE environment variable.
 There is no default key: an unkeyed run is refused rather than silently
 sharing a lane with unrelated work. A comma-separated list holds every key
-named, taken in sorted order. A run exports INCODA_HELD to its child;
-a nested run on a key listed there passes through instead of queueing behind
-its own parent. INCODA_OWNER is the default for --owner.
+named, taken in sorted order. A run gives its child INCODA_HELD, the
+KEY=TICKET entries of the lanes it holds; a nested run on a key listed there
+passes through instead of queueing behind its own parent, once it has checked
+that the ticket is alive and held by its ancestor. INCODA_OWNER is the
+default for --owner.
 
 State is machine-local and per-user, and is NEVER derived from the working
 directory. Every caller of a key contends for the same lane no matter which
@@ -64,11 +66,20 @@ directory: $INCODA_DIR, then %LOCALAPPDATA%\incoda (Windows),
 ~/Library/Application Support/incoda (macOS),
 $XDG_STATE_HOME/incoda or ~/.local/state/incoda (Linux).
 
+Lanes live in <state>/lanes/. The first run or config on a state directory
+used by an older incoda upgrades it once: it waits for that incoda's runs
+to finish, then makes <state>/queues a file that stops older binaries
+(exit 122) and registers the machine-wide pools builds, computer-use, tests
+and vm in <state>/machine.json. status, watch and queues never upgrade.
+
 exit codes:
   <child>  run passes the command's own exit status through unchanged
-  120      usage error (bad flags, missing/invalid queue key, refused force-release)
-  121      --wait elapsed while still queued
-  122      state directory or OS file locking unusable
+  120      usage error (bad flags, missing/invalid queue key, refused force-release),
+           or a refusal such as upgrade-blocked
+  121      --wait elapsed while still queued, waiting for machine.lock,
+           waiting for older incoda runs before the state upgrade, or
+           waiting for idle
+  122      state directory, machine.json or OS file locking unusable
   123      lane acquired but the command could not be started
   124      the run was killed through the lane (incoda kill); stderr says by whom and why
   125      kill: the participant did not acknowledge in time (rerun with --force)
@@ -170,12 +181,15 @@ func resolveKey(explicit string) (string, error) {
 	return key, nil
 }
 
+// stateDir resolves the state directory and creates it. It never creates
+// <state>/queues: that path belongs to older releases, and on layout 2 it is
+// the fence file (internal/machine).
 func stateDir() (string, error) {
 	d, err := lane.StateDir()
 	if err != nil {
 		return "", exitWith(ExitState, "cannot resolve state directory: %v", err)
 	}
-	if err := os.MkdirAll(lane.QueuesDir(d), 0o755); err != nil {
+	if err := os.MkdirAll(d, 0o755); err != nil {
 		return "", exitWith(ExitState, "cannot create state directory %s: %v", d, err)
 	}
 	return d, nil
@@ -187,6 +201,9 @@ func stateDir() (string, error) {
 type waitValue struct {
 	d   time.Duration
 	set bool
+	// raw is the value as given, recorded on tickets (spec 2.7) and
+	// repeated in printed fix lines.
+	raw string
 }
 
 func (w *waitValue) String() string {
@@ -201,6 +218,7 @@ func (w *waitValue) Set(s string) error {
 	if s == "" {
 		return errors.New("empty duration")
 	}
+	w.raw = s
 	if n, err := strconv.Atoi(s); err == nil {
 		if n < 0 {
 			w.d, w.set = -1, true

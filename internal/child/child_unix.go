@@ -15,19 +15,19 @@ type supervisor struct {
 	pid  int
 }
 
-// newSupervisor puts the child in its own process group so that incoda can
-// signal the entire tree with one kill(-pgid). The trade is that a terminal
-// Ctrl+C no longer reaches the child on its own, which is why forward relays it
-// explicitly.
+// newSupervisor puts the child in its own process group when ownGroup is
+// set, so incoda can signal the entire tree with one kill(-pgid). The trade
+// is that a terminal Ctrl+C no longer reaches the child on its own, which
+// is why forward relays it explicitly.
 //
-// A nested incoda (INCODA_HELD set) does not open a group of its own. If it
-// did, its child would sit outside the outer incoda's group, and a kill of
-// the outer run would end the nested incoda while its harness kept running
-// with the lane free, the exact collision the lane exists to stop. Staying
-// in the parent's group costs the nested run its own group-wide kill: it
-// can only end its direct child, and that is documented as a known limit.
-func newSupervisor(cmd *exec.Cmd) (*supervisor, error) {
-	if os.Getenv("INCODA_HELD") == "" {
+// The caller passes ownGroup false for a nested incoda whose live outer
+// incoda will tree-kill the group this process sits in. If such a run
+// opened a group of its own, a kill of the outer run would end the nested
+// incoda while its job kept running with the lane free. Staying in the
+// outer group costs the nested run its own group-wide kill: it can only end
+// its direct child, a documented limit.
+func newSupervisor(cmd *exec.Cmd, ownGroup bool) (*supervisor, error) {
+	if ownGroup {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 	return &supervisor{}, nil

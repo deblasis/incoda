@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // killExt is the companion file a kill request leaves beside a ticket.
@@ -63,7 +65,7 @@ func (q *Queue) RequestKill(pid int, req KillRequest) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	q.Logf("queue=%s event=kill-request pid=%d by=%s reason=%q", q.Key, pid, req.By, req.Reason)
+	q.Logf("queue=%s event=kill-request pid=%d by=%s reason=%s", q.Key, pid, textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))
 	return found, nil
 }
 

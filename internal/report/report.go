@@ -5,13 +5,16 @@
 package report
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
 
@@ -30,6 +33,14 @@ type Report struct {
 	Memory         sysinfo.Memory `json:"memory"`
 	CPU            sysinfo.CPU    `json:"cpu"`
 	Queues         []Queue        `json:"queues"`
+	// Banner is the read-only banner of a layout not upgraded yet (spec
+	// 3.2). It is display text, not part of the JSON report; plan 5 adds
+	// the layout fields to status --json.
+	Banner string `json:"-"`
+	// Warnings are the lines plain status adds at the end (spec 5.3):
+	// unpooled runs of an older incoda, a missing fence, stopped holders.
+	// Display text, not part of the JSON report.
+	Warnings []string `json:"-"`
 }
 
 // Queue is one queue inside a Report.
@@ -44,6 +55,10 @@ type Queue struct {
 	Holders        []lane.Entry `json:"holders"`
 	Waiting        []lane.Entry `json:"waiting"`
 	RecentEvents   []string     `json:"recent_events"`
+	// ProbeError is set when the queue could not be read because another
+	// process kept its registry lock past the view's deadline (a stopped
+	// incoda): the queue is then reported busy, never free.
+	ProbeError string `json:"probe_error,omitempty"`
 }
 
 // StateDirSource names how the state directory was resolved.
@@ -54,38 +69,60 @@ func StateDirSource() string {
 	return "platform default"
 }
 
-// Keys lists every queue with state under dir, sorted.
-func Keys(dir string) ([]string, error) {
-	keys, err := lane.ListQueues(dir)
+// Build observes the named queues, or every queue with state when all is
+// set, in the layout machine.Inspect finds: lanes/ once migrated, the old
+// queues/ read only before (spec 3.2), so a status on a layout not upgraded
+// yet creates and reaps nothing. A key with no state is reported as free,
+// because a never-used queue is simply free. A broken or lost registry is
+// returned as its *machine.StateError so the caller fails closed.
+func Build(stateDir, version string, keys []string, all bool, events int) (*Report, error) {
+	v, err := machine.Inspect(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot list queues: %w", err)
+		return nil, err
 	}
-	sort.Strings(keys)
-	return keys, nil
-}
-
-// Build observes the named queues under dir. A key with no state is reported
-// as free rather than as an error, because a never-used queue is simply free.
-func Build(dir, version string, keys []string, events int) (*Report, error) {
+	if all {
+		keys, err = lane.ListIn(v.Root)
+		if err != nil {
+			return nil, fmt.Errorf("cannot list queues: %w", err)
+		}
+		sort.Strings(keys)
+	}
+	mode := lane.Existing
+	if !v.Migrated {
+		mode = lane.ReadOnly
+	}
+	// One deadline bounds every registry lock this view waits for, so a
+	// lock another process keeps for ever cannot hang status or watch.
+	deadline := time.Now().Add(lane.ViewProbeWait)
 	host, _ := os.Hostname()
 	rep := &Report{
 		Schema:         1,
 		Version:        version,
-		StateDir:       dir,
+		StateDir:       stateDir,
 		StateDirSource: StateDirSource(),
 		Host:           host,
 		Time:           time.Now().Format(time.RFC3339),
 		Memory:         sysinfo.ReadMemory(),
 		CPU:            sysinfo.ReadCPU(),
 		Queues:         []Queue{},
+		Banner:         v.Banner,
 	}
 	for _, key := range keys {
 		qr := Queue{
 			Key:     key,
-			Dir:     lane.QueueDir(dir, key),
-			Exists:  lane.Exists(dir, key),
+			Dir:     filepath.Join(v.Root, key),
+			Exists:  lane.ExistsIn(v.Root, key),
 			Holders: []lane.Entry{},
 			Waiting: []lane.Entry{},
+		}
+		var q *lane.Queue
+		if qr.Exists {
+			q, err = lane.OpenIn(v.Root, key, mode)
+			if errors.Is(err, os.ErrNotExist) {
+				qr.Exists = false
+			} else if err != nil {
+				return nil, err
+			}
 		}
 		if !qr.Exists {
 			qr.EffectiveSlots = 1
@@ -93,12 +130,14 @@ func Build(dir, version string, keys []string, events int) (*Report, error) {
 			rep.Queues = append(rep.Queues, qr)
 			continue
 		}
-		q, err := lane.Open(dir, key)
-		if err != nil {
-			return nil, err
-		}
-		snap, err := q.Observe(events)
+		snap, err := q.ObserveBy(events, deadline)
 		q.Close()
+		if errors.Is(err, lane.ErrRegistryBusy) {
+			qr.EffectiveSlots = 1
+			qr.ProbeError = lane.ErrRegistryBusy.Error()
+			rep.Queues = append(rep.Queues, qr)
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot read queue %q: %w", key, err)
 		}
@@ -111,5 +150,12 @@ func Build(dir, version string, keys []string, events int) (*Report, error) {
 		qr.Free = len(snap.Holders) == 0
 		rep.Queues = append(rep.Queues, qr)
 	}
+	var holders []machine.Holder
+	for _, qr := range rep.Queues {
+		for _, e := range append(append([]lane.Entry(nil), qr.Holders...), qr.Waiting...) {
+			holders = append(holders, machine.Holder{Key: qr.Key, PID: e.Ticket.PID})
+		}
+	}
+	rep.Warnings = machine.StatusWarnings(stateDir, v, holders, deadline)
 	return rep, nil
 }

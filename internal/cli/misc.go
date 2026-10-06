@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +15,10 @@ import (
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
+	"github.com/deblasis/incoda/internal/machine"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/sysinfo"
+	"github.com/deblasis/incoda/internal/textsafe"
 	"github.com/deblasis/incoda/internal/tui"
 )
 
@@ -38,7 +43,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		return usagef("--interval must be positive")
 	}
 	if !*once && !*plain && !*all && colorize.IsTerminal(stdout) {
-		dir, err := stateDir()
+		dir, _, err := readState()
 		if err != nil {
 			return err
 		}
@@ -73,6 +78,9 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 			clearScreen(stdout)
 		}
 		fmt.Fprintf(stdout, "%s  %s\n\n", p.Bold("incoda watch"), p.Dim(time.Now().Format("15:04:05")))
+		if rep.Banner != "" {
+			fmt.Fprintf(stdout, "%s\n\n", p.Yellow("incoda: "+rep.Banner))
+		}
 		renderReport(stdout, p, rep)
 		if *once {
 			return nil
@@ -94,12 +102,13 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for queues"}
 	}
-	dir, err := stateDir()
+	dir, v, err := readState()
 	if err != nil {
 		return err
 	}
+	printBanner(stderr, v.Banner)
 	p := paletteFor(stdout, *noColor)
-	keys, err := lane.ListQueues(dir)
+	keys, err := lane.ListIn(v.Root)
 	if err != nil {
 		return exitWith(ExitState, "cannot list queues: %v", err)
 	}
@@ -109,13 +118,17 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, p.Dim("no queues have state on this machine yet"))
 		return nil
 	}
+	mode := lane.Existing
+	if !v.Migrated {
+		mode = lane.ReadOnly
+	}
 	for _, k := range keys {
-		q, err := lane.Open(dir, k)
+		q, err := lane.OpenIn(v.Root, k, mode)
 		if err != nil {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
 			continue
 		}
-		snap, err := q.Observe(0)
+		snap, err := q.ObserveBy(0, time.Now().Add(lane.ViewProbeWait))
 		q.Close()
 		if err != nil {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
@@ -148,33 +161,84 @@ func cmdForceRelease(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	dir, v, err := readState()
 	if err != nil {
 		return err
 	}
-	if !lane.Exists(dir, key) {
+	if !lane.ExistsIn(v.Root, key) {
 		fmt.Fprintf(stdout, "queue %q has no state on this machine; nothing to release\n", key)
 		return nil
 	}
-	q, err := lane.Open(dir, key)
+	if *live && !v.Migrated {
+		if err := upgradePending(v, key); err != nil {
+			return err
+		}
+	}
+	q, err := lane.OpenIn(v.Root, key, lane.Existing)
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
 	}
 	defer q.Close()
 	removed, err := q.ForceRelease(*live)
+	if errors.Is(err, lane.ErrRegistryBusy) {
+		return exitWith(ExitState, "queue %q: %v", key, err)
+	}
 	if err != nil {
 		return exitWith(ExitUsage, "%v", err)
 	}
 	q.Logf("queue=%s event=force-release removed=%d live=%v by_pid=%d", key, removed, *live, os.Getpid())
 	fmt.Fprintf(stdout, "queue %q: removed %d ticket(s)\n", key, removed)
+	if !*live {
+		// Records of old-holder kills whose job has fully exited (spec
+		// 3.2): they hold nothing, so plain force-release clears them.
+		if n, err := machine.SweepOrphans(dir, key); err == nil && n > 0 {
+			fmt.Fprintf(stdout, "queue %q: removed %d stale orphan record(s)\n", key, n)
+		}
+	}
 	return nil
 }
 
+// upgradePending refuses force-release --live while machine.json is absent
+// (spec 3.2): deleting a live ticket of an older incoda would empty the
+// upgrade's idle check while that job keeps running, so the upgrade would
+// overlap it. It prints one stop line per live ticket instead (kill ends
+// an older incoda with its whole job). With no live ticket it refuses
+// nothing.
+func upgradePending(v machine.View, key string) error {
+	live, err := lane.ProbeLane(filepath.Join(v.Root, key), time.Now().Add(lane.OneShotProbeWait))
+	if err == nil && lane.AnyCannotTell(live) {
+		err = lane.ErrRegistryBusy
+	}
+	if err != nil {
+		return exitWith(ExitState, "cannot probe queue %q: %s", key, textsafe.Escape(err.Error()))
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	lines := []string{"upgrade-pending: force-release --live would hide a running job from the upgrade; ask the user before stopping another session's job; they can run:"}
+	for _, p := range live {
+		lines = append(lines, "  "+machine.KillLine(key, p.PID(), machine.UpgradeReason, false))
+	}
+	return exitWith(ExitUsage, "%s", strings.Join(lines, "\nincoda: "))
+}
+
 func cmdDoctor(args []string, stdout, stderr io.Writer) error {
+	start := time.Now()
 	fs := newFlagSet("doctor", stderr)
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
+	rebuild := fs.String("rebuild-registry", "", "a human decision after machine.json was lost or broken: write a new one naming exactly these pools (comma-separated)")
+	wait := &waitValue{d: time.Minute}
+	fs.Var(wait, "wait", "with --rebuild-registry: how long to wait for machine.lock")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for doctor"}
+	}
+	rebuildSet, waitSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		rebuildSet = rebuildSet || f.Name == "rebuild-registry"
+		waitSet = waitSet || f.Name == "wait"
+	})
+	if waitSet && !rebuildSet {
+		return usagef("doctor: --wait applies only to --rebuild-registry")
 	}
 	p := paletteFor(stdout, *noColor)
 
@@ -191,20 +255,12 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "%s %s\n", p.Dim("state dir:"), dir)
 	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("source: "), stateDirSource())
-	if src := stateDirSource(); src == "INCODA_DIR" {
-		// A per-project override is the one configuration mistake that breaks
-		// the whole model quietly: every fragment looks like a healthy, empty
-		// lane while the jobs it was meant to serialise run side by side.
-		fmt.Fprintf(stdout, "  %s INCODA_DIR is set. It is a MACHINE-level override, not a per-project one.\n", p.BoldYellow("WARNING:"))
-		fmt.Fprintln(stdout, "           If some callers have it set and others do not, they will use different")
-		fmt.Fprintln(stdout, "           state directories, form separate lanes, and stop serialising each other.")
-	}
 	fmt.Fprintf(stdout, "  %s %s (state is never derived from the working directory)\n", p.Dim("cwd-independent:"), p.Green("yes"))
 	if cwd, err := os.Getwd(); err == nil {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("current cwd (not used for resolution):"), cwd)
 	}
 
-	if err := os.MkdirAll(lane.QueuesDir(dir), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("writable:"), p.BoldRed(fmt.Sprintf("NO (%v)", err)))
 		return exitWith(ExitState, "state directory is not usable")
 	}
@@ -214,13 +270,32 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "OS file locking is not usable: %v", err)
 	}
 
-	keys, err := lane.ListQueues(dir)
-	if err == nil {
-		sort.Strings(keys)
-		if len(keys) == 0 {
-			fmt.Fprintln(stdout, p.Dim("queues:    none yet"))
-		} else {
-			fmt.Fprintf(stdout, "%s %s\n", p.Dim("queues:   "), strings.Join(keys, ", "))
+	if rebuildSet {
+		var pools []string
+		for _, k := range strings.Split(*rebuild, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				pools = append(pools, k)
+			}
+		}
+		reg, err := machine.Rebuild(dir, pools, machine.Options{
+			Start: start, Wait: wait.d, Poll: 200 * time.Millisecond, Chain: procinfo.ParentChain(),
+			By: "incoda " + v, Stderr: stderr,
+		}, func(key, kind string) { fmt.Fprintf(stdout, "rebuild-registry: %s: %s\n", key, kind) })
+		if err != nil {
+			return machineExit(err)
+		}
+		fmt.Fprintf(stdout, "rebuild-registry: wrote machine.json (generation %d)\n", reg.Generation)
+	}
+
+	if view, err := machine.Inspect(dir); err == nil {
+		keys, err := lane.ListIn(view.Root)
+		if err == nil {
+			sort.Strings(keys)
+			if len(keys) == 0 {
+				fmt.Fprintln(stdout, p.Dim("queues:    none yet"))
+			} else {
+				fmt.Fprintf(stdout, "%s %s\n", p.Dim("queues:   "), strings.Join(keys, ", "))
+			}
 		}
 	}
 	if k := strings.TrimSpace(os.Getenv("INCODA_QUEUE")); k != "" {
@@ -232,7 +307,53 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "%s %s\n", p.Dim("INCODA_QUEUE:"), p.Dim("unset (run needs --queue)"))
 	}
+
+	// doctor deletes stray lane directories whose tickets have all died
+	// (spec 2.3), but only on a migrated layout: during a migration
+	// strays/ belongs to M5 and M6.
+	cleanErr := ""
+	if view, err := machine.Inspect(dir); err == nil && view.Migrated {
+		if err := machine.CleanStrays(dir, time.Now().Add(lane.ViewProbeWait)); err != nil {
+			cleanErr = "cannot clean strays/: " + textsafe.Escape(err.Error())
+		}
+	}
+	h := machine.Diagnose(dir)
+	fmt.Fprintf(stdout, "%s %s\n", p.Dim("layout:   "), textsafe.Escape(h.Layout))
+	if h.Fence != "" {
+		fmt.Fprintf(stdout, "%s %s\n", p.Dim("fence:    "), h.Fence)
+	}
+	for _, list := range []struct {
+		label string
+		lines []string
+	}{{"strays:   ", h.Strays}, {"orphans:  ", h.Orphans}} {
+		if len(list.lines) == 0 {
+			fmt.Fprintf(stdout, "%s none\n", p.Dim(list.label))
+		}
+		for _, l := range list.lines {
+			fmt.Fprintf(stdout, "%s %s\n", p.Dim(list.label), l)
+		}
+	}
+	pathLines, pathAttention := machine.PathVersionLines(startGetenv("PATH"), "", v)
+	for _, l := range pathLines {
+		fmt.Fprintf(stdout, "%s %s\n", p.Dim("on PATH:  "), l)
+	}
+	attention := append(h.Attention, pathAttention...)
+	if cleanErr != "" {
+		attention = append(attention, cleanErr)
+	}
+	if stateDirSource() == "INCODA_DIR" {
+		attention = append(attention, "INCODA_DIR is set: it is a MACHINE-level override, not a per-project one; it splits pools across state directories, so a caller without it set uses a different state directory, forms separate lanes, and stops serialising against this one")
+	}
+	for _, a := range attention {
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldYellow("attention:"), a)
+	}
+	for _, pr := range h.Problems {
+		fmt.Fprintf(stdout, "%s %s\n", p.BoldRed("problem:  "), pr)
+	}
 	fmt.Fprintf(stdout, "%s\n", p.Dim(sysinfo.MachineLine(sysinfo.ReadMemory(), sysinfo.ReadCPU())))
+	if len(h.Problems) > 0 {
+		return exitWith(ExitState, "machine-state: %d problem(s) make runs fail closed; see the problem: lines above", len(h.Problems))
+	}
 	return nil
 }
 

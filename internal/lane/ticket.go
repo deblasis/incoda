@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 const ticketExt = ".ticket"
@@ -36,36 +38,41 @@ type Ticket struct {
 	Owner    string `json:"owner,omitempty"`
 	Hostname string `json:"hostname"`
 	Dir      string `json:"cwd"`
+	// Via are, on a pool ticket, the run's named project keys that link to
+	// the pool (spec 2.7); empty when the run names the pool directly.
+	// Status and watch group pool holders by it.
+	Via []string `json:"via,omitempty"`
+	// Wait is the run's --wait as given; empty when it was not given.
+	Wait string `json:"wait,omitempty"`
+	// MaxCPUPct, when set with IdleForNanos, gates this run's start on
+	// whole-machine CPU utilization staying strictly below it for the window.
+	// Zero means no gate. Purely advisory; never affects slot width.
+	MaxCPUPct float64 `json:"max_cpu_pct,omitempty"`
+	// IdleForNanos is the sustained window in nanoseconds. Zero with MaxCPUPct
+	// means one below-threshold sample passes.
+	IdleForNanos int64 `json:"idle_for_nanos,omitempty"`
+	// GateStartNano/GateDoneNano bracket the gate wait for status/log.
+	GateStartNano int64 `json:"gate_start_nano,omitempty"`
+	GateDoneNano  int64 `json:"gate_done_nano,omitempty"`
 }
 
 // attribution is the k=v block every lifecycle line (enqueue/acquire/release)
-// carries: WHERE the job ran (dir, the launch cwd), and - when set - WHY
-// (reason) and WHOSE (owner). reason/owner are %q-quoted because the values
-// are free text with spaces; dir is quoted only when it needs it (a path
-// with a space would otherwise make the mid-line value ambiguous), so the
-// common no-space roots stay clean. Readers that do not know the fields
-// ignore them, and old lines simply lack them.
+// carries: WHERE the job ran (dir, the launch cwd), and when set WHY (reason)
+// and WHOSE (owner). Values go through textsafe.LogValue so a space quotes
+// them and a control character can never split the event across lines.
+// Readers that do not know the fields ignore them, and old lines lack them.
 func (t Ticket) attribution() string {
 	s := ""
 	if t.Dir != "" {
-		s += " dir=" + quoteIfNeeded(t.Dir)
+		s += " dir=" + textsafe.LogValue(t.Dir)
 	}
 	if t.Reason != "" {
-		s += fmt.Sprintf(" reason=%q", t.Reason)
+		s += " reason=" + strconv.Quote(textsafe.Escape(t.Reason))
 	}
 	if t.Owner != "" {
-		s += fmt.Sprintf(" owner=%q", t.Owner)
+		s += " owner=" + strconv.Quote(textsafe.Escape(t.Owner))
 	}
 	return s
-}
-
-// quoteIfNeeded quotes a value only when it would otherwise be ambiguous in
-// the whitespace-delimited k=v line (a space or a quote in the value).
-func quoteIfNeeded(v string) string {
-	if strings.ContainsAny(v, ` "`) {
-		return strconv.Quote(v)
-	}
-	return v
 }
 
 // ticketName encodes the arrival order into the filename so that ordering can
@@ -164,3 +171,31 @@ func (t Ticket) CommandString() string {
 }
 
 func ticketPath(dir, name string) string { return filepath.Join(dir, name) }
+
+// ValidTicketName reports whether name is exactly a ticket file name as
+// ticketName writes it: digits, a dash, digits, ".ticket", nothing else. It
+// is checked before a name taken from the environment is joined into a path.
+func ValidTicketName(name string) bool {
+	if _, ok := parseTicketName(name); !ok {
+		return false
+	}
+	base := strings.TrimSuffix(name, ticketExt)
+	for _, r := range base {
+		if (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return strings.Count(base, "-") == 1
+}
+
+// TicketNamePID returns the pid embedded in a valid ticket name.
+func TicketNamePID(name string) (int, bool) {
+	if !ValidTicketName(name) {
+		return 0, false
+	}
+	ord, _ := parseTicketName(name)
+	return ord.pid, true
+}
+
+// TicketFilePath is the path of a ticket file inside a queue directory.
+func TicketFilePath(queueDir, name string) string { return ticketPath(queueDir, name) }

@@ -1,0 +1,88 @@
+package machine
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/deblasis/incoda/internal/procinfo"
+)
+
+// ResumeReason is the --reason of the rerun line for a stopped holder.
+const ResumeReason = "resume interrupted kill"
+
+// FenceMissingLine is plain status's warning for a migrated layout whose
+// fence is gone (spec 5.3).
+const FenceMissingLine = "fence missing: the next run re-places it (incoda doctor)"
+
+// StoppedLines are the lines status and doctor print for a live
+// old-layout holder (an older incoda, KillTarget.Old) in the stopped state
+// (spec 3.2): an old-holder kill was interrupted inside its window.
+// Rerunning the same kill --force is safe (a SIGSTOP of a stopped process
+// does nothing); kill -CONT resumes the holder instead.
+func StoppedLines(key string, pid int) []string {
+	return []string{
+		fmt.Sprintf("stopped holder: pid %d; a kill was interrupted; rerun: %s", pid, KillLine(key, pid, ResumeReason, true)),
+		fmt.Sprintf("  or resume it instead: kill -CONT %d", pid),
+	}
+}
+
+// JobControlLine is the line for a stopped holder or waiter of this
+// binary. Nothing of this binary stops it, so the likely cause is job
+// control (Ctrl-Z) on its incoda while its job, in a group of its own,
+// keeps running. A kill of it ends only that incoda, which would leave
+// the job running with the lane free, so the line offers no kill: only
+// the resume.
+func JobControlLine(key string, pid int) string {
+	return fmt.Sprintf("stopped holder: pid %d on %q is stopped (job control?); resume it: kill -CONT %d", pid, key, pid)
+}
+
+// stoppedHolderLines classifies a stopped holder the way kill does
+// (FindKillTarget): an older incoda gets StoppedLines, anything else, or
+// a holder kill cannot place, gets JobControlLine.
+func stoppedHolderLines(stateDir string, v View, h Holder, deadline time.Time) []string {
+	if t, err := FindKillTarget(stateDir, v, h.Key, h.PID, deadline); err == nil && t.Old() {
+		return StoppedLines(h.Key, h.PID)
+	}
+	return []string{JobControlLine(h.Key, h.PID)}
+}
+
+// Holder names one live ticket for the stopped-state check.
+type Holder struct {
+	Key string
+	PID int
+}
+
+// StatusWarnings is the warning block at the end of plain status (spec
+// 5.3): every live unpooled holder, a missing fence on a migrated layout,
+// and every holder among holders (plus the unpooled ones) that is in the
+// stopped state. It only reads: no lock, no cleanup. Its probes wait for a
+// registry lock only until deadline.
+func StatusWarnings(stateDir string, v View, holders []Holder, deadline time.Time) []string {
+	var lines []string
+	if v.Migrated {
+		us, err := ScanUnpooled(stateDir, false, deadline)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("cannot scan for unpooled runs: %s", esc(err)))
+		}
+		for _, u := range us {
+			lines = append(lines, u.Line())
+			if u.Where != "orphans" && !u.Unknown {
+				holders = append(holders, Holder{Key: u.Key, PID: u.PID})
+			}
+		}
+		if v.FenceMissing {
+			lines = append(lines, FenceMissingLine)
+		}
+	}
+	seen := map[int]bool{}
+	for _, h := range holders {
+		if h.PID <= 0 || seen[h.PID] {
+			continue
+		}
+		seen[h.PID] = true
+		if s, err := procinfo.Stopped(h.PID); err == nil && s {
+			lines = append(lines, stoppedHolderLines(stateDir, v, h, deadline)...)
+		}
+	}
+	return lines
+}

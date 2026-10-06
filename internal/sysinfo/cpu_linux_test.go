@@ -9,7 +9,7 @@ func TestParseProcStatCPU(t *testing.T) {
 	if !ok {
 		t.Fatal("expected aggregate cpu line to parse")
 	}
-	b, ok := parseProcStatCPU("cpu  4705 0 3843 134389 0 0 0 0 0 0")
+	b, ok := parseProcStatCPU("cpu  4805 0 3843 134389 0 0 0 0 0 0")
 	if !ok {
 		t.Fatal("expected second sample to parse")
 	}

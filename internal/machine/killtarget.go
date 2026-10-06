@@ -1,0 +1,133 @@
+package machine
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/deblasis/incoda/internal/fixline"
+	"github.com/deblasis/incoda/internal/lane"
+)
+
+// TargetKind says how kill ends a participant (spec 3.2).
+type TargetKind int
+
+const (
+	// TargetNone: no live participant with that pid on that key.
+	TargetNone TargetKind = iota
+	// TargetLane: a ticket of this binary under lanes/ on a migrated
+	// layout; it watches its .kill file and ends its own tree.
+	TargetLane
+	// TargetOld: an old-layout holder, a ticket of an older incoda under
+	// queues/<K> (before the fence, or after a careless rm of it), under
+	// strays/, or under lanes/ or queues.new/ while machine.json is absent.
+	// It is always ended by the old-holder kill, never by a request: v0.3.0
+	// to v0.6.0 acknowledge a request by ending only their direct child,
+	// which shares their group, so its descendants would keep running
+	// while the lane reads free; behind the fence no request reaches it.
+	TargetOld
+)
+
+// KillTarget is the participant kill found: where its ticket is and who
+// holds it.
+type KillTarget struct {
+	Kind TargetKind
+	Key  string
+	// Root holds the lane directory Dir; Ticket is the ticket file name.
+	Root, Dir, Ticket string
+	PID               int
+	Command           []string
+}
+
+// Old reports whether the target is an older incoda (an old-layout holder).
+func (t KillTarget) Old() bool { return t.Kind == TargetOld }
+
+// FindKillTarget looks for the live participant pid on key wherever the
+// layout v allows one: lanes/<key> on a migrated layout, queues/<key> while
+// queues/ is a directory, the root a migration has moved the lanes to, and
+// every strays/<n>/<key>. Every probe is create-free (spec 2.6 step 2); it
+// never writes, migrates or takes machine.lock, and waits for a registry
+// lock only until deadline. When pid is not found and some lane could not
+// be told (lane.ErrRegistryBusy), it fails with that error rather than
+// report no participant.
+func FindKillTarget(stateDir string, v View, key string, pid int, deadline time.Time) (KillTarget, error) {
+	type place struct {
+		root string
+		kind TargetKind
+	}
+	var places []place
+	switch {
+	case v.Migrated:
+		places = append(places, place{lane.LanesDir(stateDir), TargetLane})
+		if kindOf(lane.QueuesDir(stateDir)) == aDir {
+			places = append(places, place{lane.QueuesDir(stateDir), TargetOld})
+		}
+	default:
+		places = append(places, place{v.Root, TargetOld})
+	}
+	batches, err := os.ReadDir(StraysDir(stateDir))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return KillTarget{}, fmt.Errorf("strays/: %w", err)
+	}
+	for _, b := range batches {
+		if b.IsDir() {
+			places = append(places, place{filepath.Join(StraysDir(stateDir), b.Name()), TargetOld})
+		}
+	}
+	var busy string
+	for _, pl := range places {
+		dir := filepath.Join(pl.root, key)
+		live, err := lane.ProbeLane(dir, deadline)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return KillTarget{}, fmt.Errorf("%s: %w", dir, err)
+		}
+		for _, p := range live {
+			if p.CannotTell() {
+				busy = dir
+				continue
+			}
+			if p.PID() == pid {
+				return KillTarget{Kind: pl.kind, Key: key, Root: pl.root, Dir: dir, Ticket: p.Name, PID: pid, Command: p.Ticket.Command}, nil
+			}
+		}
+	}
+	if busy != "" {
+		return KillTarget{}, fmt.Errorf("%s: %w", busy, lane.ErrRegistryBusy)
+	}
+	return KillTarget{Kind: TargetNone, Key: key, PID: pid}, nil
+}
+
+// KillLine is a printed stop line: incoda kill --queue K --pid N --reason
+// '<reason>', plus --force when force is set (the stopped-holder rerun line
+// of spec 3.2 carries it; kill needs no --force for an older incoda). On
+// POSIX the key and pid print bare (ValidateKey and a decimal number need
+// no quoting there); on PowerShell every value is one single-quoted word
+// (fixline.Quote), key and pid included, since PowerShell's own quoting
+// rules, not a value's shape, decide whether it is safe bare. The reason
+// is always a constant of this binary, so the line never needs a
+// placeholder.
+func KillLine(key string, pid int, reason string, force bool) string {
+	return killLineFor(fixline.Native(), key, pid, reason, force)
+}
+
+// killLineFor is KillLine with the shell fixed, so both branches can be
+// tested on any host regardless of fixline.Native().
+func killLineFor(sh fixline.Shell, key string, pid int, reason string, force bool) string {
+	k, p := key, strconv.Itoa(pid)
+	if sh == fixline.PowerShell {
+		k = fixline.Quote(sh, key)
+		p = fixline.Quote(sh, p)
+	}
+	s := fmt.Sprintf("incoda kill --queue %s --pid %s --reason %s", k, p, fixline.Quote(sh, reason))
+	if force {
+		s += " --force"
+	}
+	return s
+}

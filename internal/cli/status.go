@@ -37,6 +37,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if !*asJSON {
+		printBanner(stderr, rep.Banner)
+	}
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -57,26 +60,35 @@ func paletteFor(w io.Writer, noColor bool) colorize.Palette {
 }
 
 func buildReport(queueFlag string, all bool, events int) (*Report, error) {
-	dir, err := stateDir()
+	dir, err := lane.StateDir()
 	if err != nil {
-		return nil, err
+		return nil, exitWith(ExitState, "cannot resolve state directory: %v", err)
 	}
 	var keys []string
-	if all {
-		keys, err = report.Keys(dir)
-		if err != nil {
-			return nil, exitWith(ExitState, "%v", err)
-		}
-	} else {
+	if !all {
 		key, err := resolveKey(queueFlag)
 		if err != nil {
 			return nil, err
 		}
 		keys = []string{key}
 	}
-	rep, err := report.Build(dir, Version, keys, events)
+	rep, err := report.Build(dir, Version, keys, all, events)
 	if err != nil {
-		return nil, exitWith(ExitState, "%v", err)
+		return nil, machineExit(err)
+	}
+	for _, qr := range rep.Queues {
+		var gated, ungated bool
+		for _, e := range append(append([]lane.Entry(nil), qr.Holders...), qr.Waiting...) {
+			if e.Ticket.MaxCPUPct > 0 {
+				gated = true
+			} else {
+				ungated = true
+			}
+		}
+		if gated && ungated {
+			rep.Warnings = append(rep.Warnings,
+				fmt.Sprintf("queue %q: mixed load gates — only runs with --max-cpu wait for idle; the rest bypass the gate", qr.Key))
+		}
 	}
 	return rep, nil
 }
@@ -96,11 +108,23 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 		renderQueue(w, p, qr)
 	}
 	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
+	// Warnings go after every existing line, so scrapers of the lines
+	// above see them unchanged (spec 5.3).
+	if len(rep.Warnings) > 0 {
+		fmt.Fprintln(w)
+		for _, l := range rep.Warnings {
+			fmt.Fprintln(w, p.Yellow(l))
+		}
+	}
 }
 
 func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	if !qr.Exists {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
+		return
+	}
+	if qr.ProbeError != "" {
+		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(qr.ProbeError))
 		return
 	}
 	if qr.Free {
@@ -127,6 +151,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		if e.Ticket.Reason != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("reason:"), e.Ticket.Reason)
 		}
+		if e.Ticket.MaxCPUPct > 0 {
+			fmt.Fprintf(w, "          %s %s\n", p.Dim("gate:"), gateText(e.Ticket))
+		}
 		if e.PayloadError != "" {
 			fmt.Fprintf(w, "  %s\n", p.Red(fmt.Sprintf("        ticket unreadable: %s", e.PayloadError)))
 		}
@@ -145,6 +172,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 			if e.Ticket.Reason != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("reason:"), e.Ticket.Reason)
 			}
+			if e.Ticket.MaxCPUPct > 0 {
+				fmt.Fprintf(w, "        %s %s\n", p.Dim("gate:"), gateText(e.Ticket))
+			}
 			if e.PayloadError != "" {
 				fmt.Fprintf(w, "  %s\n", p.Red(fmt.Sprintf("      ticket unreadable: %s", e.PayloadError)))
 			}
@@ -159,8 +189,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 }
 
 // paintEvent colors one lane.log line: the timestamp dim, the event verb by
-// what it means (acquire green, enqueue cyan, release dim, giveups and
-// force-releases red). Unknown shapes pass through untouched.
+// what it means (acquire and gate-pass green, enqueue cyan, release dim,
+// gate-wait yellow like config, giveups and force-releases red). Unknown
+// shapes pass through untouched.
 func paintEvent(p colorize.Palette, line string) string {
 	const key = "event="
 	i := strings.Index(line, key)
@@ -175,7 +206,7 @@ func paintEvent(p colorize.Palette, line string) string {
 	}
 	var verb string
 	switch name {
-	case "acquire":
+	case "acquire", "gate-pass":
 		verb = p.Green("event=" + name)
 	case "enqueue":
 		verb = p.Cyan("event=" + name)
@@ -183,7 +214,7 @@ func paintEvent(p colorize.Palette, line string) string {
 		verb = p.Dim("event=" + name)
 	case "giveup", "force-release", "reaped", "kill", "kill-request":
 		verb = p.Red("event=" + name)
-	case "config":
+	case "config", "gate-wait":
 		verb = p.Yellow("event=" + name)
 	default:
 		verb = "event=" + name
@@ -195,6 +226,18 @@ func paintEvent(p colorize.Palette, line string) string {
 		out = p.Dim(line[:19]) + out[19:]
 	}
 	return out
+}
+
+// gateText renders the advisory load gate of a ticket; numeric fields only,
+// so there is nothing to escape beyond the fixed format.
+func gateText(t lane.Ticket) string {
+	s := fmt.Sprintf("cpu<%.0f%% for %s", t.MaxCPUPct, time.Duration(t.IdleForNanos))
+	if t.GateDoneNano > 0 {
+		s += " (passed)"
+	} else if t.GateStartNano > 0 {
+		s += " (waiting)"
+	}
+	return s
 }
 
 // exclusiveTag marks a participant that asked for the queue alone, so a

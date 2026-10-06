@@ -36,6 +36,7 @@ func startHolder(t *testing.T, incoda, stamp, state, key, label string, holdMS i
 func TestKillHolderCooperatively(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kill")
 
 	holder, holderErr := startHolder(t, incoda, stamp, state, "kill", "victim", 30000, "50ms")
 	waitFor(t, incoda, state, "kill", func(q queueReport) bool { return len(q.Holders) == 1 })
@@ -63,7 +64,7 @@ func TestKillHolderCooperatively(t *testing.T) {
 	if n := countTickets(t, state, "kill"); n != 0 {
 		t.Fatalf("%d ticket(s) left after the kill", n)
 	}
-	log, _ := os.ReadFile(filepath.Join(state, "queues", "kill", "lane.log"))
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "kill"), "lane.log"))
 	if !strings.Contains(string(log), "event=kill ") || !strings.Contains(string(log), "reason=") {
 		t.Fatalf("lane.log should record the kill with its reason:\n%s", log)
 	}
@@ -72,6 +73,7 @@ func TestKillHolderCooperatively(t *testing.T) {
 func TestKillWaiterCancelsIt(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kw")
 
 	holder, _ := startHolder(t, incoda, stamp, state, "kw", "h", 4000, "50ms")
 	defer func() { _ = holder.Wait() }()
@@ -115,6 +117,7 @@ func TestKillRefusals(t *testing.T) {
 func TestKillDuringMultiKeyWait(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "mk2-a", "mk2-b")
 
 	blocker, _ := startHolder(t, incoda, stamp, state, "mk2-b", "blocker", 30000, "50ms")
 	defer func() { _ = blocker.Process.Kill(); _ = blocker.Wait() }()
@@ -154,6 +157,7 @@ func TestKillDuringMultiKeyWait(t *testing.T) {
 func TestKillForceTerminates(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "kf")
 
 	// A holder polling every 10 s stands in for one that never answers: it
 	// cannot notice the request before the killer gives up on it, so the
@@ -176,8 +180,66 @@ func TestKillForceTerminates(t *testing.T) {
 		}
 	}
 	waitFor(t, incoda, state, "kf", func(q queueReport) bool { return len(q.Holders) == 0 })
-	log, _ := os.ReadFile(filepath.Join(state, "queues", "kf", "lane.log"))
+	log, _ := os.ReadFile(filepath.Join(laneDir(state, "kf"), "lane.log"))
 	if !strings.Contains(string(log), "forced=true") {
 		t.Fatalf("lane.log should record the forced kill:\n%s", log)
+	}
+}
+
+// TestKillReasonEscaped: a reason carrying a raw ESC byte (an attacker's or
+// a careless caller's ANSI payload) must not repaint the killed job's
+// terminal and must not split a lane.log line in two. The notice on the
+// holder's stderr gets the literal \x1b text in place of the control byte,
+// and every kill line in lane.log stays exactly one line with no raw ESC
+// in it.
+func TestKillReasonEscaped(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "killesc")
+
+	holder, holderErr := startHolder(t, incoda, stamp, state, "killesc", "victim", 30000, "50ms")
+	waitFor(t, incoda, state, "killesc", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	reason := "evil\x1b[31mred"
+	out, code := runIncoda(t, incoda, state, "kill", "--queue", "killesc", "--pid", strconv.Itoa(holder.Process.Pid),
+		"--reason", reason)
+	if code != 0 {
+		t.Fatalf("kill: exit %d\n%s", code, out)
+	}
+	if got := exitCodeOf(holder.Wait()); got != 124 {
+		t.Fatalf("a killed run exits 124, got %d; stderr:\n%s", got, holderErr.String())
+	}
+
+	s := holderErr.String()
+	if strings.ContainsRune(s, '\x1b') {
+		t.Fatalf("holder stderr must carry no raw ESC byte, got:\n%q", s)
+	}
+	if !strings.Contains(s, `\x1b[31mred`) {
+		t.Fatalf("holder stderr should show the reason with \\x1b escaped literally, got:\n%s", s)
+	}
+
+	log, err := os.ReadFile(filepath.Join(laneDir(state, "killesc"), "lane.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(log, '\x1b') {
+		t.Fatalf("lane.log must carry no raw ESC byte, got:\n%q", log)
+	}
+	lines := strings.Split(strings.TrimRight(string(log), "\n"), "\n")
+	if got, want := len(lines), strings.Count(string(log), "event="); got != want {
+		t.Fatalf("lane.log has %d line(s) but %d event(s); a reason must not split a line in two:\n%s", got, want, log)
+	}
+	killLines := 0
+	for _, line := range lines {
+		if !strings.Contains(line, "reason=") {
+			continue
+		}
+		killLines++
+		if !strings.Contains(line, `\x1b[31mred`) {
+			t.Fatalf("kill line should carry the escaped reason, got:\n%s", line)
+		}
+	}
+	if killLines == 0 {
+		t.Fatalf("expected at least one by=/reason= line in lane.log:\n%s", log)
 	}
 }

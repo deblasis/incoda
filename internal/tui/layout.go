@@ -16,11 +16,15 @@ func (m Model) layoutWidth() int {
 }
 
 // bodyStartRow is the terminal row where the overview/queue body begins,
-// derived from the same header and gauge strings render() uses so hit
-// testing stays aligned if either wraps.
+// derived from the same header, banner and gauge strings render() uses so
+// hit testing stays aligned if any of them wraps.
 func (m Model) bodyStartRow() int {
 	w := m.layoutWidth()
-	return lipgloss.Height(m.renderHeader(w)) + lipgloss.Height(m.renderGauge(w)) + 1
+	rows := lipgloss.Height(m.renderHeader(w)) + lipgloss.Height(m.renderGauge(w)) + 1
+	if b := m.renderBanner(w); b != "" {
+		rows += lipgloss.Height(b)
+	}
+	return rows
 }
 
 // overviewQueueAt maps a terminal row to a queue index in the overview.

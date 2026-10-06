@@ -146,14 +146,11 @@ func New(opt Options) Model {
 	if opt.Load == nil {
 		dir, version, key, events := opt.Dir, opt.Version, opt.Key, opt.Events
 		opt.Load = func() (*report.Report, error) {
-			keys := []string{key}
-			if key == "" {
-				var err error
-				if keys, err = report.Keys(dir); err != nil {
-					return nil, err
-				}
+			var keys []string
+			if key != "" {
+				keys = []string{key}
 			}
-			return report.Build(dir, version, keys, events)
+			return report.Build(dir, version, keys, key == "", events)
 		}
 	}
 	in := textinput.New()

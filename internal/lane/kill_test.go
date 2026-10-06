@@ -155,3 +155,34 @@ func killFiles(t *testing.T, dir string) []string {
 	}
 	return out
 }
+
+// TestAcquireCheckEndsTheWait: the per-poll Check ends a wait with its
+// error, as a lane closed while the run waits on it does.
+func TestAcquireCheckEndsTheWait(t *testing.T) {
+	q, err := Open(t.TempDir(), "check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	h, err := q.Enroll(Ticket{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Release(0)
+	w, err := q.Enroll(Ticket{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Release(0)
+	stop := errors.New("closed while waiting")
+	polls := 0
+	err = w.Acquire(context.Background(), AcquireOptions{Wait: 5 * time.Second, Poll: 10 * time.Millisecond, Check: func() error {
+		if polls++; polls == 3 {
+			return stop
+		}
+		return nil
+	}})
+	if !errors.Is(err, stop) || polls != 3 {
+		t.Fatalf("Acquire = %v after %d polls", err, polls)
+	}
+}

@@ -21,7 +21,7 @@ type supervisor struct {
 // for any reason its handle closes, and the kernel terminates every process
 // still in the job. That is what keeps a build tree from outliving its lane
 // holder.
-func newSupervisor(cmd *exec.Cmd) (*supervisor, error) {
+func newSupervisor(cmd *exec.Cmd, _ bool) (*supervisor, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create job object: %w", err)

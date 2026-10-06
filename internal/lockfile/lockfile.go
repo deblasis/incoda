@@ -5,7 +5,10 @@
 // power. There is no staleness to detect and no takeover path to get wrong.
 package lockfile
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // File is an open file handle that can carry an exclusive whole-file lock.
 //
@@ -21,6 +24,18 @@ type File struct {
 // blocks unlink entirely.
 func Open(path string) (*File, error) {
 	f, err := openLockable(path)
+	if err != nil {
+		return nil, err
+	}
+	return &File{f: f}, nil
+}
+
+// OpenExisting opens path for locking without ever creating it. A probe of
+// another process's ticket uses it, so a probe of a ticket that has just
+// been released cannot recreate the file and make it look alive. A missing
+// file yields an error that satisfies errors.Is(err, os.ErrNotExist).
+func OpenExisting(path string) (*File, error) {
+	f, err := openExistingLockable(path)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +113,21 @@ func (l *File) Truncate(b []byte) error {
 // liveness test: a ticket file whose lock is free has no living owner.
 func IsFree(path string) (bool, error) {
 	l, err := Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer l.Close()
+	return l.TryLock()
+}
+
+// IsFreeExisting is IsFree for a path that must not be created: a missing
+// file reads as free, because no process can hold a lock on a file that is
+// gone. Read-only scans use it so that looking never writes.
+func IsFreeExisting(path string) (bool, error) {
+	l, err := OpenExisting(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
 	if err != nil {
 		return false, err
 	}

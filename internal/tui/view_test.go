@@ -43,3 +43,15 @@ func TestRenderGaugeFallbackWithoutAvailableMemory(t *testing.T) {
 		t.Fatalf("expected sysctl fallback text, got %q", out)
 	}
 }
+
+func TestBannerShowsUnderTheHeader(t *testing.T) {
+	m := newTestModel(nil)
+	base := m.bodyStartRow()
+	m.rep.Banner = "state not upgraded yet: the next mutating incoda command upgrades it"
+	if out := m.render(); !strings.Contains(out, "incoda: state not upgraded yet") {
+		t.Fatalf("banner missing:\n%s", out)
+	}
+	if got := m.bodyStartRow(); got != base+1 {
+		t.Fatalf("click rows must move down with the banner: %d, want %d", got, base+1)
+	}
+}

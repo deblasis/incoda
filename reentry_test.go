@@ -15,6 +15,7 @@ import (
 func TestReentrantRunPassesThrough(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "other", "re")
 	stamps := t.TempDir()
 	marker := filepath.Join(stamps, "inner.txt")
 
@@ -34,7 +35,7 @@ func TestReentrantRunPassesThrough(t *testing.T) {
 	if !strings.Contains(string(out), "already held") {
 		t.Fatalf("the inner run should say it is riding its parent's lane, got:\n%s", out)
 	}
-	log, err := os.ReadFile(filepath.Join(state, "queues", "re", "lane.log"))
+	log, err := os.ReadFile(filepath.Join(laneDir(state, "re"), "lane.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +62,7 @@ func TestReentrantRunPassesThrough(t *testing.T) {
 func TestReleaseRecordsJobStats(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "acct")
 	stamps := t.TempDir()
 
 	cmd := exec.Command(incoda, "run", "--queue", "acct", "--quiet", "--owner", "test-session",
@@ -70,7 +72,7 @@ func TestReleaseRecordsJobStats(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
-	log, err := os.ReadFile(filepath.Join(state, "queues", "acct", "lane.log"))
+	log, err := os.ReadFile(filepath.Join(laneDir(state, "acct"), "lane.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

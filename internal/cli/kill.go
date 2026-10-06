@@ -9,8 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/proc"
+	"github.com/deblasis/incoda/internal/procinfo"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // cmdKill addresses a kill request to one participant and reports whether it
@@ -19,12 +23,13 @@ import (
 // why, takes its job tree down and exits 124. --force is for the participant
 // that never answers.
 func cmdKill(args []string, stdout, stderr io.Writer) error {
+	start := time.Now()
 	fs := newFlagSet("kill", stderr)
 	queue := fs.String("queue", "", "queue key (defaults to $INCODA_QUEUE)")
 	pid := fs.Int("pid", 0, "pid of the holder or waiter, as status shows it")
 	reason := fs.String("reason", "", "why; the killed job's owner reads this on their stderr and the log keeps it")
 	wait := fs.Duration("wait", 5*time.Second, "how long to give the participant to acknowledge before giving up, or terminating it with --force")
-	force := fs.Bool("force", false, "terminate the participant's process if it does not acknowledge within --wait")
+	force := fs.Bool("force", false, "terminate the participant's process if it does not acknowledge within --wait (an older incoda is always ended with its whole job, with or without it)")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]\n\n")
@@ -44,17 +49,44 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dir, err := stateDir()
+	// kill addresses the layout it finds and never creates a lane, never
+	// migrates and never takes machine.lock (spec 3.2). An older incoda
+	// (a ticket under queues/, strays/, or lanes/ or queues.new/ while
+	// machine.json is absent) gets no request: it is always ended with its
+	// whole job by the old-holder kill, with or without --force. v0.3.0 to
+	// v0.6.0 would acknowledge a request by ending only their direct child,
+	// and the lane would read free while its descendants run.
+	dir, v, err := readState()
 	if err != nil {
 		return err
 	}
-	q, err := lane.Open(dir, key)
+	t, err := machine.FindKillTarget(dir, v, key, *pid, lane.ProbeDeadline(time.Time{}, *wait))
+	if err != nil {
+		return exitWith(ExitState, "cannot look for pid %d on queue %q: %s", *pid, key, textsafe.Escape(err.Error()))
+	}
+	req := lane.KillRequest{By: whoami(), ByPID: os.Getpid(), Reason: *reason}
+	switch t.Kind {
+	case machine.TargetNone:
+		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
+	case machine.TargetOld:
+		fmt.Fprintf(stdout, "%s pid %d (an older incoda) on queue %q: %s\n",
+			p.Yellow("kill:"), *pid, key, textsafe.Escape(lane.Ticket{Command: t.Command}.CommandString()))
+		return killOld(dir, t, req, stdout, p)
+	}
+
+	q, err := lane.OpenIn(t.Root, key, lane.Existing)
+	if errors.Is(err, os.ErrNotExist) {
+		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
+	}
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
 	}
 	defer q.Close()
+	// The request and the checks after it wait for the registry lock only
+	// within --wait (plus the floor), so a stopped incoda keeping that lock
+	// cannot hang kill.
+	q.SetBudget(start, *wait)
 
-	req := lane.KillRequest{By: whoami(), ByPID: os.Getpid(), Reason: *reason}
 	entry, err := q.RequestKill(*pid, req)
 	if errors.Is(err, lane.ErrNoParticipant) {
 		return usagef("%v", err)
@@ -81,10 +113,24 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 			"pid %d has not acknowledged after %s. It may be an incoda from before kill existed, or wedged. "+
 				"Rerun with --force to terminate it; the kernel frees the lane when it dies", *pid, *wait)
 	}
-	if err := proc.Terminate(*pid, ExitKilled); err != nil {
+	// Open the process first (on Windows the handle pins it, so the pid
+	// cannot name another process from here on), then check it still holds
+	// a ticket, and only then terminate it through that handle.
+	h, err := proc.Open(*pid)
+	if err == nil {
+		defer h.Close()
+	}
+	if gone, gerr := q.WaitGone(*pid, 0, 100*time.Millisecond); gerr == nil && gone {
+		fmt.Fprintf(stdout, "%s\n", p.Green(fmt.Sprintf("pid %d released the lane", *pid)))
+		return nil
+	}
+	if err != nil {
 		return exitWith(ExitState, "cannot terminate pid %d: %v", *pid, err)
 	}
-	q.Logf("queue=%s event=kill pid=%d by=%s reason=%q forced=true", key, *pid, req.By, req.Reason)
+	if err := h.Terminate(ExitKilled); err != nil {
+		return exitWith(ExitState, "cannot terminate pid %d: %v", *pid, err)
+	}
+	q.Logf("queue=%s event=kill pid=%d by=%s reason=%s forced=true", key, *pid, textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))
 	gone, err = q.WaitGone(*pid, 5*time.Second, 100*time.Millisecond)
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
@@ -93,6 +139,19 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "pid %d was terminated but its ticket is still held; check `incoda status --queue %s`", *pid, key)
 	}
 	fmt.Fprintf(stdout, "%s\n", p.Green(fmt.Sprintf("pid %d terminated; the kernel released the lane", *pid)))
+	return nil
+}
+
+// killOld force-ends an older incoda and its whole job (spec 3.2) and
+// records the kill in the lane.log of the directory its ticket is in.
+func killOld(dir string, t machine.KillTarget, req lane.KillRequest, stdout io.Writer, p colorize.Palette) error {
+	res, err := machine.KillOldHolder(dir, t, procinfo.ParentChain())
+	if err != nil {
+		return machineExit(err)
+	}
+	lane.AppendLog(t.Dir, "queue=%s event=kill pid=%d by=%s reason=%s forced=true old=true processes=%d",
+		t.Key, t.PID, textsafe.LogValue(req.By), textsafe.LogValue(req.Reason), res.Processes)
+	fmt.Fprintf(stdout, "%s\n", p.Green(fmt.Sprintf("pid %d and its job (%d more process(es)) terminated; the kernel released the lane", t.PID, res.Processes)))
 	return nil
 }
 

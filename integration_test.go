@@ -68,7 +68,7 @@ func laneEnv(stateDir string) []string {
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		switch strings.ToUpper(k) {
-		case "INCODA_DIR", "INCODA_QUEUE":
+		case "INCODA_DIR", "INCODA_QUEUE", "INCODA_HELD":
 			continue
 		}
 		env = append(env, kv)
@@ -158,6 +158,7 @@ func maxOverlap(ivs []interval) (int, [][2]string) {
 func TestMutualExclusionAcrossDifferentWorkingDirectories(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "shared")
 	stamps := t.TempDir()
 
 	const n = 5
@@ -234,6 +235,7 @@ func TestMutualExclusionAcrossDifferentWorkingDirectories(t *testing.T) {
 func TestSlotsAllowExactlyN(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "twolane")
 	stamps := t.TempDir()
 
 	const n = 6
@@ -288,6 +290,7 @@ func TestSlotsAllowExactlyN(t *testing.T) {
 func TestConfiguredSlotsAreHonored(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "cfglane")
 	stamps := t.TempDir()
 
 	const n = 6
@@ -355,6 +358,7 @@ func TestConfiguredSlotsAreHonored(t *testing.T) {
 func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "cfgref")
 	stamps := t.TempDir()
 
 	cfg := exec.Command(incoda, "config", "cfgref", "--slots", "3")
@@ -403,6 +407,7 @@ func TestDisagreeingSlotsRefusedOnConfiguredQueue(t *testing.T) {
 func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "racea", "raceb")
 	stamps := t.TempDir()
 
 	// racea,raceb both start at slots 1 so the pre-check passes.
@@ -417,11 +422,19 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	// A holder keeps racea busy so the contender finishes its pre-check of
 	// both keys and then waits before it can enroll raceb.
 	holder := exec.Command(incoda, "run", "--queue", "racea", "--wait", "60s", "--poll", "50ms",
-		"--quiet", "--", stamp, filepath.Join(stamps, "holder.txt"), "holder", "6000")
+		"--quiet", "--", stamp, filepath.Join(stamps, "holder.txt"), "holder", "60000")
 	holder.Env = laneEnv(state)
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if holder.ProcessState == nil {
+			_ = holder.Process.Kill()
+		}
+	}()
+
+	// Wait until the holder actually holds racea before starting the contender.
+	waitFor(t, incoda, state, "racea", func(q queueReport) bool { return len(q.Holders) == 1 })
 
 	contender := exec.Command(incoda, "run", "--queue", "racea,raceb", "--slots", "1",
 		"--wait", "60s", "--poll", "50ms", "--quiet",
@@ -436,10 +449,11 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 
 	// The contender waiting on racea proves its pre-check of both keys is
 	// done: the enrollment loop runs after every key was checked.
+	// Also verify the waiter is actually the contender (by PID).
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		rep := statusJSON(t, incoda, state, "racea")
-		if len(rep.Queues) == 1 && len(rep.Queues[0].Waiting) == 1 {
+		if len(rep.Queues) == 1 && len(rep.Queues[0].Waiting) == 1 && rep.Queues[0].Waiting[0].Ticket.PID == contender.Process.Pid {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -458,6 +472,22 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 		t.Fatalf("reconfig raceb: %v\n%s", err, out)
 	}
 
+	// Only now let the contender reach raceb: the config change has landed,
+	// so the enroll-time check must see it whatever the machine's load.
+	if out, code := func() (string, int) {
+		cmd := exec.Command(incoda, "kill", "--queue", "racea",
+			"--pid", strconv.Itoa(holder.Process.Pid), "--reason", "release the holder")
+		cmd.Env = laneEnv(state)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return string(output), exitCodeOf(err)
+		}
+		return string(output), 0
+	}(); code != 0 {
+		t.Fatalf("kill holder: exit %d\n%s", code, out)
+	}
+	_ = holder.Wait()
+
 	err := contender.Wait()
 	if err == nil {
 		t.Fatal("the contender should have been refused at enrollment")
@@ -474,9 +504,6 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 	if got := countTickets(t, state, "raceb"); got != 0 {
 		t.Fatalf("the refused run left %d ticket(s) on raceb", got)
 	}
-	if err := holder.Wait(); err != nil {
-		t.Fatalf("holder: %v", err)
-	}
 }
 
 // TestHardKilledHolderFreesTheLane is the headline claim over build-lane: a
@@ -485,6 +512,7 @@ func TestDisagreeingSlotsRefusedAtEnrollAfterConfigChange(t *testing.T) {
 func TestHardKilledHolderFreesTheLane(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "crash")
 	stamps := t.TempDir()
 
 	victim := exec.Command(incoda, "run", "--queue", "crash", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -549,6 +577,7 @@ func TestHardKilledHolderFreesTheLane(t *testing.T) {
 func TestFIFOOrder(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fifo")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "fifo", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -625,6 +654,7 @@ func TestFIFOOrder(t *testing.T) {
 func TestWaitTimeoutExitCode(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "busy")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "busy", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -671,6 +701,7 @@ func TestWaitTimeoutExitCode(t *testing.T) {
 func TestExitCodePassthrough(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "codes")
 	stamps := t.TempDir()
 
 	for _, want := range []int{0, 1, 7, 42} {
@@ -770,6 +801,7 @@ func TestStatusOnNeverUsedQueue(t *testing.T) {
 func TestForceReleaseRefusesLiveHolderFromCLI(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fr")
 	stamps := t.TempDir()
 
 	holder := exec.Command(incoda, "run", "--queue", "fr", "--wait", "60s", "--poll", "50ms", "--quiet",
@@ -807,13 +839,13 @@ func TestDoctorAndVersionAndQueues(t *testing.T) {
 	state := t.TempDir()
 
 	cmd := exec.Command(incoda, "doctor")
-	cmd.Env = laneEnv(state)
+	cmd.Env = doctorEnv(state, t.TempDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
 	}
 	s := string(out)
-	for _, want := range []string{state, "locking: enforced", "cwd-independent: yes", "WARNING: INCODA_DIR is set"} {
+	for _, want := range []string{state, "locking: enforced", "cwd-independent: yes", "attention: INCODA_DIR is set"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, s)
 		}
@@ -849,6 +881,9 @@ func TestChildProcessTreeDiesWithIncoda(t *testing.T) {
 	state := t.TempDir()
 	stamps := t.TempDir()
 	marker := filepath.Join(stamps, "tree.txt")
+	// A project lane refuses to run until it is linked to a pool (spec 4.1),
+	// so the victim needs a link or it never enrolls and holds nothing.
+	linkTestKeys(t, incoda, state, "tree")
 
 	victim := exec.Command(incoda, "run", "--queue", "tree", "--quiet",
 		"--", stamp, marker, "tree", "8000")
@@ -890,10 +925,13 @@ func TestChildProcessTreeDiesWithIncoda(t *testing.T) {
 // ---- helpers ----
 
 type ticketPayload struct {
-	PID     int      `json:"pid"`
-	Slots   int      `json:"slots"`
-	Command []string `json:"command"`
-	Dir     string   `json:"cwd"`
+	PID       int      `json:"pid"`
+	Slots     int      `json:"slots"`
+	Exclusive bool     `json:"exclusive"`
+	Command   []string `json:"command"`
+	Dir       string   `json:"cwd"`
+	Via       []string `json:"via"`
+	Wait      string   `json:"wait"`
 }
 
 type entry struct {
@@ -949,9 +987,12 @@ func waitFor(t *testing.T, incoda, state, key string, ok func(queueReport) bool)
 	}
 }
 
+// laneDir is where a key's state lives on layout 2.
+func laneDir(state, key string) string { return filepath.Join(state, "lanes", key) }
+
 func countTickets(t *testing.T, state, key string) int {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(state, "queues", key))
+	entries, err := os.ReadDir(laneDir(state, key))
 	if err != nil {
 		return 0
 	}
