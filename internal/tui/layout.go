@@ -56,9 +56,10 @@ func (m Model) overviewQueueRow(i int) int {
 type overviewRow struct{ y, idx int }
 
 // overviewLayout walks the overview the way renderOverview draws it: the
-// column header, then (when the pools system is present) a POOLS section
-// header, the pools, a PROJECT LANES header, and the lanes. Rendering and
-// hit testing both go through this walk so they can never disagree.
+// column header, then (when the pools system is present) a blank line and a
+// POOLS section header, the pools, a blank line and a PROJECT LANES header,
+// and the lanes. Rendering and hit testing both go through this walk so
+// they can never disagree.
 func (m Model) overviewLayout() []overviewRow {
 	if m.rep == nil || len(m.rep.Queues) == 0 {
 		return nil
@@ -69,9 +70,10 @@ func (m Model) overviewLayout() []overviewRow {
 	order := overviewOrder(m.rep)
 	for n, idx := range order {
 		if grouped {
-			// A header line before the first row of each section.
+			// A section transition draws two lines — the blank and the
+			// header — before the section's first queue row.
 			if n == 0 || m.rep.Queues[idx].IsPool != m.rep.Queues[order[n-1]].IsPool {
-				y++
+				y += 2
 			}
 		}
 		out = append(out, overviewRow{y: y, idx: idx})

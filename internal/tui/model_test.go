@@ -385,6 +385,46 @@ func TestGroupedOverviewClickLandsOnTheLane(t *testing.T) {
 	}
 }
 
+// TestGroupedOverviewClicksUseScreenCoordinates: hit testing must resolve
+// against where the rows are actually painted, not against a position
+// derived from the hit-tester itself. The screen lines are read from the
+// rendered view: the POOLS header, its pool row beneath it, the PROJECT
+// LANES header, and the lane rows beneath that.
+func TestGroupedOverviewClicksUseScreenCoordinates(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, poolsSampleReport(), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	lines := strings.Split(view(m), "\n")
+	rowOf := func(substr string) int {
+		for i, l := range lines {
+			if strings.Contains(l, substr) {
+				return i
+			}
+		}
+		t.Fatalf("no screen line contains %q:\n%s", substr, view(m))
+		return -1
+	}
+	// After the model's pools-first sort: builds=0, wintty-build=1,
+	// wintty-desktop=2. The pool row sits directly under the POOLS header;
+	// the first lane row directly under the PROJECT LANES header.
+	pools := rowOf("POOLS —")
+	lanes := rowOf("PROJECT LANES —")
+	for _, tc := range []struct {
+		y   int
+		key string
+		idx int
+	}{
+		{pools + 1, "builds", 0},
+		{lanes + 1, "wintty-build", 1},
+		{lanes + 2, "wintty-desktop", 2},
+	} {
+		mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: tc.y, Button: tea.MouseLeft})
+		m = mm.(Model)
+		if m.qsel != tc.idx || m.queueAt(m.qsel).Key != tc.key {
+			t.Fatalf("click on the %s screen row (y=%d) selected %d (%s), want %d",
+				tc.key, tc.y, m.qsel, m.queueAt(m.qsel).Key, tc.idx)
+		}
+	}
+}
+
 func TestDrillDownNamesTheKindAndTheLink(t *testing.T) {
 	m := newTestModelRep(&fakeKiller{}, poolsSampleReport(), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
 	m = press(m, "enter") // builds: the pool
