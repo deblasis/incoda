@@ -213,14 +213,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.loadErr = nil
 			m.rep = msg.rep
-			// Closed queues sink to the bottom: a retired key is worth
-			// seeing, not worth being the first row every time.
+			// The order the model sorts is the order the screen draws and
+			// the cursor walks (qsel indexes this slice): pools first, then
+			// project lanes, closed keys sinking within their group, each
+			// group by key. A retired key is worth seeing, not worth being
+			// the first row every time.
 			sort.SliceStable(m.rep.Queues, func(i, j int) bool {
-				ci, cj := m.rep.Queues[i].Config.Closed != "", m.rep.Queues[j].Config.Closed != ""
+				qi, qj := m.rep.Queues[i], m.rep.Queues[j]
+				if qi.IsPool != qj.IsPool {
+					return qi.IsPool
+				}
+				ci, cj := qi.Config.Closed != "", qj.Config.Closed != ""
 				if ci != cj {
 					return !ci
 				}
-				return m.rep.Queues[i].Key < m.rep.Queues[j].Key
+				return qi.Key < qj.Key
 			})
 		}
 		m.clamp()

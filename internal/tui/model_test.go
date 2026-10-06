@@ -299,6 +299,34 @@ func TestKillRefusalIsShown(t *testing.T) {
 	}
 }
 
+// TestSelectionWalksTheDisplayOrder: the selection cursor must visit the
+// rows in the order the screen draws them — pools first, then lanes — not
+// in the report's alphabetical order. The fixture puts a lane alphabetically
+// before both pools, so a cursor indexing the report order would skip the
+// pools entirely.
+func TestSelectionWalksTheDisplayOrder(t *testing.T) {
+	rep := &report.Report{
+		Schema: 1, Version: "t", Host: "box", StateDirSource: "platform default",
+		Queues: []report.Queue{
+			{Key: "app-build", Exists: true, EffectiveSlots: 1, Config: lane.Config{Pools: []string{"builds"}}},
+			{Key: "builds", Exists: true, EffectiveSlots: 1, IsPool: true},
+			{Key: "tests", Exists: true, EffectiveSlots: 1, IsPool: true},
+		},
+	}
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	// The first row on screen is a pool, and it is the first stop of the
+	// cursor; the second press must land on the other pool, not jump to the
+	// lane that merely sorts first alphabetically.
+	for i, want := range []string{"builds", "tests", "app-build"} {
+		if got := m.queueAt(m.qsel).Key; got != want {
+			t.Fatalf("cursor stop %d: want %q, got %q", i, want, got)
+		}
+		if i < 2 {
+			m = press(m, "down")
+		}
+	}
+}
+
 func TestMouseClickSelectsOverviewRow(t *testing.T) {
 	m := newTestModel(&fakeKiller{})
 	y := m.overviewQueueRow(1) // wintty-desktop
