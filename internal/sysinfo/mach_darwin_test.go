@@ -50,13 +50,17 @@ func TestReadMemoryDarwinNoUnavailableFallback(t *testing.T) {
 }
 
 func TestDarwinCPUTotalsIdleAdvances(t *testing.T) {
-	// Mach may not bump HOST_CPU_LOAD_INFO on every rapid poll; wait for movement.
+	// Mach may not bump HOST_CPU_LOAD_INFO on every rapid poll; wait for
+	// movement. On an idle machine the kernel can serve the same stale
+	// snapshot to a fresh process's first reads for well over three seconds
+	// (CI has flaked here twice), so the window matches the bounded retry
+	// the production sampler uses rather than assuming a prompt counter.
 	time.Sleep(200 * time.Millisecond)
 	a, ok := darwinCPUTotals()
 	if !ok {
 		t.Fatal("first mach cpu sample failed")
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	var b cpuTotals
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
@@ -68,7 +72,7 @@ func TestDarwinCPUTotalsIdleAdvances(t *testing.T) {
 			goto check
 		}
 	}
-	t.Fatal("cpu counters did not advance within 3s")
+	t.Fatal("cpu counters did not advance within 10s")
 
 check:
 	total := b.total - a.total
