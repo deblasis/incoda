@@ -80,6 +80,17 @@ mkdir -p "$INSTALL_DIR"
 TARGET="$INSTALL_DIR/incoda"
 cp "$WORK/$ASSET" "$TARGET"
 chmod +x "$TARGET"
+
+# Release binaries are cross-compiled, so the darwin ones carry no code
+# signature, and Apple Silicon kills an unsigned binary on sight (SIGKILL,
+# exit 137) no matter how it was downloaded. An ad-hoc signature is enough:
+# this is not notarized software, it just has to be signed. Homebrew does
+# this re-signing at install time itself; this is the same step for the
+# curl-installed copy.
+if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$TARGET"
+fi
+
 printf 'incoda: installed to %s\n' "$TARGET"
 
 "$TARGET" version

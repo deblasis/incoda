@@ -166,15 +166,30 @@ func (m Model) renderOverview(w int) string {
 	}
 	head := fmt.Sprintf("  %-*s  %-*s  %*s  %*s  %*s  %s", keyW, "QUEUE", stateW, "STATE", heldW, "HELD", waitW, "WAITING", oldW, "OLDEST WAIT", "WHAT IT GUARDS")
 	lines := []string{st.colHead.Render(head)}
-	for i, q := range m.rep.Queues {
+	grouped := poolsGrouped(m.rep)
+	// The same order overviewLayout walks, so what the eye clicks is what
+	// the hit test resolves: pools first, then project lanes.
+	order := overviewOrder(m.rep)
+	prevPool := false
+	for n, idx := range order {
+		q := &m.rep.Queues[idx]
+		if grouped && (n == 0 || q.IsPool != prevPool) {
+			lines = append(lines, "")
+			if q.IsPool {
+				lines = append(lines, st.dim.Render("POOLS — machine-wide, shared by every project"))
+			} else {
+				lines = append(lines, st.dim.Render("PROJECT LANES — each runs through its linked pools"))
+			}
+		}
+		prevPool = q.IsPool
 		row := fmt.Sprintf("  %-*s  %-*s  %*s  %*s  %*s  %s",
 			keyW, q.Key,
-			stateW, plainState(q),
+			stateW, plainState(*q),
 			heldW, fmt.Sprintf("%d/%d", len(q.Holders), q.EffectiveSlots),
 			waitW, orDot(len(q.Waiting)),
-			oldW, oldestWait(q),
-			trunc(q.Config.Description, descW))
-		if i == m.qsel {
+			oldW, oldestWait(*q),
+			trunc(guards(*q), descW))
+		if idx == m.qsel {
 			lines = append(lines, st.selected.Render(padRight(row, w)))
 			continue
 		}
@@ -182,13 +197,34 @@ func (m Model) renderOverview(w int) string {
 		// is one solid highlight so the eye finds it first. The badge's
 		// padding is one space each side, so swapping it for the word
 		// plus its neighbouring spaces keeps the columns aligned.
-		painted := strings.Replace(row, " "+plainState(q)+" ", m.badge(q, false), 1)
+		painted := strings.Replace(row, " "+plainState(*q)+" ", m.badge(*q, false), 1)
 		lines = append(lines, painted)
 	}
 	if q := m.queueAt(m.qsel); q != nil {
 		lines = append(lines, "", m.renderQueueSummary(q, w))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// guards is what the WHAT IT GUARDS column shows: a pool guards itself, a
+// project lane guards its route through the pools it links to, and an
+// unlinked lane shows the one thing its owner must do next. The description
+// follows the marker when there is room.
+func guards(q report.Queue) string {
+	if q.IsPool {
+		return q.Config.Description
+	}
+	if len(q.Config.Pools) == 0 {
+		if q.Config.Description == "" {
+			return "UNLINKED"
+		}
+		return "UNLINKED · " + q.Config.Description
+	}
+	link := "→ " + strings.Join(q.Config.Pools, ",")
+	if q.Config.Description == "" {
+		return link
+	}
+	return link + " · " + q.Config.Description
 }
 
 // renderQueueSummary is the one-line drill-down hint under the overview: the
@@ -232,6 +268,16 @@ func (m Model) renderQueue(w int) string {
 		title += "  " + st.dim.Render("reason required")
 	}
 	lines = append(lines, title)
+	// The kind line: a pool is the machine-wide resource itself; a project
+	// lane names the pools its runs take, or the missing link that stops
+	// them. It is the one-line answer to "what does this queue depend on".
+	if q.IsPool {
+		lines = append(lines, st.dim.Render("kind: pool (machine-wide)"))
+	} else if len(q.Config.Pools) > 0 {
+		lines = append(lines, st.dim.Render("linked: → "+strings.Join(q.Config.Pools, ", ")))
+	} else {
+		lines = append(lines, st.evBad.Render("unlinked")+st.dim.Render(": runs are refused until it links a pool (incoda link "+q.Key+")"))
+	}
 	if q.Config.Description != "" {
 		lines = append(lines, st.dim.Render(q.Config.Description))
 	}

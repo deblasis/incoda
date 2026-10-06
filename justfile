@@ -66,6 +66,15 @@ dist TAG:
 		[ "$os" = "windows" ] && out="${out}.exe"
 		echo "building $out"
 		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$LD" -o "$out" .
+		# Cross-compiled from Linux, a darwin binary carries no signature,
+		# and Apple Silicon kills unsigned binaries on sight (SIGKILL, exit
+		# 137). An ad-hoc signature is enough: this is not notarized
+		# software, it just has to be *signed*. codesign exists wherever
+		# the darwin targets are built natively; install.sh re-signs for
+		# binaries built elsewhere.
+		if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+			codesign --force --sign - "$out"
+		fi
 	done
 	if command -v sha256sum >/dev/null 2>&1; then SUM="sha256sum"; else SUM="shasum -a 256"; fi
 	(cd dist && $SUM incoda_* > SHA256SUMS && cat SHA256SUMS)
