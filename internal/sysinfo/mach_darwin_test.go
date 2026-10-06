@@ -51,10 +51,11 @@ func TestReadMemoryDarwinNoUnavailableFallback(t *testing.T) {
 
 func TestDarwinCPUTotalsIdleAdvances(t *testing.T) {
 	// Mach may not bump HOST_CPU_LOAD_INFO on every rapid poll; wait for
-	// movement. On an idle machine the kernel can serve the same stale
-	// snapshot to a fresh process's first reads for well over three seconds
-	// (CI has flaked here twice), so the window matches the bounded retry
-	// the production sampler uses rather than assuming a prompt counter.
+	// movement of BOTH counters. On an idle machine the aggregate total
+	// (user+system) can move on kernel housekeeping while the idle counter
+	// lags behind it, and stopping at the first tick of total would then
+	// read an unmoved idle as a wrong layout. The layout claim under test
+	// is "index 2 is idle", which only idle movement can confirm.
 	time.Sleep(200 * time.Millisecond)
 	a, ok := darwinCPUTotals()
 	if !ok {
@@ -68,7 +69,7 @@ func TestDarwinCPUTotalsIdleAdvances(t *testing.T) {
 		if !ok {
 			t.Fatal("mach cpu sample failed")
 		}
-		if b.total > a.total {
+		if b.total > a.total && b.idle > a.idle {
 			goto check
 		}
 	}
