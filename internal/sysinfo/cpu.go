@@ -41,8 +41,16 @@ func cpuUsagePct(a, b cpuTotals) (float64, bool) {
 	return 100 * float64(total-idle) / float64(total), true
 }
 
+// baselineRetries bounds how often sampleCPU waits for counters that have
+// not moved yet. A kernel can serve the same stale snapshot to the first
+// reads of a process (mach HOST_CPU_LOAD_INFO on an idle mac does), and
+// giving up after one interval made a first-ever reading flake exactly
+// there; movement within a second is the observed worst case.
+const baselineRetries = 10
+
 // sampleCPU diffs the current counters against the last sample with no sleep.
-// The first call sleeps once to establish a baseline.
+// The first call sleeps once to establish a baseline, retrying a bounded
+// number of times when the counters have not advanced yet.
 func sampleCPU(source string, read func() (cpuTotals, bool)) CPU {
 	cur, ok := read()
 	if !ok {
@@ -63,19 +71,28 @@ func sampleCPU(source string, read func() (cpuTotals, bool)) CPU {
 	}
 	cpuMu.Unlock()
 
-	time.Sleep(sampleInterval)
-	cur, ok = read()
-	if !ok {
-		return CPU{Source: source, Err: source + " read failed"}
+	for attempt := 0; ; attempt++ {
+		time.Sleep(sampleInterval)
+		next, ok := read()
+		if !ok {
+			return CPU{Source: source, Err: source + " read failed"}
+		}
+		cur = next
+		cpuMu.Lock()
+		if pct, ok := cpuUsagePct(cpuPrev, cur); ok {
+			cpuPrev = cur
+			lastPct, havePct = pct, true
+			cpuMu.Unlock()
+			return CPU{UsagePct: pct, HaveUsage: true, Source: source}
+		}
+		cpuMu.Unlock()
+		if attempt >= baselineRetries-1 {
+			break
+		}
 	}
 
 	cpuMu.Lock()
 	defer cpuMu.Unlock()
-	if pct, ok := cpuUsagePct(cpuPrev, cur); ok {
-		cpuPrev = cur
-		lastPct, havePct = pct, true
-		return CPU{UsagePct: pct, HaveUsage: true, Source: source}
-	}
 	if havePct {
 		return CPU{UsagePct: lastPct, HaveUsage: true, Source: source}
 	}
