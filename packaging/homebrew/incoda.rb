@@ -2,18 +2,18 @@
 class Incoda < Formula
   desc "Keyed, machine-local job lane for builds, tests and AI-agent fleets"
   homepage "https://github.com/deblasis/incoda"
-  version "0.5.1"
+  version "0.7.1"
   license "MIT"
   depends_on :macos
 
   on_macos do
     on_arm do
-      url "https://github.com/deblasis/incoda/releases/download/v0.5.1/incoda_darwin_arm64"
-      sha256 "91958e6e02aa70a8b875a3493e20d795b94ac6cde0de94f59f85756cd9401542"
+      url "https://github.com/deblasis/incoda/releases/download/v0.7.1/incoda_darwin_arm64"
+      sha256 "86f60d1891e91db507cf467faae14d13e87f7f7e563f3a1039bd0bbfb1533638"
     end
     on_intel do
-      url "https://github.com/deblasis/incoda/releases/download/v0.5.1/incoda_darwin_amd64"
-      sha256 "9580bd810257c2ae854d1cb1ab932d4eed2c829c3da561792f3cd26dc844c2df"
+      url "https://github.com/deblasis/incoda/releases/download/v0.7.1/incoda_darwin_amd64"
+      sha256 "8d17b3b516335dc6ff7d7ca773cb39b3929ce76691906c23855e34ed63258844"
     end
   end
 
