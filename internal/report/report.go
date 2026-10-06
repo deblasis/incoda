@@ -55,6 +55,10 @@ type Queue struct {
 	Holders        []lane.Entry `json:"holders"`
 	Waiting        []lane.Entry `json:"waiting"`
 	RecentEvents   []string     `json:"recent_events"`
+	// IsPool says the key is a machine-wide pool rather than a project
+	// lane: it comes from machine.json, never from the lane's own config,
+	// because kind is a fact about the machine. watch groups on it.
+	IsPool bool `json:"is_pool,omitempty"`
 	// ProbeError is set when the queue could not be read because another
 	// process kept its registry lock past the view's deadline (a stopped
 	// incoda): the queue is then reported busy, never free.
@@ -114,6 +118,7 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 			Exists:  lane.ExistsIn(v.Root, key),
 			Holders: []lane.Entry{},
 			Waiting: []lane.Entry{},
+			IsPool:  v.Registry != nil && v.Registry.IsPool(key),
 		}
 		var q *lane.Queue
 		if qr.Exists {

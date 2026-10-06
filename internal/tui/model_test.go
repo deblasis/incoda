@@ -50,9 +50,32 @@ func sampleReport() *report.Report {
 	}
 }
 
+// poolsSampleReport mirrors a machine on the pools layout: two pools and
+// two project lanes, one linked and one not, in the report's alphabetical
+// order so the grouped display has to reorder them.
+func poolsSampleReport() *report.Report {
+	h := lane.Entry{Holding: true, HeldSeconds: 250, Ticket: lane.Ticket{PID: 111, Slots: 2, Owner: "sess-a", Reason: "zig build", Command: []string{"zig", "build"}, Dir: "C:/wt/a"}}
+	return &report.Report{
+		Schema: 1, Version: "v0.7.0-test", Host: "box", StateDirSource: "platform default",
+		Queues: []report.Queue{
+			{Key: "builds", Exists: true, EffectiveSlots: 1, IsPool: true, Config: lane.Config{Description: "heavy compiler builds"},
+				Holders: []lane.Entry{h}, Waiting: []lane.Entry{}},
+			{Key: "wintty-build", Exists: true, EffectiveSlots: 2, Config: lane.Config{Slots: 2, Pools: []string{"builds"}, Description: "LLVM links"},
+				Holders: []lane.Entry{}, Waiting: []lane.Entry{}},
+			{Key: "wintty-desktop", Exists: true, EffectiveSlots: 1, Free: true, Config: lane.Config{Description: "the interactive desktop"},
+				Holders: []lane.Entry{}, Waiting: []lane.Entry{}},
+		},
+	}
+}
+
 func newTestModel(k Killer) Model {
 	rep := sampleReport()
-	now := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	return newTestModelRep(k, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+}
+
+// newTestModelRep builds a model around a specific report, for views the
+// default sample does not cover.
+func newTestModelRep(k Killer, rep *report.Report, now time.Time) Model {
 	m := New(Options{
 		Killer: k,
 		Load:   func() (*report.Report, error) { return rep, nil },
@@ -283,6 +306,73 @@ func TestMouseClickSelectsOverviewRow(t *testing.T) {
 	m = mm.(Model)
 	if m.qsel != 1 {
 		t.Fatalf("click on row 1 should select index 1, got %d", m.qsel)
+	}
+}
+
+// TestGroupedOverviewShowsPoolsThenLanes: on a pools machine the overview
+// groups pools above project lanes, each lane shows its link (or the
+// missing one), and a click on a lane row still selects that lane even
+// though the section headers shifted every row down.
+func TestGroupedOverviewShowsPoolsThenLanes(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, poolsSampleReport(), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	v := view(m)
+	for _, want := range []string{
+		"POOLS — machine-wide, shared by every project",
+		"PROJECT LANES — each runs through its linked pools",
+		"→ builds · LLVM links",
+		"UNLINKED · the interactive desktop",
+	} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("grouped overview missing %q:\n%s", want, v)
+		}
+	}
+	if !strings.Contains(v, "heavy compiler builds") {
+		t.Fatalf("a pool row still shows its description:\n%s", v)
+	}
+	// Order: the pool section must come before the lanes even though
+	// "builds" is also alphabetically first; the assertion that matters is
+	// that the PROJECT LANES header precedes the wintty rows.
+	if strings.Index(v, "POOLS") > strings.Index(v, "PROJECT LANES") {
+		t.Fatalf("pools section must come first:\n%s", v)
+	}
+}
+
+func TestGroupedOverviewClickLandsOnTheLane(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, poolsSampleReport(), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	// wintty-build is report index 1; with the pools section drawn above
+	// it, its screen row sits below two header lines.
+	y := m.overviewQueueRow(1)
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.qsel != 1 {
+		t.Fatalf("click on the grouped row should select index 1, got %d", m.qsel)
+	}
+	// And the section header itself selects nothing. One line above the
+	// lane's row is the PROJECT LANES header; two above is the pool's row.
+	yHdr := m.overviewQueueRow(1) - 1
+	mm, _ = m.Update(tea.MouseClickMsg{X: 4, Y: yHdr, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.qsel != 1 {
+		t.Fatalf("a click on a header must not move selection, got %d", m.qsel)
+	}
+}
+
+func TestDrillDownNamesTheKindAndTheLink(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, poolsSampleReport(), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m = press(m, "enter") // builds: the pool
+	v := view(m)
+	if !strings.Contains(v, "kind: pool (machine-wide)") {
+		t.Fatalf("pool drill-down missing its kind line:\n%s", v)
+	}
+	m = press(m, "esc", "down", "enter") // wintty-build: the linked lane
+	v = view(m)
+	if !strings.Contains(v, "linked: → builds") {
+		t.Fatalf("linked lane drill-down missing its link line:\n%s", v)
+	}
+	m = press(m, "esc", "down", "enter") // wintty-desktop: unlinked
+	v = view(m)
+	if !strings.Contains(v, "unlinked") || !strings.Contains(v, "incoda link wintty-desktop") {
+		t.Fatalf("unlinked lane drill-down missing its fix line:\n%s", v)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/deblasis/incoda/internal/report"
 )
 
 func (m Model) layoutWidth() int {
@@ -28,20 +30,88 @@ func (m Model) bodyStartRow() int {
 }
 
 // overviewQueueAt maps a terminal row to a queue index in the overview.
+// The walk is the same one renderOverview draws, so a click lands on the
+// queue whose row the eye sees, headers included.
 func (m Model) overviewQueueAt(y int) (idx int, ok bool) {
-	if m.rep == nil || len(m.rep.Queues) == 0 {
-		return 0, false
+	for _, r := range m.overviewLayout() {
+		if r.y == y {
+			return r.idx, true
+		}
 	}
-	rel := y - m.bodyStartRow() - 1 // skip the column header
-	if rel < 0 || rel >= len(m.rep.Queues) {
-		return 0, false
-	}
-	return rel, true
+	return 0, false
 }
 
 // overviewQueueRow is the terminal row for queue index i in the overview.
 func (m Model) overviewQueueRow(i int) int {
+	for _, r := range m.overviewLayout() {
+		if r.idx == i {
+			return r.y
+		}
+	}
 	return m.bodyStartRow() + 1 + i
+}
+
+// overviewRow is one queue's place on screen: the terminal row its line
+// starts on, and the queue's index in rep.Queues.
+type overviewRow struct{ y, idx int }
+
+// overviewLayout walks the overview the way renderOverview draws it: the
+// column header, then (when the pools system is present) a POOLS section
+// header, the pools, a PROJECT LANES header, and the lanes. Rendering and
+// hit testing both go through this walk so they can never disagree.
+func (m Model) overviewLayout() []overviewRow {
+	if m.rep == nil || len(m.rep.Queues) == 0 {
+		return nil
+	}
+	y := m.bodyStartRow() + 1 // below the column header
+	var out []overviewRow
+	grouped := poolsGrouped(m.rep)
+	order := overviewOrder(m.rep)
+	for n, idx := range order {
+		if grouped {
+			// A header line before the first row of each section.
+			if n == 0 || m.rep.Queues[idx].IsPool != m.rep.Queues[order[n-1]].IsPool {
+				y++
+			}
+		}
+		out = append(out, overviewRow{y: y, idx: idx})
+		y++
+	}
+	return out
+}
+
+// overviewOrder is the display order of rep.Queues: pools first, then
+// project lanes, each group in the report's (alphabetical) order. Without
+// pools on the machine the report order stands as it is.
+func overviewOrder(rep *report.Report) []int {
+	order := make([]int, len(rep.Queues))
+	for i := range rep.Queues {
+		order[i] = i
+	}
+	if !poolsGrouped(rep) {
+		return order
+	}
+	var pools, lanes []int
+	for i, q := range rep.Queues {
+		if q.IsPool {
+			pools = append(pools, i)
+		} else {
+			lanes = append(lanes, i)
+		}
+	}
+	return append(pools, lanes...)
+}
+
+// poolsGrouped says the machine carries the pools system: at least one pool
+// or one linked lane. A state directory from before pools has neither, and
+// its overview stays one flat list.
+func poolsGrouped(rep *report.Report) bool {
+	for _, q := range rep.Queues {
+		if q.IsPool || len(q.Config.Pools) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // participantHit maps a terminal row to a participant index on the queue
