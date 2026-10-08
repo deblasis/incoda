@@ -422,13 +422,39 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// On a configured queue every new ticket carries the configured
 			// count, so a disagreement means a stale or foreign ticket; the
 			// config floors the effective width regardless. On a queue with
-			// no configured count the minimum still rules.
+			// no configured count the minimum still rules. The common shape
+			// is a lane that ran before its `config KEY --slots N` (the
+			// first link precedes the count): those tickets say 1, age out
+			// as they finish, and change nothing — so the warning says who
+			// carries the other numbers and that waiting them out is the
+			// whole remedy.
+			counts := map[int]int{}
+			for _, e := range live {
+				if e.Ticket.Exclusive {
+					continue
+				}
+				s := e.Ticket.Slots
+				if s < 1 {
+					s = 1
+				}
+				counts[s]++
+			}
+			values := make([]int, 0, len(counts))
+			for v := range counts {
+				values = append(values, v)
+			}
+			sort.Ints(values)
+			parts := make([]string, len(values))
+			for i, v := range values {
+				parts[i] = fmt.Sprintf("%d ticket(s) say %d", counts[v], v)
+			}
 			inForce := "the smallest value is in force"
 			if pt.l.Cfg.Slots > 0 {
 				inForce = fmt.Sprintf("the configured %d is in force", pt.l.Cfg.Slots)
 			}
 			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
-				p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; %s", key, inForce)))
+				p.Yellow(fmt.Sprintf("warning: participants on queue %q disagree about --slots; %s; %s; the odd ones out age out as they finish",
+					key, inForce, strings.Join(parts, ", "))))
 		}
 		if !*quiet {
 			what := fmt.Sprintf("acquired queue %q (pid %d)", key, os.Getpid())
