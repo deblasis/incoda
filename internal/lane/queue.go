@@ -1,10 +1,12 @@
 package lane
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,14 @@ import (
 const (
 	registryLockName = "registry.lock"
 	logName          = "lane.log"
+	// tailChunkBytes is how much of the end of lane.log one read covers.
+	// Log lines carry a command, so a few lines fit in one chunk; a request
+	// for more walks backwards chunk by chunk instead of loading the file.
+	tailChunkBytes = 64 << 10
+	// maxTailRing bounds the per-line index a TailLog call keeps. Beyond it
+	// the caller asked for thousands of lines, and materialising the window
+	// is cheaper than a ring that large.
+	maxTailRing = 4096
 )
 
 // Queue is a handle on one named queue's state directory.
@@ -238,33 +248,199 @@ func AppendLog(dir, format string, args ...any) {
 // LogPath is the lane.log of a lane directory.
 func LogPath(dir string) string { return filepath.Join(dir, logName) }
 
-// TailLog returns the last n log lines, oldest first.
+// TailLog returns the last n log lines, oldest first. Asking for no lines
+// does no work: Observe(0) is what `incoda queues` calls for every queue, and
+// lane.log is unbounded, so a zero request must not read it.
 func (q *Queue) TailLog(n int) []string {
-	b, err := os.ReadFile(filepath.Join(q.Dir, logName))
+	if n <= 0 {
+		// A non-nil empty slice keeps `status --json` emitting [] rather
+		// than null for a queue observed with no events.
+		return []string{}
+	}
+	f, err := os.Open(LogPath(q.Dir))
 	if err != nil {
 		return nil
 	}
-	var lines []string
-	start := 0
-	for i := 0; i < len(b); i++ {
-		if b[i] == '\n' {
-			line := string(b[start:i])
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	size := fi.Size()
+	if size == 0 {
+		return nil
+	}
+
+	// Start with one chunk and double the window until it holds n non-empty
+	// lines or covers the file. Re-reading a larger tail instead of
+	// prepending chunks keeps the work linear: each attempt reads at most the
+	// previous attempt's size, so the total is under twice the final window.
+	windowSize := int64(tailChunkBytes)
+	for {
+		if windowSize > size {
+			windowSize = size
+		}
+		start := size - windowSize
+		buf := make([]byte, windowSize)
+		got, err := f.ReadAt(buf, start)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil
+		}
+		buf = buf[:got]
+		if got == 0 {
+			return nil
+		}
+
+		// A window that starts mid-file may start mid-line. The byte before
+		// it tells the two apart; assuming every non-zero start is mid-line
+		// loses a line whenever a window edge lands after a newline.
+		partial := false
+		if start > 0 {
+			var prev [1]byte
+			pn, perr := f.ReadAt(prev[:], start-1)
+			if perr != nil && !errors.Is(perr, io.EOF) {
+				return nil
 			}
-			if line != "" {
-				lines = append(lines, line)
+			if pn == 0 {
+				return nil
 			}
-			start = i + 1
+			partial = prev[0] != '\n'
+		}
+
+		if countTailLines(buf, partial) >= n || start == 0 {
+			if partial {
+				i := bytes.IndexByte(buf, '\n')
+				if i < 0 {
+					return nil
+				}
+				buf = buf[i+1:]
+			}
+			return lastLogLines(buf, n)
+		}
+		if windowSize > size/2 {
+			windowSize = size
+		} else {
+			windowSize *= 2
 		}
 	}
-	if start < len(b) {
-		lines = append(lines, string(b[start:]))
+}
+
+// lastLogLines returns the last n non-empty lines of a window that starts at
+// a line boundary. It indexes the line starts in a ring and only converts the
+// lines it returns, so a small n does not pay for every line in the window.
+func lastLogLines(b []byte, n int) []string {
+	if n <= 0 || len(b) == 0 {
+		return nil
 	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if n > maxTailRing {
+		lines := splitLogLines(b)
+		if len(lines) > n {
+			lines = lines[len(lines)-n:]
+		}
+		return lines
+	}
+	ring := make([]lineSpan, n)
+	count := 0
+	start := 0
+	for i := 0; i <= len(b); i++ {
+		if i < len(b) && b[i] != '\n' {
+			continue
+		}
+		if i > start {
+			end := i
+			// A carriage return is part of the line ending only when a
+			// newline follows it. An unterminated final line keeps a bare CR,
+			// which is what the previous reader did.
+			if i < len(b) && b[end-1] == '\r' {
+				end--
+			}
+			if end > start {
+				ring[count%n] = lineSpan{start: start, end: end}
+				count++
+			}
+		}
+		start = i + 1
+	}
+	kept := count
+	if kept > n {
+		kept = n
+	}
+	first := 0
+	if count > n {
+		first = count - n
+	}
+	lines := make([]string, 0, kept)
+	for k := 0; k < kept; k++ {
+		sp := ring[(first+k)%n]
+		lines = append(lines, string(b[sp.start:sp.end]))
 	}
 	return lines
+}
+
+type lineSpan struct {
+	start int
+	end   int
+}
+
+// countTailLines counts non-empty log lines in a window. When skipPartial is
+// set the window starts mid-line, so the bytes before the first newline are
+// not a line and are not counted.
+func countTailLines(b []byte, skipPartial bool) int {
+	start := 0
+	if skipPartial {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			return 0
+		}
+		start = i + 1
+	}
+	count := 0
+	lineStart := start
+	for i := start; i <= len(b); i++ {
+		if i < len(b) && b[i] != '\n' {
+			continue
+		}
+		if i > lineStart {
+			line := b[lineStart:i]
+			// A lone CR is an empty CRLF line when a newline follows it, but
+			// a real (unterminated) final line when it is the file's end.
+			if i == len(b) || len(line) > 1 || line[0] != '\r' {
+				count++
+			}
+		}
+		lineStart = i + 1
+	}
+	return count
+}
+
+// splitLogLines splits a log window into non-empty lines, accepting both LF
+// and CRLF and a final line with no terminator. A bare CR on an unterminated
+// final line is data, not an ending, and is kept.
+func splitLogLines(b []byte) []string {
+	lines := make([]string, 0, 16)
+	start := 0
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\n' {
+			continue
+		}
+		if line := trimLogLine(b[start:i]); line != "" {
+			lines = append(lines, line)
+		}
+		start = i + 1
+	}
+	if start < len(b) {
+		if line := string(b[start:]); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func trimLogLine(b []byte) string {
+	if len(b) > 0 && b[len(b)-1] == '\r' {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }
 
 // scanLocked lists live tickets in arrival order, reaps dead ones, and
