@@ -47,6 +47,7 @@ usage:
   incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--wait DUR]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
+  incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]
   incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]
   incoda version
 
@@ -112,6 +113,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdKill(rest, stdout, stderr)
 	case "force-release":
 		err = cmdForceRelease(rest, stdout, stderr)
+	case "pool":
+		err = cmdPool(rest, stdout, stderr)
 	case "doctor":
 		err = cmdDoctor(rest, stdout, stderr)
 	case "version", "--version", "-V":
