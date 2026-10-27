@@ -36,6 +36,10 @@ type PoolAdded struct {
 // config is written and before machine.json is.
 var afterLaneConfig func()
 
+// beforeLock is a test hook run after the pre-checks and before the lane
+// lock is taken.
+var beforeLock func()
+
 // AddPool registers one new pool (incoda pool add). It is the additive
 // counterpart of Rebuild: it never drops or changes any other pool or lane. (machine.json
 // is written with its pools sorted, as every registry write does, so a
@@ -119,6 +123,9 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 	}
 	defer q.Close()
 	q.SetBudget(o.Start, o.Wait)
+	if beforeLock != nil {
+		beforeLock()
+	}
 	// The lane's registry lock is held from the live-ticket check until
 	// machine.json is renamed over, so no job can enrol on the lane while
 	// it changes kind (the order rebuild-registry uses).
@@ -135,6 +142,11 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 		return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q has live tickets", name)}
 	}
 	cfg, err := q.UpdateConfigHeld(func(c *lane.Config) error {
+		// Closing a lane takes no machine.lock, so look again now that the
+		// lane lock is held.
+		if len(c.Pools) > 0 || c.QuietMachine || c.Closed != "" {
+			return &Refusal{Msg: fmt.Sprintf("kind-busy: %q changed while the pool was being added (linked or closed)", name)}
+		}
 		changed := false
 		if spec.Slots > 0 && c.Slots != spec.Slots {
 			c.Slots, changed = spec.Slots, true
@@ -148,6 +160,10 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 		return nil
 	})
 	if err != nil && !errors.Is(err, lane.ErrNoChange) {
+		var rf *Refusal
+		if errors.As(err, &rf) {
+			return nil, err
+		}
 		var ns *lane.NewerSchemaError
 		if errors.As(err, &ns) {
 			return nil, stateErrorf("%s", esc(err))

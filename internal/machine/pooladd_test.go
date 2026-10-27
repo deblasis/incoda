@@ -371,3 +371,43 @@ func TestAddPoolKeepsAnExistingLanesConfig(t *testing.T) {
 		t.Fatalf("config %+v", cfg)
 	}
 }
+
+func TestAddPoolRefusesALaneWithALiveTicket(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "busy")
+	defer q.Close()
+	en, err := q.Enroll(lane.Ticket{Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	var rf *Refusal
+	if _, err := addPool(state, "busy", PoolSpec{Slots: 2}); !errors.As(err, &rf) || rf.Msg != `kind-busy: "busy" has live tickets` {
+		t.Fatalf("live ticket: %v", err)
+	}
+	if r, _ := ReadRegistry(state); r.IsPool("busy") {
+		t.Fatal("registered despite a live ticket")
+	}
+	if cfg, _ := lane.ReadConfig(lane.LaneDir(state, "busy")); cfg.Slots != 0 {
+		t.Fatalf("config written despite the refusal: %+v", cfg)
+	}
+}
+
+func TestAddPoolRefusesALaneClosedInTheWindow(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "late")
+	q.Close()
+	beforeLock = func() {
+		p, _ := lane.Open(state, "late")
+		_, _ = p.UpdateConfig(func(c *lane.Config) error { c.Closed = "retired"; return nil })
+		p.Close()
+	}
+	defer func() { beforeLock = nil }()
+	var rf *Refusal
+	if _, err := addPool(state, "late", PoolSpec{}); !errors.As(err, &rf) || !strings.Contains(rf.Msg, "changed while") {
+		t.Fatalf("closed in the window: %v", err)
+	}
+	if r, _ := ReadRegistry(state); r.IsPool("late") {
+		t.Fatal("registered")
+	}
+}
