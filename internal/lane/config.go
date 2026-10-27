@@ -232,29 +232,36 @@ var ErrNoChange = errors.New("no change")
 // config written by a newer incoda is refused, never rewritten.
 func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 	var out Config
-	err := q.withRegistry(func() error {
-		c, err := q.LoadConfig()
-		if err != nil {
-			return err
-		}
-		if err := fn(&c); err != nil {
-			if errors.Is(err, ErrNoChange) {
-				out = c
-			}
-			return err
-		}
-		c.Schema = ConfigSchema
-		b, err := json.MarshalIndent(c, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := atomicfile.Write(filepath.Join(q.Dir, configName), append(b, '\n'), 0o644); err != nil {
-			return err
-		}
-		out = c
-		return nil
+	err := q.withRegistry(func() (err error) {
+		out, err = q.UpdateConfigHeld(fn)
+		return err
 	})
 	return out, err
+}
+
+// UpdateConfigHeld is UpdateConfig for a caller that already holds this
+// queue's registry lock (LockAll). It takes no lock of its own.
+func (q *Queue) UpdateConfigHeld(fn func(*Config) error) (Config, error) {
+	var out Config
+	c, err := q.LoadConfig()
+	if err != nil {
+		return out, err
+	}
+	if err := fn(&c); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			out = c
+		}
+		return out, err
+	}
+	c.Schema = ConfigSchema
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return out, err
+	}
+	if err := atomicfile.Write(filepath.Join(q.Dir, configName), append(b, '\n'), 0o644); err != nil {
+		return out, err
+	}
+	return c, nil
 }
 
 // SaveConfig replaces the known fields with c and keeps unknown ones.

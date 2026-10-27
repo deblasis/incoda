@@ -72,6 +72,10 @@ incoda run --queue my-app-build -- zig build   # now runs, holding my-app-build 
 incoda run --queue my-app-build --pool builds -- dotnet test   # this run only takes that pool
 ```
 
+A new pool is added with `incoda pool add NAME --slots N`, which leaves every
+existing pool alone. `doctor --rebuild-registry` is for a lost registry only: it
+rewrites `machine.json` naming exactly the pools you list.
+
 `--quiet-machine` makes every run on a lane hold its pools exclusively while
 it waits for the rest, which is what a measurement job needs: it wants the
 pools drained, not merely its own slot.
@@ -123,6 +127,7 @@ Linux) and nothing is ever resolved from the working directory.
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
+| `incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]` | Register one new machine-wide pool and say what changed. Takes `machine.lock`, writes `machine.json` by temp file and rename, and touches no other pool or lane (the generation counter goes up by one). Refuses a name that is invalid or already a pool (`pool-exists`, exit `120`), and a lane of that name that links pools or has a live job (`kind-busy`). `--slots` and `--description` set the pool's `config.json` first, so a crash in between leaves a plain lane and the same command can be rerun. Logs `event=pool-add` to the pool's `lane.log`. |
 | `incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. `--rebuild-registry` rewrites the machine registry after one was lost or damaged, holding every lane still while it checks. |
 
 `run` passes the child's own exit code through unchanged. Lane-level failures
