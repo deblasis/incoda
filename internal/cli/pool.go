@@ -41,13 +41,13 @@ func cmdPoolAdd(args []string, stdout, stderr io.Writer) error {
 		return &usageError{msg: "bad flags for pool add"}
 	}
 	if name == "" || fs.NArg() != 0 {
-		return usagef("usage: incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]")
-	}
-	if *slots < 0 {
-		return usagef("--slots must be at least 1, got %d", *slots)
+		return usagef("usage: incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR] (NAME comes first)")
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if given["slots"] && *slots < 1 {
+		return usagef("--slots must be at least 1, got %d", *slots)
+	}
 	if err := checkTexts(given, map[string]string{"description": *desc}); err != nil {
 		return err
 	}

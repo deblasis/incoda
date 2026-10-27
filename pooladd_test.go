@@ -37,6 +37,12 @@ func TestPoolAddThenLinkThenRun(t *testing.T) {
 	if out, rc := incodaIn(t, incoda, state, nil, "pool", "add", "merges"); rc != 120 || !strings.Contains(out, "pool-exists") {
 		t.Fatalf("duplicate: rc=%d\n%s", rc, out)
 	}
+	if out, rc := incodaIn(t, incoda, state, nil, "pool", "add", "zero", "--slots", "0"); rc != 120 {
+		t.Fatalf("--slots 0: rc=%d\n%s", rc, out)
+	}
+	if out, rc := incodaIn(t, incoda, state, nil, "pool", "add", "Merges"); rc != 120 {
+		t.Fatalf("case clash: rc=%d\n%s", rc, out)
+	}
 	if out, rc := incodaIn(t, incoda, state, nil, "pool", "add", "../x"); rc != 120 {
 		t.Fatalf("bad name: rc=%d\n%s", rc, out)
 	}
@@ -110,6 +116,11 @@ func TestPoolAddKilledBeforeTheRegistryWrite(t *testing.T) {
 	state := t.TempDir()
 	if _, rc := incodaIn(t, incoda, state, nil, "config", "seed", "--slots", "1"); rc != 0 {
 		t.Fatal("seed")
+	}
+	// The lane already exists with other settings, as it would after a first
+	// interrupted attempt or an earlier config.
+	if _, rc := incodaIn(t, incoda, state, nil, "config", "merges", "--slots", "3", "--description", "old"); rc != 0 {
+		t.Fatal("config merges")
 	}
 	before, _ := os.ReadFile(filepath.Join(state, "machine.json"))
 	_, rc := runWithEnv(t, crash, state, []string{"INCODA_TEST_CRASH_AT=pool-add-config"}, "pool", "add", "merges", "--slots", "1")

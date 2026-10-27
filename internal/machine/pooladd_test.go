@@ -258,3 +258,116 @@ func TestAddPoolFailedWriteLeavesTheOldRegistry(t *testing.T) {
 		t.Fatalf("retry: %v", err)
 	}
 }
+
+func TestAddPoolRefusesNamesThatShareADirectory(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "Proj")
+	q.Close()
+	lk, err := AcquireLock(state, LockOptions{Op: "test", Start: time.Now(), Wait: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateRegistry(state, lk, func(r *Registry) error { r.Pools = append(r.Pools, "ghost"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	lk.Release()
+	var rf *Refusal
+	cfgBefore, _ := os.ReadFile(filepath.Join(lane.LaneDir(state, "builds"), "config.json"))
+	for _, name := range []string{"Builds", "BUILDS", "Ghost", "proj", "x."} {
+		before, _ := os.ReadFile(RegistryPath(state))
+		if _, err := addPool(state, name, PoolSpec{Slots: 9}); !errors.As(err, &rf) {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if after, _ := os.ReadFile(RegistryPath(state)); !bytes.Equal(before, after) {
+			t.Fatalf("%q rewrote machine.json", name)
+		}
+	}
+	if cfgAfter, _ := os.ReadFile(filepath.Join(lane.LaneDir(state, "builds"), "config.json")); !bytes.Equal(cfgBefore, cfgAfter) {
+		t.Fatalf("builds config touched:\n%s\n%s", cfgBefore, cfgAfter)
+	}
+}
+
+func TestAddPoolHoldsTheLaneLockUntilTheRegistryIsWritten(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "foo")
+	q.Close()
+	var held bool
+	afterLaneConfig = func() {
+		p, err := lane.Open(state, "foo")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer p.Close()
+		unlock, err := lane.LockAll([]*lane.Queue{p}, time.Now().Add(300*time.Millisecond))
+		if err == nil {
+			unlock()
+			return
+		}
+		held = true
+	}
+	defer func() { afterLaneConfig = nil }()
+	if _, err := addPool(state, "foo", PoolSpec{Slots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("the lane's registry lock was free while the pool was being registered")
+	}
+}
+
+func TestAddPoolRefusesAClosedLaneAndAnUnreadableConfig(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "shut")
+	if _, err := q.UpdateConfig(func(c *lane.Config) error { c.Closed = "retired"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	q.Close()
+	var rf *Refusal
+	if _, err := addPool(state, "shut", PoolSpec{}); !errors.As(err, &rf) || !strings.Contains(rf.Msg, "closed lane") {
+		t.Fatalf("closed: %v", err)
+	}
+	q, _ = lane.Open(state, "bad")
+	q.Close()
+	if err := os.WriteFile(filepath.Join(lane.LaneDir(state, "bad"), "config.json"), []byte(`{"schema":99}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var se *StateError
+	if _, err := addPool(state, "bad", PoolSpec{}); !errors.As(err, &se) {
+		t.Fatalf("unreadable config must be a state error: %v", err)
+	}
+}
+
+func TestAddPoolLogsAndRefusesAnUnfinishedMigration(t *testing.T) {
+	state := freshState(t)
+	if _, err := addPool(state, "merges", PoolSpec{Slots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	log, _ := os.ReadFile(lane.LogPath(lane.LaneDir(state, "merges")))
+	if !strings.Contains(string(log), "queue=merges event=pool-add ") || !strings.Contains(string(log), "by=pool-add") {
+		t.Fatalf("lane.log:\n%s", log)
+	}
+	if err := os.WriteFile(planPath(state), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var se *StateError
+	if _, err := addPool(state, "other", PoolSpec{}); !errors.As(err, &se) || !strings.Contains(se.Msg, "migration is unfinished") {
+		t.Fatalf("unfinished migration: %v", err)
+	}
+}
+
+func TestAddPoolKeepsAnExistingLanesConfig(t *testing.T) {
+	state := freshState(t)
+	q, _ := lane.Open(state, "merges")
+	if _, err := q.UpdateConfig(func(c *lane.Config) error { c.RequireReason = true; c.Description = "old"; c.Slots = 4; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	q.Close()
+	res, err := addPool(state, "merges", PoolSpec{Slots: 1})
+	if err != nil || !res.LaneExisted {
+		t.Fatalf("%+v %v", res, err)
+	}
+	cfg, _ := lane.ReadConfig(lane.LaneDir(state, "merges"))
+	if cfg.Slots != 1 || !cfg.RequireReason || cfg.Description != "old" {
+		t.Fatalf("config %+v", cfg)
+	}
+}

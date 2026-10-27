@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
@@ -26,11 +27,19 @@ type PoolAdded struct {
 	OldGeneration int64
 	// Config is the pool's config.json as written.
 	Config lane.Config
+	// LaneExisted is set when a lane of that name was already there, so
+	// its earlier config (require_reason, description) carries over.
+	LaneExisted bool
 }
 
+// afterLaneConfig is a test hook run with every lock held, after the lane's
+// config is written and before machine.json is.
+var afterLaneConfig func()
+
 // AddPool registers one new pool (incoda pool add). It is the additive
-// counterpart of Rebuild: it never lists, rewrites or reorders any other
-// pool, and it touches no other lane.
+// counterpart of Rebuild: it never drops or changes any other pool or lane. (machine.json
+// is written with its pools sorted, as every registry write does, so a
+// hand-ordered list is normalised.)
 //
 // Under machine.lock it re-reads machine.json, then in this order: refuses a
 // name that fails ValidateKey or is already a pool; refuses a lane of that
@@ -72,31 +81,35 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 		return nil, stateErrorf("a migration is unfinished; run any mutating incoda command to resume it before adding a pool")
 	}
 
-	if lane.Exists(stateDir, name) {
+	// A name that differs from a registered pool or a lane only in case, or
+	// by trailing dots, is the same directory on Windows and macOS: refuse it
+	// everywhere so a state directory behaves the same on every machine.
+	if strings.HasSuffix(name, ".") {
+		return nil, &Refusal{Msg: fmt.Sprintf("pool add: queue key %q ends with '.', which Windows drops from directory names", name)}
+	}
+	for _, p := range reg.Pools {
+		if strings.EqualFold(p, name) {
+			return nil, &Refusal{Msg: fmt.Sprintf("pool-exists: %q differs from the pool %q only in case", name, p)}
+		}
+	}
+	existing := lane.Exists(stateDir, name)
+	if keys, err := lane.ListQueues(stateDir); err == nil {
+		for _, k := range keys {
+			if k != name && strings.EqualFold(k, name) {
+				return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q differs from the lane %q only in case; choose another name", name, k)}
+			}
+		}
+	}
+	if existing {
 		cfg, err := lane.ReadConfig(lane.LaneDir(stateDir, name))
 		if err != nil {
-			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q has an unreadable config.json; fix or delete it first", name)}
+			return nil, stateErrorf("lane %q has an unreadable config.json: %s", name, esc(err))
 		}
 		if len(cfg.Pools) > 0 || cfg.QuietMachine {
 			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q is a project lane that links pools; unlink it first or choose another name", name)}
 		}
-		eq, err := lane.OpenIn(lane.LanesDir(stateDir), name, lane.Existing)
-		if err != nil {
-			return nil, stateErrorf("cannot open lane %q: %s", name, esc(err))
-		}
-		unlock, err := lane.LockAll([]*lane.Queue{eq}, lockDeadline(o.Start, o.Wait, time.Now()))
-		if err != nil {
-			eq.Close()
-			return nil, stateErrorf("%s", esc(err))
-		}
-		live, err := eq.LiveLocked()
-		unlock()
-		eq.Close()
-		if err != nil {
-			return nil, stateErrorf("cannot scan lane %q: %s", name, esc(err))
-		}
-		if len(live) > 0 {
-			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q has live tickets", name)}
+		if cfg.Closed != "" {
+			return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q is a closed lane; run incoda config %s --open first or choose another name", name, name)}
 		}
 	}
 
@@ -106,7 +119,22 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 	}
 	defer q.Close()
 	q.SetBudget(o.Start, o.Wait)
-	cfg, err := q.UpdateConfig(func(c *lane.Config) error {
+	// The lane's registry lock is held from the live-ticket check until
+	// machine.json is renamed over, so no job can enrol on the lane while
+	// it changes kind (the order rebuild-registry uses).
+	unlock, err := lane.LockAll([]*lane.Queue{q}, lockDeadline(o.Start, o.Wait, time.Now()))
+	if err != nil {
+		return nil, stateErrorf("%s", esc(err))
+	}
+	defer unlock()
+	live, err := q.LiveLocked()
+	if err != nil {
+		return nil, stateErrorf("cannot scan lane %q: %s", name, esc(err))
+	}
+	if len(live) > 0 {
+		return nil, &Refusal{Msg: fmt.Sprintf("kind-busy: %q has live tickets", name)}
+	}
+	cfg, err := q.UpdateConfigHeld(func(c *lane.Config) error {
 		changed := false
 		if spec.Slots > 0 && c.Slots != spec.Slots {
 			c.Slots, changed = spec.Slots, true
@@ -127,6 +155,9 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 		return nil, stateErrorf("queue %q: %s", name, esc(err))
 	}
 	crashpoint("pool-add-config")
+	if afterLaneConfig != nil {
+		afterLaneConfig()
+	}
 
 	old := reg.Generation
 	reg.Pools = sortedWith(reg.Pools, name)
@@ -135,7 +166,7 @@ func AddPool(stateDir, name string, spec PoolSpec, by string, o Options) (*PoolA
 		return nil, err
 	}
 	q.Logf("queue=%s event=pool-add pid=%d by=%s slots=%d generation=%d", name, os.Getpid(), by, max(cfg.Slots, 1), reg.Generation)
-	return &PoolAdded{Registry: reg, OldGeneration: old, Config: cfg}, nil
+	return &PoolAdded{Registry: reg, OldGeneration: old, Config: cfg, LaneExisted: existing}, nil
 }
 
 func sortedWith(pools []string, name string) []string {
