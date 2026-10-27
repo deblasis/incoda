@@ -63,6 +63,11 @@ type Queue struct {
 	// process kept its registry lock past the view's deadline (a stopped
 	// incoda): the queue is then reported busy, never free.
 	ProbeError string `json:"probe_error,omitempty"`
+	// Lockless says the queue was read without its registry lock because
+	// another process held it past the view's deadline. Holders and Waiting are
+	// still the live participants; only a ticket created or released during the
+	// read can be missing from them.
+	Lockless bool `json:"lockless,omitempty"`
 }
 
 // StateDirSource names how the state directory was resolved.
@@ -152,6 +157,7 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 		qr.Holders = snap.Holders
 		qr.Waiting = snap.Waiting
 		qr.RecentEvents = snap.RecentEvents
+		qr.Lockless = snap.Lockless
 		qr.Free = len(snap.Holders) == 0
 		rep.Queues = append(rep.Queues, qr)
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
@@ -41,6 +42,15 @@ func TestHelperHoldLock(t *testing.T) {
 // the test ends, the way a stopped incoda keeps a registry lock.
 func holdLockElsewhere(t *testing.T, path string) {
 	t.Helper()
+	release := holdLockElsewhereUntil(t, path)
+	t.Cleanup(release)
+}
+
+// holdLockElsewhereUntil is holdLockElsewhere with the hold on a switch: the
+// returned func ends it, safely more than once, so a test can prove the lane is
+// readable again once the holder is gone.
+func holdLockElsewhereUntil(t *testing.T, path string) (release func()) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
 	cmd.Env = append(os.Environ(), "INCODA_TEST_HOLD_LOCK="+path)
 	in, err := cmd.StdinPipe()
@@ -54,7 +64,12 @@ func holdLockElsewhere(t *testing.T, path string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	released := false
+	release = func() {
+		if released {
+			return
+		}
+		released = true
 		in.Close()
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
@@ -64,11 +79,13 @@ func holdLockElsewhere(t *testing.T, path string) {
 			_ = cmd.Process.Kill()
 			<-done
 		}
-	})
+	}
+	t.Cleanup(release)
 	line, err := bufio.NewReader(out).ReadString('\n')
 	if err != nil || line != "held\n" {
 		t.Fatalf("helper did not take the lock: %q %v", line, err)
 	}
+	return release
 }
 
 // within fails unless fn returns within limit.
@@ -122,8 +139,12 @@ func TestProbesAreBoundedWhenAnotherProcessHoldsTheRegistry(t *testing.T) {
 		}
 	})
 	within(t, "ObserveBy", limit, func() {
-		if _, err := q.ObserveBy(0, dl()); !errors.Is(err, ErrRegistryBusy) {
-			t.Fatalf("ObserveBy must fail with ErrRegistryBusy: %v", err)
+		snap, err := q.ObserveBy(0, dl())
+		if err != nil {
+			t.Fatalf("ObserveBy must answer from the tickets, not fail: %v", err)
+		}
+		if !snap.Lockless || len(snap.Holders) != 1 || snap.Holders[0].File != name {
+			t.Fatalf("ObserveBy must report the live holder from a lockless read: %+v", snap)
 		}
 	})
 	within(t, "a past deadline", 200*time.Millisecond, func() {
@@ -133,6 +154,60 @@ func TestProbesAreBoundedWhenAnotherProcessHoldsTheRegistry(t *testing.T) {
 	})
 	if ErrRegistryBusy.Error() != "cannot tell: registry lock held by another process" {
 		t.Fatalf("text: %q", ErrRegistryBusy)
+	}
+}
+
+// TestObserveByListsEveryoneWhileTheRegistryLockIsHeld: a lane whose registry
+// lock another process holds (a stopped incoda) is still described, not
+// reported as unreadable. Liveness is per ticket, so the holder and every
+// waiter are listed and the snapshot says the read was taken without the lock.
+// Nothing is reaped: a ticket that looks unlocked may be one Enroll is between
+// creating and locking, so a lockless read must never delete it.
+func TestObserveByListsEveryoneWhileTheRegistryLockIsHeld(t *testing.T) {
+	root := t.TempDir()
+	q, err := OpenIn(root, "queued", Create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	var ens []*Enrollment
+	for i := 0; i < 3; i++ {
+		en, err := q.Enroll(Ticket{Slots: 1, Command: []string{"job", strconv.Itoa(i)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ens = append(ens, en)
+	}
+
+	// A ticket file no process locks stands in for one Enroll has created but
+	// not yet locked, or for a holder that died: the lockless read must leave
+	// it alone for the next lock-holding scan to decide.
+	dead := TicketFilePath(q.Dir, ticketName(time.Now().UnixNano(), 1))
+	if err := os.WriteFile(dead, []byte(`{"pid":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseLock := holdLockElsewhereUntil(t, RegistryLockPath(q.Dir))
+	snap, err := q.ObserveBy(0, time.Now().Add(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("a held registry lock must not fail the view: %v", err)
+	}
+	releaseLock()
+	for _, en := range ens {
+		en.Release(0)
+	}
+	if !snap.Lockless {
+		t.Fatal("the snapshot must say it was read without the registry lock")
+	}
+	if len(snap.Holders) != 1 || len(snap.Waiting) != 2 {
+		t.Fatalf("want 1 holder and 2 waiters, got %d/%d: %+v", len(snap.Holders), len(snap.Waiting), snap)
+	}
+	if snap.Holders[0].File != ens[0].Name() || snap.Waiting[0].File != ens[1].Name() || snap.Waiting[1].File != ens[2].Name() {
+		t.Fatalf("arrival order must be kept: holders=%v waiting=%v",
+			snap.Holders[0].File, []string{snap.Waiting[0].File, snap.Waiting[1].File})
+	}
+	if _, err := os.Stat(dead); err != nil {
+		t.Fatalf("a lockless read must reap nothing: %v", err)
 	}
 }
 

@@ -939,12 +939,14 @@ type entry struct {
 }
 
 type queueReport struct {
-	Key            string  `json:"key"`
-	Exists         bool    `json:"exists"`
-	EffectiveSlots int     `json:"effective_slots"`
-	Free           bool    `json:"free"`
-	Holders        []entry `json:"holders"`
-	Waiting        []entry `json:"waiting"`
+	Key            string   `json:"key"`
+	Exists         bool     `json:"exists"`
+	EffectiveSlots int      `json:"effective_slots"`
+	Free           bool     `json:"free"`
+	Holders        []entry  `json:"holders"`
+	Waiting        []entry  `json:"waiting"`
+	ProbeError     string   `json:"probe_error,omitempty"`
+	Lockless       bool     `json:"lockless,omitempty"`
 }
 
 type report struct {

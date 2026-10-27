@@ -186,6 +186,12 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 			fmt.Fprintf(w, "    %s\n", paintEvent(p, l))
 		}
 	}
+	if qr.Lockless {
+		// The participants above are real (liveness is per ticket); say what
+		// the read could not rule out, so nobody reads a complete-looking list
+		// as proof that a job which started a moment ago is absent.
+		fmt.Fprintf(w, "  %s\n", p.Dim("read without the registry lock (another process holds it); a ticket created during this read may not be listed yet"))
+	}
 }
 
 // paintEvent colors one lane.log line: the timestamp dim, the event verb by

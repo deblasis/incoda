@@ -451,7 +451,13 @@ func trimLogLine(b []byte) string {
 // Reaping is the whole staleness story: a ticket whose exclusive lock can be
 // taken has no living owner, because the kernel drops that lock on process
 // death however the process died.
-func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
+func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) { return q.scan(now, true) }
+
+// scan is scanLocked with reaping made explicit. A caller that does not hold
+// the registry lock must pass reap=false: a ticket it finds unlocked may be one
+// Enroll is between creating and locking, not one whose owner has died, and
+// deleting that ticket would remove a live participant from the queue.
+func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 	names, err := os.ReadDir(q.Dir)
 	if err != nil {
 		return nil, 0, err
@@ -486,7 +492,7 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 			free = false
 		}
 		if free {
-			if q.readOnly {
+			if !reap || q.readOnly {
 				continue
 			}
 			// The only record of how a hard-killed holder ended. Without
@@ -528,7 +534,7 @@ func (q *Queue) scanLocked(now time.Time) ([]Entry, int, error) {
 		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
 		live[i].fill(now)
 	}
-	if !q.readOnly {
+	if reap && !q.readOnly {
 		q.reapKillFiles(names)
 	}
 	return live, slots, nil
@@ -629,6 +635,11 @@ type Snapshot struct {
 	Waiting        []Entry  `json:"waiting"`
 	Log            []Entry  `json:"-"`
 	RecentEvents   []string `json:"recent_events"`
+	// Lockless says the registry lock was not available, so the ticket set was
+	// read without it. Liveness is per ticket, so every live participant is
+	// still listed; what the lock would have ruled out is a ticket created or
+	// released during the read, which may be missing or still listed.
+	Lockless bool `json:"lockless,omitempty"`
 }
 
 // Observe scans the queue without joining it. The ticket set and the config
@@ -639,12 +650,25 @@ func (q *Queue) Observe(logLines int) (*Snapshot, error) {
 	return q.observe(logLines, q.withRegistry)
 }
 
-// ObserveBy is Observe for status, watch and queues: it waits for the
-// registry lock only until deadline, so a lock another process keeps for
-// ever (a stopped incoda) fails the observation with ErrRegistryBusy
-// instead of hanging the view.
+// ObserveBy is Observe for status, watch and queues: it waits for the registry
+// lock only until deadline, and past it reads the lane without the lock rather
+// than reporting nothing.
+//
+// The registry lock guards the ticket *set*; each ticket's own lock is the
+// liveness signal. The holder of the registry lock is a process doing
+// microseconds of work, but on a machine running heavy jobs that process can be
+// descheduled for seconds, and a view that gave up then reported a lane full of
+// queued jobs as "cannot tell" and, to anything reading the JSON, as empty. A
+// view is a description, not an admission decision, so it answers from the
+// tickets themselves instead; the lock-free read reaps nothing, so it can never
+// delete a ticket Enroll is between creating and locking. Admission keeps the
+// fail-closed rule (ProbeLane counts a lane it cannot read as held).
 func (q *Queue) ObserveBy(logLines int, deadline time.Time) (*Snapshot, error) {
-	return q.observe(logLines, func(fn func() error) error { return q.withRegistryBy(deadline, fn) })
+	snap, err := q.observe(logLines, func(fn func() error) error { return q.withRegistryBy(deadline, fn) })
+	if errors.Is(err, ErrRegistryBusy) {
+		return q.observeLockless(logLines)
+	}
+	return snap, err
 }
 
 func (q *Queue) observe(logLines int, with func(func() error) error) (*Snapshot, error) {
@@ -664,6 +688,22 @@ func (q *Queue) observe(logLines int, with func(func() error) error) (*Snapshot,
 	if err != nil {
 		return nil, err
 	}
+	return q.snapshot(live, slots, cfg, cfgErr, logLines, false), nil
+}
+
+// observeLockless is observe for a lane whose registry lock another process
+// holds: the same scan, without the lock and without reaping.
+func (q *Queue) observeLockless(logLines int) (*Snapshot, error) {
+	live, slots, err := q.scan(time.Now(), false)
+	if err != nil {
+		return nil, err
+	}
+	cfg, cfgErr := q.LoadConfig()
+	return q.snapshot(live, slots, cfg, cfgErr, logLines, true), nil
+}
+
+// snapshot assembles the observer's view from one scan.
+func (q *Queue) snapshot(live []Entry, slots int, cfg Config, cfgErr error, logLines int, lockless bool) *Snapshot {
 	if cfgErr == nil && len(live) == 0 && cfg.Slots > 0 {
 		// Nobody is enrolled to carry the number, so the config is the
 		// only thing that can say how wide an empty queue is.
@@ -678,6 +718,7 @@ func (q *Queue) observe(logLines int, with func(func() error) error) (*Snapshot,
 		Holders:        []Entry{},
 		Waiting:        []Entry{},
 		RecentEvents:   q.TailLog(logLines),
+		Lockless:       lockless,
 	}
 	if cfgErr != nil {
 		s.ConfigError = cfgErr.Error()
@@ -689,7 +730,7 @@ func (q *Queue) observe(logLines int, with func(func() error) error) (*Snapshot,
 			s.Waiting = append(s.Waiting, e)
 		}
 	}
-	return s, nil
+	return s
 }
 
 // Enrollment is a ticket this process owns. Its OS lock is held until Release

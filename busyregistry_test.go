@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,15 @@ func holdRegistryElsewhere(t *testing.T, dir string) {
 // file at path until the test ends, and waits until it holds it.
 func holdLockElsewhere(t *testing.T, path string) {
 	t.Helper()
+	release := holdLockElsewhereUntil(t, path)
+	t.Cleanup(release)
+}
+
+// holdLockElsewhereUntil is holdLockElsewhere with the hold on a switch: the
+// returned func ends it, safely more than once, so a test can prove what a
+// view shows while the lock is held and then let the lane run again.
+func holdLockElsewhereUntil(t *testing.T, path string) (release func()) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
 	cmd.Env = append(os.Environ(), "INCODA_TEST_HOLD_LOCK="+path)
 	in, err := cmd.StdinPipe()
@@ -64,7 +74,12 @@ func holdLockElsewhere(t *testing.T, path string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	released := false
+	release = func() {
+		if released {
+			return
+		}
+		released = true
 		in.Close()
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
@@ -74,11 +89,13 @@ func holdLockElsewhere(t *testing.T, path string) {
 			_ = cmd.Process.Kill()
 			<-done
 		}
-	})
+	}
+	t.Cleanup(release)
 	line, err := bufio.NewReader(out).ReadString('\n')
 	if err != nil || line != "held\n" {
 		t.Fatalf("helper did not take the lock: %q %v", line, err)
 	}
+	return release
 }
 
 // TestOwnLaneOperationsAreBoundedByTheirWait: a registry lock another
@@ -120,9 +137,10 @@ func TestOwnLaneOperationsAreBoundedByTheirWait(t *testing.T) {
 
 // TestRegistryLockHeldElsewhereNeverHangs: a registry lock another process
 // keeps for ever (a stray's, and a lane's of this layout) costs status,
-// doctor, kill and a pool run at most their bounds. status and doctor name
-// the lane they cannot tell, kill fails closed with exit 122, and a run on
-// a pool counts the stray as held and times out within its --wait.
+// doctor, kill and a pool run at most their bounds. status names the lane's
+// state from the tickets and says the read was lockless, doctor names the
+// stray it cannot tell, kill fails closed with exit 122, and a run on a pool
+// counts the stray as held and times out within its --wait.
 func TestRegistryLockHeldElsewhereNeverHangs(t *testing.T) {
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
@@ -143,9 +161,10 @@ func TestRegistryLockHeldElsewhereNeverHangs(t *testing.T) {
 	}
 
 	out, code := timed(5*time.Second, "status", "--queue", "seed", "--no-color")
-	if code != 0 || !strings.Contains(out, `queue "seed": `+cannot+"\n") ||
+	if code != 0 || !strings.Contains(out, `queue "seed": FREE`) ||
+		!strings.Contains(out, "read without the registry lock") ||
 		!strings.HasSuffix(out, "\nunpooled lane of an older incoda: strays/1/oldk: "+cannot+"\n") {
-		t.Fatalf("status must name both lanes it cannot tell: %d\n%s", code, out)
+		t.Fatalf("status must still describe a lane whose registry lock is held, and name the stray it cannot tell: %d\n%s", code, out)
 	}
 
 	start := time.Now()
@@ -166,5 +185,63 @@ func TestRegistryLockHeldElsewhereNeverHangs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(machine.StraysDir(state), "1", "oldk")); err != nil {
 		t.Fatal("a stray that cannot be told is never deleted")
+	}
+}
+
+// TestStatusListsQueuedJobsWhileTheRegistryLockIsHeld is the reported bug: a
+// lane with a live holder and a live waiter, whose registry lock another
+// process holds (a stopped incoda, or one descheduled on a loaded machine),
+// must still list both. The view used to give up on the registry lock and
+// report the lane as "cannot tell", with no holders and no waiters in the
+// JSON, so a job that was queued looked like it had never been queued.
+//
+// The two tickets are enrolled here, in the test process, so the test holds
+// real ticket locks for the whole check and never races the runs it is
+// describing.
+func TestStatusListsQueuedJobsWhileTheRegistryLockIsHeld(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	if out, code := runIncoda(t, incoda, state, "config", "seed"); code != 0 {
+		t.Fatalf("migrate: %d\n%s", code, out)
+	}
+	q, err := lane.OpenIn(filepath.Join(state, "lanes"), "busyq", lane.Create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	var ens []*lane.Enrollment
+	for i := 0; i < 2; i++ {
+		en, err := q.Enroll(lane.Ticket{Slots: 1, Command: []string{"job", strconv.Itoa(i)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ens = append(ens, en)
+	}
+
+	releaseLock := holdLockElsewhereUntil(t, lane.RegistryLockPath(laneDir(state, "busyq")))
+	defer func() {
+		// Drop the helper's registry lock first: Release takes the lock when it
+		// can, and while the helper holds it every Release waits its 2s bound.
+		releaseLock()
+		for _, en := range ens {
+			en.Release(0)
+		}
+	}()
+
+	out, code := runIncoda(t, incoda, state, "status", "--queue", "busyq", "--no-color")
+	if code != 0 || !strings.Contains(out, "HOLDER") || !strings.Contains(out, "WAITING (arrival order):") ||
+		!strings.Contains(out, "read without the registry lock") ||
+		strings.Contains(out, "cannot tell: registry lock held by another process") {
+		t.Fatalf("status must list both participants and name the lockless read: %d\n%s", code, out)
+	}
+	q2 := statusJSON(t, incoda, state, "busyq").Queues[0]
+	if q2.ProbeError != "" {
+		t.Fatalf("a held registry lock must not make the lane unreadable: %q", q2.ProbeError)
+	}
+	if len(q2.Holders) != 1 || len(q2.Waiting) != 1 {
+		t.Fatalf("status --json must list the live holder and the queued job: holders=%d waiting=%d", len(q2.Holders), len(q2.Waiting))
+	}
+	if !q2.Lockless {
+		t.Fatal("the report must say the read was taken without the registry lock")
 	}
 }

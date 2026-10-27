@@ -15,15 +15,21 @@ import (
 // kept the lane's registry lock past the probe's deadline: a stopped
 // incoda, or one killed inside its kill window and never resumed, can hold
 // it for ever. The probe cannot tell which tickets are live, so it reports
-// the lane as live (fail safe for admission and idle checks) and read-only
-// views print this text.
+// the lane as live, which is the fail-safe answer for admission, the idle
+// checks of an upgrade, and doctor. Read-only views do not print it: they read
+// the tickets without the registry lock instead (ObserveBy), because liveness
+// is per ticket and a view that answered "cannot tell" showed a lane full of
+// queued jobs as empty.
 var ErrRegistryBusy = errors.New("cannot tell: registry lock held by another process")
 
 // Probe bounds. No probe ever waits for a registry lock without a
 // deadline.
 const (
 	// ViewProbeWait bounds the probes of one read-only view (status, watch,
-	// doctor, queues): one deadline shared by every probe of the view.
+	// doctor, queues): one deadline shared by every queue of the view. It is a
+	// latency bound, not a correctness one: a view that cannot take the
+	// registry lock within it reads the lane without the lock (see ObserveBy),
+	// so the bound never costs the view its contents.
 	ViewProbeWait = 500 * time.Millisecond
 	// PollProbeWait bounds the probes of one poll of a waiting loop (an
 	// acquisition poll, an idle check of the upgrade), so the loop keeps
