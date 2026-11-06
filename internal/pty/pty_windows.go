@@ -167,6 +167,33 @@ func (p *Pty) Spawn(argv []string, env []string, dir string, extraCreationFlags 
 // Read reads what the job produced, straight off the master pipe.
 func (p *Pty) Read(b []byte) (int, error) { return windows.Read(p.mOut, b) }
 
+// BytesAvailable reports how many bytes sit in the master pipe right now
+// without reading them. The drain's silent cut is gated on it: a cut may
+// drop bytes without an in-band marker only when the pipe is provably
+// empty at the moment of the cut, and a reader parked between Read calls
+// can have delivered bytes that arrived just as a quiesce timer fired.
+// What it cannot see is conhost's own unwritten buffers: those are
+// unreachable by construction, because conhost never exits while the
+// master read end is open.
+//
+// x/sys/windows does not wrap PeekNamedPipe, so this is the raw kernel32
+// call (same shape as meminfo's LazyDLL use): peek with no buffer to
+// learn only how much is waiting.
+var (
+	modkernel32       = windows.NewLazySystemDLL("kernel32.dll")
+	procPeekNamedPipe = modkernel32.NewProc("PeekNamedPipe")
+)
+
+func (p *Pty) BytesAvailable() (uint32, error) {
+	var avail uint32
+	r, _, err := procPeekNamedPipe.Call(
+		uintptr(p.mOut), 0, 0, 0, uintptr(unsafe.Pointer(&avail)), 0)
+	if r == 0 {
+		return 0, fmt.Errorf("pty: peek master: %w", err)
+	}
+	return avail, nil
+}
+
 // Write sends bytes to the job's input (b carries no interpretation here; the
 // job path uses it for a Ctrl-C byte).
 func (p *Pty) Write(b []byte) (int, error) { return windows.Write(p.mIn, b) }
@@ -209,13 +236,20 @@ func (p *Pty) CloseReadEnd() {
 // Close releases everything Pty owns: the master pipe ends and the attribute
 // list, plus the pseudo-console itself if CloseConsole was never called (in
 // its own goroutine, so a conhost wedged mid-teardown cannot wedge the run).
-// Idempotent, and the master read end is closed here only if CloseReadEnd
-// never got it: both share the same once so the handle dies exactly once.
+// The master read end is closed with the same cancel-first shape as
+// CloseReadEnd, so a reader parked on it is woken by the cancel rather than
+// by whatever conhost's exit happens to do to the pipe: Close is the
+// catch-all teardown, and it must not hand a caller a wedge that
+// CloseReadEnd alone knows how to avoid. Idempotent, and the read end dies
+// exactly once: both paths share the same once.
 func (p *Pty) Close() error {
 	p.closeOnce.Do(func() {
 		go p.CloseConsole()
 		p.CloseInput()
-		p.closeMOut.Do(func() { _ = windows.CloseHandle(p.mOut) })
+		p.closeMOut.Do(func() {
+			_ = windows.CancelIoEx(p.mOut, nil)
+			_ = windows.CloseHandle(p.mOut)
+		})
 		p.attrs.Delete()
 	})
 	return nil
