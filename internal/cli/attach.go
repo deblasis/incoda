@@ -73,11 +73,8 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if entry == nil {
 		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
 	}
-	if entry.PayloadError != "" {
-		return usagef("queue %q: ticket %s is unreadable (%s); attach does not authorize on a payload it cannot fully parse", key, entry.File, entry.PayloadError)
-	}
-	if np, ok := lane.TicketNamePID(entry.File); ok && np != entry.Ticket.PID {
-		return usagef("queue %q: ticket %s names pid %d but claims pid %d; refusing", key, entry.File, np, entry.Ticket.PID)
+	if err := validateEntryForAttach(key, entry); err != nil {
+		return err
 	}
 	if err := mayAttach(entry.Ticket, *owner); err != nil {
 		return err
@@ -110,6 +107,23 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	}
 	if ctx.Err() != nil {
 		fmt.Fprintf(stderr, "attach: detached\n")
+	}
+	return nil
+}
+
+// validateEntryForAttach refuses entries the owner gate alone must not
+// clear. A payload that could not be fully parsed can carry a wrong owner
+// field, so authorizing on it would stream on the strength of a half-read
+// ticket. A file name and payload that disagree about the pid is a planted
+// or mangled ticket: the file name is what findEntry matched on, the
+// payload is what the gate reads, and attach must not act where the two
+// disagree.
+func validateEntryForAttach(key string, entry *lane.Entry) error {
+	if entry.PayloadError != "" {
+		return usagef("queue %q: ticket %s is unreadable (%s); attach does not authorize on a payload it cannot fully parse", key, entry.File, entry.PayloadError)
+	}
+	if np, ok := lane.TicketNamePID(entry.File); ok && np != entry.Ticket.PID {
+		return usagef("queue %q: ticket %s names pid %d but claims pid %d; refusing", key, entry.File, np, entry.Ticket.PID)
 	}
 	return nil
 }
@@ -185,20 +199,27 @@ func openJobFile(path string, wait time.Duration) (*os.File, error) {
 // streamJobFile copies new bytes from the job file to out as they appear,
 // from the start, and returns when the run process is gone and the file is
 // drained, or on interrupt.
+//
+// The loop checks for death BEFORE draining, in that order, so the
+// post-death drain is what carries the tail: bytes that land in the sleep
+// window before the run's exit are fetched by the drain after the death is
+// observed, not by a racing poll. The order is what makes that drain
+// load-bearing (a drain-first loop would absorb same-tick bytes itself and
+// the final drain would guard nothing).
 func streamJobFile(ctx context.Context, f *os.File, pid int, out io.Writer) error {
 	buf := make([]byte, 32*1024)
 	var offset int64
 	for {
+		if !procinfo.Alive(pid) {
+			// The run is gone, so nothing more can land after this drain:
+			// a full drain, not one read, because the exit tail can be far
+			// bigger than a single buffer.
+			_, err := drainToEOF(f, offset, buf, out)
+			return err
+		}
 		var err error
 		offset, err = drainToEOF(f, offset, buf, out)
 		if err != nil {
-			return err
-		}
-		if !procinfo.Alive(pid) {
-			// The run is gone, so nothing more can land: one final drain,
-			// not one final read, because the exit tail can be far bigger
-			// than a single buffer.
-			_, err = drainToEOF(f, offset, buf, out)
 			return err
 		}
 		select {
@@ -209,10 +230,20 @@ func streamJobFile(ctx context.Context, f *os.File, pid int, out io.Writer) erro
 	}
 }
 
+// readerAtStat is the slice of *os.File drainToEOF needs; tests inject a
+// fake whose ReadAt fails to prove real read errors surface instead of
+// dissolving into the poll loop.
+type readerAtStat interface {
+	io.ReaderAt
+	Stat() (os.FileInfo, error)
+}
+
 // drainToEOF copies every byte currently in the file past offset to out and
-// returns the new offset. It stops, not errors, at a short read: the next
-// caller picks up where it left off.
-func drainToEOF(f *os.File, offset int64, buf []byte, out io.Writer) (int64, error) {
+// returns the new offset. It stops, not errors, at end-of-file: the next
+// caller picks up where it left off. Any other read error is returned: a
+// read that failed for a real reason must not read as silence, or the tail
+// is dropped without a word.
+func drainToEOF(f readerAtStat, offset int64, buf []byte, out io.Writer) (int64, error) {
 	for {
 		st, err := f.Stat()
 		if err != nil {
@@ -228,8 +259,11 @@ func drainToEOF(f *os.File, offset int64, buf []byte, out io.Writer) (int64, err
 			}
 			offset += int64(n)
 		}
-		if err != nil {
+		if err == io.EOF {
 			return offset, nil
+		}
+		if err != nil {
+			return offset, fmt.Errorf("job file read: %w", err)
 		}
 	}
 }

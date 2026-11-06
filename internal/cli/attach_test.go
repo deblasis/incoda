@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,5 +148,78 @@ func TestDrainToEOFDeliversWholeTail(t *testing.T) {
 	}
 	if !bytes.Equal(out.Bytes(), payload) {
 		t.Fatalf("drained %d bytes but they are not the file's bytes", out.Len())
+	}
+}
+
+// TestValidateEntryForAttach: the two refusals ahead of the owner gate
+// (unreadable payload, name/pid disagreement) each name what they saw, and
+// a clean entry passes. A guard that cannot fail here ships as prose.
+func TestValidateEntryForAttach(t *testing.T) {
+	clean := &lane.Entry{File: "01790000000000000000-777.ticket", Ticket: lane.Ticket{PID: 777, Queue: "builds"}}
+	if err := validateEntryForAttach("builds", clean); err != nil {
+		t.Fatalf("clean entry must pass, got %v", err)
+	}
+	broken := &lane.Entry{File: clean.File, Ticket: clean.Ticket, PayloadError: "json: bad token"}
+	err := validateEntryForAttach("builds", broken)
+	if err == nil || !strings.Contains(err.Error(), "unreadable") || !strings.Contains(err.Error(), "json: bad token") {
+		t.Fatalf("unreadable payload must refuse naming the parse error, got %v", err)
+	}
+	mism := &lane.Entry{File: "01790000000000000000-777.ticket", Ticket: lane.Ticket{PID: 778, Queue: "builds"}}
+	err = validateEntryForAttach("builds", mism)
+	if err == nil || !strings.Contains(err.Error(), "names pid 777") || !strings.Contains(err.Error(), "claims pid 778") {
+		t.Fatalf("name/pid disagreement must refuse naming both pids, got %v", err)
+	}
+}
+
+// errReaderAt fails its ReadAt after the first chunk with a real error,
+// while Stat keeps succeeding: the shape a failing disk or a closed handle
+// under a live path presents, and the one the old swallow-on-any-error
+// read as silence.
+type errReaderAt struct {
+	f         *os.File
+	failAfter int64
+	calls     int
+}
+
+func (e *errReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	e.calls++
+	if int64(e.calls)*int64(len(p)) > e.failAfter {
+		return 0, errors.New("device gone")
+	}
+	return e.f.ReadAt(p, off)
+}
+
+func (e *errReaderAt) Stat() (os.FileInfo, error) { return e.f.Stat() }
+
+// TestDrainToEOFPropagatesReadError: a read error mid-drain must surface,
+// not dissolve into the poll loop; a drain that reports success after a
+// failed read has silently dropped the tail it was draining.
+func TestDrainToEOFPropagatesReadError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "job.out")
+	payload := make([]byte, 1<<20)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fake := &errReaderAt{f: f, failAfter: 100 * 1024}
+	var out bytes.Buffer
+	buf := make([]byte, 32*1024)
+	_, err = drainToEOF(fake, 0, buf, &out)
+	if err == nil {
+		t.Fatal("a real read error was swallowed; the tail after it is dropped in silence")
+	}
+	if !strings.Contains(err.Error(), "job file read") || !strings.Contains(err.Error(), "device gone") {
+		t.Fatalf("error must name the read and the cause, got %v", err)
+	}
+	if out.Len() >= len(payload) {
+		t.Fatalf("delivered %d bytes of %d; the truncated delivery is the point", out.Len(), len(payload))
 	}
 }
