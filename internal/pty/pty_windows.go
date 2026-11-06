@@ -236,20 +236,22 @@ func (p *Pty) CloseReadEnd() {
 // Close releases everything Pty owns: the master pipe ends and the attribute
 // list, plus the pseudo-console itself if CloseConsole was never called (in
 // its own goroutine, so a conhost wedged mid-teardown cannot wedge the run).
-// The master read end is closed with the same cancel-first shape as
-// CloseReadEnd, so a reader parked on it is woken by the cancel rather than
-// by whatever conhost's exit happens to do to the pipe: Close is the
-// catch-all teardown, and it must not hand a caller a wedge that
-// CloseReadEnd alone knows how to avoid. Idempotent, and the read end dies
-// exactly once: both paths share the same once.
+// The read end goes FIRST, before the input end and before the console
+// teardown is even started: the cancel is then the first thing that can
+// reach a parked reader, so it wakes with the abort and not with whatever
+// conhost's exit epilogue does to the pipe a scheduling race later. Close is
+// the catch-all force teardown, so whatever is still buffered in the master
+// when it runs is dropped by intent (the normal path has drained or cut by
+// then). Idempotent, and the read end dies exactly once: this and
+// CloseReadEnd share the same once.
 func (p *Pty) Close() error {
 	p.closeOnce.Do(func() {
-		go p.CloseConsole()
-		p.CloseInput()
 		p.closeMOut.Do(func() {
 			_ = windows.CancelIoEx(p.mOut, nil)
 			_ = windows.CloseHandle(p.mOut)
 		})
+		p.CloseInput()
+		go p.CloseConsole()
 		p.attrs.Delete()
 	})
 	return nil
