@@ -116,3 +116,33 @@ func TestQuietCutOKAfterTeardown(t *testing.T) {
 		t.Fatal("the gate refused the torn-down pipe: broken means empty AND final, and refusing it makes every clean exit pay the grace cut and a false data-loss marker")
 	}
 }
+
+// TestPeekVerdict pins the silent-cut policy itself, arm by arm, as a pure
+// table: which peek answers authorize cutting the master with no in-band
+// marker, and which refuse. The gate's failure direction - toward the
+// marker, never toward silence - lives here where a mutation can hit it;
+// the pipe-backed guards above cannot see it, because their peeks only
+// ever return nil or the write-end-gone errors in reachable states, so an
+// over-accepting gate ships green under them.
+func TestPeekVerdict(t *testing.T) {
+	cases := []struct {
+		name  string
+		avail uint32
+		err   error
+		want  bool
+	}{
+		{"clean empty pipe cuts", 0, nil, true},
+		{"clean pipe with pending bytes refuses", 18, nil, false},
+		{"broken pipe cuts", 0, windows.ERROR_BROKEN_PIPE, true},
+		{"no-data pipe cuts", 0, windows.ERROR_NO_DATA, true},
+		{"busy pipe refuses", 0, windows.ERROR_PIPE_BUSY, false},
+		{"an unknown error refuses", 0, errors.New("device gone"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := peekVerdict(tc.avail, tc.err); got != tc.want {
+				t.Fatalf("peekVerdict(%d, %v) = %v, want %v", tc.avail, tc.err, got, tc.want)
+			}
+		})
+	}
+}

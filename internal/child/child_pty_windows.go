@@ -21,8 +21,9 @@ import (
 // because bytes still in flight die with it. quiesceWindow is the faster
 // path: with the job gone and the input end closed, a pipe that stays
 // silent this long AND peeks empty (or peeks its write end gone, which is
-// empty and final) may be cut without a marker, because the peek, not the
-// silence, is what proves no byte is being dropped. Measured on this build:
+// empty and final) may be cut without a marker; the peek is what proves
+// the pipe empty now, and only the write-end-gone answer proves it final.
+// Measured on this build:
 // ClosePseudoConsole returns immediately and conhost's exit epilogue lands
 // at once, but conhost never exits while the master read end is open, so
 // EOF is not what ends the drain here; the quiesce cut is.
@@ -31,28 +32,39 @@ const (
 	quiesceWindow = 3 * time.Second
 )
 
-// quietCutOK is the drain's silent-cut gate: cutting the reader loose
-// without an in-band marker may drop only bytes that provably never
-// existed, so it returns true only when a peek sees the master pipe empty
-// at the moment of the cut. Pending bytes (a reader between Read calls,
-// or an arrival racing the timer) make it false, which keeps the drain
-// alive.
 // quietCutOK reports whether the master pipe may be cut with no in-band
-// marker: that needs the pipe PROVABLY empty, and there are exactly two
-// proofs. A clean peek of zero bytes proves it empty now. A peek that
-// reports the write end gone (broken pipe / no data) proves something
-// stronger - empty AND final, because nothing can ever land in a pipe whose
-// writer is dead; in the real drain state (job gone, input end and
-// pseudo-console closed) that is the ONLY answer the peek gives, so a gate
-// that refuses on any error refuses every clean exit and pays the grace cut
-// with a false "tail was lost" marker each time. Any other error keeps
-// refusing: the gate fails toward the marker, never toward silence.
+// marker. The peek has to prove the pipe empty, and it can give exactly
+// two proofs. A clean peek of zero bytes proves the pipe empty NOW, with
+// the writer silent for the whole window after teardown; it does not prove
+// the pipe final - a conhost holding its write end open through a starved
+// tail could still land one after the cut, which is the residue the
+// in-loop comment at the cut discloses. A peek that reports the write end
+// gone (broken pipe / no data) proves empty AND final, because nothing can
+// ever land in a pipe whose writer is dead; in the real drain state (job
+// gone, input end and pseudo-console closed) that is the ONLY answer the
+// peek gives, so a gate that refuses on any error refuses every clean exit
+// and pays the grace cut with a false "tail was lost" marker each time.
+// Any other error keeps refusing: the gate fails toward the marker, never
+// toward silence.
 func quietCutOK(p *pty.Pty) bool {
 	n, err := p.BytesAvailable()
-	if err == nil {
-		return n == 0
+	return peekVerdict(n, err)
+}
+
+// peekVerdict is quietCutOK's decision as a pure function, so the policy
+// itself is table-tested arm by arm. nil with bytes pending refuses (those
+// bytes would be dropped unmarked); nil with zero authorizes; the two
+// write-end-gone errors authorize (empty AND final); every other error
+// refuses, because a peek that failed for an unknown reason has proven
+// nothing, and the honest outcome for unknown state is the grace cut WITH
+// its marker. The pipe-backed guards cannot cover this last arm: their
+// peeks only ever return nil or the write-end-gone errors in reachable
+// states, so an over-accepting gate would ship green under them.
+func peekVerdict(avail uint32, peekErr error) bool {
+	if peekErr == nil {
+		return avail == 0
 	}
-	return errors.Is(err, windows.ERROR_BROKEN_PIPE) || errors.Is(err, windows.ERROR_NO_DATA)
+	return errors.Is(peekErr, windows.ERROR_BROKEN_PIPE) || errors.Is(peekErr, windows.ERROR_NO_DATA)
 }
 
 // runPTY is Run with the pipes swapped for a pseudo-console. It keeps every
