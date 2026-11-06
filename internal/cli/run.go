@@ -151,7 +151,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		if cfg, cfgErr := lane.ReadConfig(lane.LaneDir(dir, firstKey)); cfgErr == nil {
 			ptyOn = cfg.PTY
 		} else if !errors.Is(cfgErr, os.ErrNotExist) {
-			fmt.Fprintf(stderr, "incoda: reading the pty default for queue %q failed (%v); running with pipes\n", firstKey, cfgErr)
+			// No fallback is promised here: the same unreadable config
+			// refuses the plan below (122), so the note only states what
+			// was decided about the pty flag, never what the run will do.
+			fmt.Fprintf(stderr, "incoda: reading the pty default for queue %q failed (%v); --pty not given, so no pseudo-console for this queue\n", firstKey, cfgErr)
 		}
 	}
 	if ptyOn && runtime.GOOS != "windows" {
