@@ -3,6 +3,7 @@
 package child
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,11 +20,12 @@ import (
 // the last delivered byte) the read is cut and the cut says so in-band,
 // because bytes still in flight die with it. quiesceWindow is the faster
 // path: with the job gone and the input end closed, a pipe that stays
-// silent this long is empty, so cutting the parked read drops nothing and
-// needs no marker. Measured on this build: ClosePseudoConsole returns
-// immediately and conhost's exit epilogue lands at once, but conhost never
-// exits while the master read end is open, so EOF is not what ends the
-// drain here; the quiesce cut is.
+// silent this long AND peeks empty (or peeks its write end gone, which is
+// empty and final) may be cut without a marker, because the peek, not the
+// silence, is what proves no byte is being dropped. Measured on this build:
+// ClosePseudoConsole returns immediately and conhost's exit epilogue lands
+// at once, but conhost never exits while the master read end is open, so
+// EOF is not what ends the drain here; the quiesce cut is.
 const (
 	drainGrace    = 10 * time.Second
 	quiesceWindow = 3 * time.Second
@@ -35,9 +37,22 @@ const (
 // at the moment of the cut. Pending bytes (a reader between Read calls,
 // or an arrival racing the timer) make it false, which keeps the drain
 // alive.
+// quietCutOK reports whether the master pipe may be cut with no in-band
+// marker: that needs the pipe PROVABLY empty, and there are exactly two
+// proofs. A clean peek of zero bytes proves it empty now. A peek that
+// reports the write end gone (broken pipe / no data) proves something
+// stronger - empty AND final, because nothing can ever land in a pipe whose
+// writer is dead; in the real drain state (job gone, input end and
+// pseudo-console closed) that is the ONLY answer the peek gives, so a gate
+// that refuses on any error refuses every clean exit and pays the grace cut
+// with a false "tail was lost" marker each time. Any other error keeps
+// refusing: the gate fails toward the marker, never toward silence.
 func quietCutOK(p *pty.Pty) bool {
 	n, err := p.BytesAvailable()
-	return err == nil && n == 0
+	if err == nil {
+		return n == 0
+	}
+	return errors.Is(err, windows.ERROR_BROKEN_PIPE) || errors.Is(err, windows.ERROR_NO_DATA)
 }
 
 // runPTY is Run with the pipes swapped for a pseudo-console. It keeps every
@@ -179,10 +194,11 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// session: ClosePseudoConsole returns at once, and conhost on this
 	// build exits only once the master ends go, so the read below is ended
 	// by the quiesce cut rather than an EOF that never comes. Quiet for a
-	// whole quiesce window with the job dead means the pipe is empty and
-	// the cut drops nothing; a stream still moving gets the whole grace
-	// window, and the cut says so in-band because those bytes die with it,
-	// in every sink at once.
+	// whole quiesce window with the job dead is only the OCCASION to cut;
+	// the quiet cut also needs the peek's proof that the pipe is empty
+	// (or that its write end is gone, which is stronger). A stream still
+	// moving gets the whole grace window, and the cut says so in-band
+	// because those bytes die with it, in every sink at once.
 	go p.CloseConsole()
 	p.CloseInput()
 	grace := time.NewTimer(drainGrace)
