@@ -787,6 +787,9 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	if en.ticket.MaxCPUPct > 0 {
 		extra += fmt.Sprintf(" maxcpu=%.1f idlefor=%s", en.ticket.MaxCPUPct, time.Duration(en.ticket.IdleForNanos).String())
 	}
+	if en.ticket.PTY {
+		extra += " pty=true"
+	}
 	q.Logf("queue=%s event=enqueue pid=%d slots=%d%s%s cmd=%s", q.Key, en.ticket.PID, en.ticket.Slots, extra, en.ticket.attribution(), textsafe.LogValue(en.ticket.CommandString()))
 	return en, nil
 }

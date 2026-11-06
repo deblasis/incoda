@@ -54,6 +54,10 @@ type Ticket struct {
 	// GateStartNano/GateDoneNano bracket the gate wait for status/log.
 	GateStartNano int64 `json:"gate_start_nano,omitempty"`
 	GateDoneNano  int64 `json:"gate_done_nano,omitempty"`
+	// PTY records that the job runs inside a pseudo-console. It is what
+	// status shows and what attach checks before offering a live stream;
+	// enforcement of the mode itself is in the run process, not here.
+	PTY bool `json:"pty,omitempty"`
 }
 
 // attribution is the k=v block every lifecycle line (enqueue/acquire/release)

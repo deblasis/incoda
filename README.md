@@ -120,12 +120,13 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
+| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty` runs the job inside a Windows pseudo-console; see [PTY jobs](#pty-jobs). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
+| `incoda attach --queue KEY --pid N [--owner WHO]` | Stream a pty job's output live, from its start, read-only, until the job's run process is gone. Only the job's own owner may attach; anyone else is refused with a named error. |
 | `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
 | `incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]` | Register one new machine-wide pool and say what changed. Takes `machine.lock`, writes `machine.json` by temp file and rename, and touches no other pool or lane (the generation counter goes up by one). Refuses a name that is invalid or already a pool (`pool-exists`, exit `120`), and a lane of that name that links pools or has a live job (`kind-busy`). `--slots` and `--description` set the pool's `config.json` first, so a crash in between leaves a plain lane and the same command can be rerun. Logs `event=pool-add` to the pool's `lane.log`. |
 | `incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. `--rebuild-registry` rewrites the machine registry after one was lost or damaged, holding every lane still while it checks. |
@@ -145,6 +146,28 @@ Signals are forwarded to the child. On Windows the child runs inside a Job
 Object with kill-on-close, so a `SIGKILL` of `incoda` still takes the whole
 build tree with it. On Unix the child gets its own process group; a hard kill
 of `incoda` can orphan it (see [limits](#known-limits)).
+
+### PTY jobs
+
+`run --pty` starts the job inside a Windows pseudo-console (ConPTY) instead of
+a pipe, and `incoda config KEY --pty` makes it the queue's default (an explicit
+`--pty=false` wins over the config). The job sees a real TTY, so it may color
+its output, draw progress bars, or wait on a prompt where the pipe path would
+have failed fast; if a job behaves differently under a TTY, keep the flag off.
+Bytes are never interpreted on the way through: escape and OSC sequences reach
+the output exactly as the job wrote them. On other systems `--pty` is refused
+with exit `120`.
+
+Every byte the job writes still reaches the run's own stdout, and is also
+teed to a per-job file under the lane (`jobs/TICKET.out`, capped at 16 MiB
+with an in-band truncation marker; the newest 10 files are kept per queue).
+`incoda attach --queue KEY --pid N` streams that file live from the start:
+useful when the run belongs to one terminal and a second one wants to watch.
+Attach is read-only and owner-gated (the same `--owner` / `INCODA_OWNER`
+identity the run recorded), and ends by itself when the job's run process is
+gone. Kill semantics are unchanged: the job sits in the same Job Object, and
+the pseudo-console dies with the run on a kill, a force-kill and process
+death.
 
 **Nested runs on a held key pass through.** `run` exports `INCODA_HELD` to
 its child, listing the keys it holds. A nested `incoda run` on one of those

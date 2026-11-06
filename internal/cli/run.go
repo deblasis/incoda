@@ -19,6 +19,7 @@ import (
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/held"
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -58,8 +59,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	pool := &poolsValue{}
 	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
 	fs.Var(pool, "pools", "alias of --pool")
+	pty := fs.Bool("pty", false,
+		"run the job inside a Windows pseudo-console (ConPTY): the job sees a TTY, so it may colour its output, draw progress bars, or wait on a prompt where the pipe path would have failed fast; its merged output is teed to a per-job file readable live with `incoda attach --queue KEY --pid N` (Windows only; without the flag, the first --queue key's configured pty setting decides)")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty] [--] <cmd...>\n\n")
 		fmt.Fprintf(stderr, "Runs without --max-cpu bypass the load gate entirely; a gated run shares its --wait budget between queueing and waiting for idle (expiry exits 121).\n\n")
 		fs.PrintDefaults()
 	}
@@ -123,6 +126,26 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	dir, reg, err := mutatingState(start, wait.d, *poll, chain, stderr)
 	if err != nil {
 		return err
+	}
+
+	// PTY mode: an explicit --pty/--pty=false wins; without one, the config
+	// of the first named key decides. One mode for the whole run: there is
+	// one spawn path, so every held lane gets the same ticket flag and the
+	// same per-job file.
+	ptyGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "pty" {
+			ptyGiven = true
+		}
+	})
+	ptyOn := *pty
+	if !ptyGiven && len(keys) > 0 {
+		if cfg, cfgErr := lane.ReadConfig(lane.LaneDir(dir, keys[0])); cfgErr == nil {
+			ptyOn = cfg.PTY
+		}
+	}
+	if ptyOn && runtime.GOOS != "windows" {
+		return usagef("pty mode is not implemented on %s (Windows ConPTY only); unset --pty, or clear it with `incoda config %s --pty=false`", runtime.GOOS, keys[0])
 	}
 
 	// The plan (runplan) is the lane set in its total order, with every
@@ -229,6 +252,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// them. Zero means no gate.
 			MaxCPUPct:    gate.MaxCPU,
 			IdleForNanos: int64(gate.IdleFor),
+			PTY:          ptyOn,
 		}
 		if !pt.l.Pool {
 			// --slots applies to named project lanes only. A pool ticket
@@ -526,6 +550,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
+				PTY:      ptyOptions(ptyOn, os.Stdout),
 			})
 			if runErr != nil {
 				return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
@@ -730,6 +755,31 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 
 	stop() // hand interrupt handling to the child supervisor
 
+	// PTY capture: every byte the job writes reaches the run's stdout (as
+	// on the pipe path) and one bounded job file per held lane, so an
+	// attach through any of this run's --queue keys finds its own file.
+	// The re-entrant path above has no ticket of its own and tees to
+	// stdout only.
+	var jobClosers []*joblog.Writer
+	tee := io.Writer(os.Stdout)
+	if ptyOn {
+		writers := []io.Writer{os.Stdout}
+		for _, pt := range toTake {
+			jl, jlErr := joblog.Create(lane.LaneDir(dir, pt.key), pt.en.Name())
+			if jlErr != nil {
+				return exitWith(ExitState, "%v", jlErr)
+			}
+			writers = append(writers, jl)
+			jobClosers = append(jobClosers, jl)
+		}
+		tee = io.MultiWriter(writers...)
+		defer func() {
+			for _, jl := range jobClosers {
+				_ = jl.Close()
+			}
+		}()
+	}
+
 	// While the command runs, watch every held ticket for a kill request at
 	// the poll interval. A request closes abort, which takes the job tree
 	// down; the message is printed here, after the child is gone, so it is
@@ -770,6 +820,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
 		Env:      childEnv(startEnv, held.Format(held.Merge(inherited.L, own))),
 		OwnGroup: len(inherited.L) == 0,
+		PTY:      ptyOptions(ptyOn, tee),
 	})
 	close(stopWatch)
 	<-watchDone
@@ -796,6 +847,17 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return &exitCode{code: res.Code}
 	}
 	return nil
+}
+
+// ptyOptions builds the PTY spawn option: nil keeps the pipe path, which is
+// what everything that never asked for a pseudo-console must get. Tee
+// receives the job's merged output verbatim; sizes fall back to the pty
+// package defaults.
+func ptyOptions(on bool, tee io.Writer) *child.PTYOptions {
+	if !on {
+		return nil
+	}
+	return &child.PTYOptions{Tee: tee}
 }
 
 // planWithFirstLinks plans the run and, when its --pool set equals an

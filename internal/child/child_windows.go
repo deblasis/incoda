@@ -22,9 +22,25 @@ type supervisor struct {
 // still in the job. That is what keeps a build tree from outliving its lane
 // holder.
 func newSupervisor(cmd *exec.Cmd, _ bool) (*supervisor, error) {
+	job, err := newJobObject()
+	if err != nil {
+		return nil, err
+	}
+	// The child is created suspended so that it can be put in the job before it
+	// executes a single instruction. Assigning after the process is already
+	// running leaves a window in which it could spawn a grandchild outside the
+	// job, and that grandchild is exactly the orphaned compiler we are trying to
+	// prevent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
+	return &supervisor{job: job}, nil
+}
+
+// newJobObject is the job half of the supervisor, shared by the pipe path
+// (newSupervisor) and the pty path, which has no exec.Cmd to preconfigure.
+func newJobObject() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create job object: %w", err)
+		return 0, fmt.Errorf("create job object: %w", err)
 	}
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
 		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
@@ -38,16 +54,9 @@ func newSupervisor(cmd *exec.Cmd, _ bool) (*supervisor, error) {
 		uint32(unsafe.Sizeof(info)),
 	); err != nil {
 		windows.CloseHandle(job)
-		return nil, fmt.Errorf("configure job object: %w", err)
+		return 0, fmt.Errorf("configure job object: %w", err)
 	}
-
-	// The child is created suspended so that it can be put in the job before it
-	// executes a single instruction. Assigning after the process is already
-	// running leaves a window in which it could spawn a grandchild outside the
-	// job, and that grandchild is exactly the orphaned compiler we are trying to
-	// prevent.
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
-	return &supervisor{job: job}, nil
+	return job, nil
 }
 
 func (s *supervisor) afterStart(cmd *exec.Cmd) error {

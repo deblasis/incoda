@@ -9,6 +9,7 @@ package child
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -51,6 +52,24 @@ type Options struct {
 	// through the lane can signal the whole tree. Ignored on Windows, where
 	// the Job Object contains the tree.
 	OwnGroup bool
+	// PTY, when non-nil, starts the child inside a Windows pseudo-console
+	// instead of on the given pipes: the child sees a TTY, and every byte it
+	// writes is read off the pty master and copied to PTY.Tee verbatim. The
+	// stdin/stdout/stderr arguments to Run are ignored in this mode.
+	PTY *PTYOptions
+}
+
+// PTYOptions is the pty half of Options.
+type PTYOptions struct {
+	// Cols and Rows size the pseudo-console; zero falls back to
+	// pty.DefaultCols and pty.DefaultRows.
+	Cols, Rows int
+	// Tee receives every byte read from the pty master, verbatim and in
+	// order, including escape and OSC sequences. It is written from one
+	// goroutine for the child's whole lifetime. A Tee error tears the job
+	// down: a consumer that stopped reading is the pty-mode equivalent of a
+	// closed stdout pipe.
+	Tee io.Writer
 }
 
 // Run starts argv, forwards interrupt signals to it, and returns its exit code
@@ -61,6 +80,9 @@ type Options struct {
 func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan struct{}, opt Options) (Result, error) {
 	if len(argv) == 0 {
 		return Result{}, errors.New("no command given")
+	}
+	if opt.PTY != nil {
+		return runPTY(argv, abort, opt)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = stdin
