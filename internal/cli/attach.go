@@ -66,9 +66,18 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return exitWith(ExitState, "%v", err)
 	}
-	entry, holding := findEntry(snap, *pid)
+	entry, holding, err := findEntry(snap, *pid)
+	if err != nil {
+		return usagef("queue %q: %v; refusing to pick one, since a planted ticket is indistinguishable from the real one", key, err)
+	}
 	if entry == nil {
 		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
+	}
+	if entry.PayloadError != "" {
+		return usagef("queue %q: ticket %s is unreadable (%s); attach does not authorize on a payload it cannot fully parse", key, entry.File, entry.PayloadError)
+	}
+	if np, ok := lane.TicketNamePID(entry.File); ok && np != entry.Ticket.PID {
+		return usagef("queue %q: ticket %s names pid %d but claims pid %d; refusing", key, entry.File, np, entry.Ticket.PID)
 	}
 	if err := mayAttach(entry.Ticket, *owner); err != nil {
 		return err
@@ -89,7 +98,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	// inside that window.
 	f, err := openJobFile(path, 5*time.Second)
 	if err != nil {
-		return exitWith(ExitState, "job output for pid %d is not there yet: %v", *pid, err)
+		return exitWith(ExitState, "job output for pid %d is not there yet (the run may still be waiting out a load gate, or between acquiring the lane and starting the job): %v", *pid, err)
 	}
 	defer f.Close()
 
@@ -106,34 +115,51 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 }
 
 // findEntry returns the participant with this pid, and whether it holds the
-// lane (a waiter is the same run before its turn).
-func findEntry(snap *lane.Snapshot, pid int) (*lane.Entry, bool) {
+// lane (a waiter is the same run before its turn). The pid must name exactly
+// one live participant: ticket state lives in the shared state directory,
+// so a second ticket carrying the pid, however it got there, cannot be told
+// from the real one, and streaming a guess would put someone else's bytes
+// under this job's name.
+func findEntry(snap *lane.Snapshot, pid int) (*lane.Entry, bool, error) {
+	var found *lane.Entry
+	holding := false
+	count := 0
 	for i := range snap.Holders {
 		if snap.Holders[i].Ticket.PID == pid {
-			return &snap.Holders[i], true
+			found = &snap.Holders[i]
+			holding = true
+			count++
 		}
 	}
 	for i := range snap.Waiting {
 		if snap.Waiting[i].Ticket.PID == pid {
-			return &snap.Waiting[i], false
+			if found == nil {
+				found = &snap.Waiting[i]
+				holding = false
+			}
+			count++
 		}
 	}
-	return nil, false
+	if count > 1 {
+		return nil, false, fmt.Errorf("pid %d appears on %d live tickets", pid, count)
+	}
+	return found, holding, nil
 }
 
 // mayAttach is the owner gate: fail closed on a missing identity, a ticket
-// with no recorded owner, and a mismatch, each named. The identity string is
-// trimmed the way the run trims --owner, so a trailing space in either place
-// cannot fail a match that is real.
+// with no recorded owner, and a mismatch, each named. Both sides are
+// compared trimmed: the run trims what it records, and a shell-exported
+// $INCODA_OWNER with stray whitespace must not make a job unattachable by
+// two visually identical names.
 func mayAttach(t lane.Ticket, me string) error {
 	me = strings.TrimSpace(me)
 	if me == "" {
 		return usagef("attach needs --owner or $INCODA_OWNER: attach is limited to the job's own owner")
 	}
-	if t.Owner == "" {
+	if strings.TrimSpace(t.Owner) == "" {
 		return usagef("job pid %d on queue %q recorded no owner; attach is refused. Runs that want to be attachable must pass --owner", t.PID, t.Queue)
 	}
-	if t.Owner != me {
+	if strings.TrimSpace(t.Owner) != me {
 		return usagef("attach refused: job pid %d on queue %q belongs to owner %q; you are %q. Only the job's owner may attach",
 			t.PID, t.Queue, textsafe.Escape(t.Owner), textsafe.Escape(me))
 	}
@@ -163,40 +189,47 @@ func streamJobFile(ctx context.Context, f *os.File, pid int, out io.Writer) erro
 	buf := make([]byte, 32*1024)
 	var offset int64
 	for {
-		for {
-			st, err := f.Stat()
-			if err != nil {
-				return fmt.Errorf("job file stat: %w", err)
-			}
-			if st.Size() <= offset {
-				break
-			}
-			n, err := f.ReadAt(buf[:min(int64(len(buf)), st.Size()-offset)], offset)
-			if n > 0 {
-				if _, werr := out.Write(buf[:n]); werr != nil {
-					return werr
-				}
-				offset += int64(n)
-			}
-			if err != nil {
-				break
-			}
+		var err error
+		offset, err = drainToEOF(f, offset, buf, out)
+		if err != nil {
+			return err
 		}
 		if !procinfo.Alive(pid) {
-			// One more drain: bytes can land between the last read and the
-			// death check.
-			if n, err := f.ReadAt(buf, offset); err == nil || n > 0 {
-				if _, werr := out.Write(buf[:n]); werr != nil {
-					return werr
-				}
-				offset += int64(n)
-			}
-			return nil
+			// The run is gone, so nothing more can land: one final drain,
+			// not one final read, because the exit tail can be far bigger
+			// than a single buffer.
+			_, err = drainToEOF(f, offset, buf, out)
+			return err
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+// drainToEOF copies every byte currently in the file past offset to out and
+// returns the new offset. It stops, not errors, at a short read: the next
+// caller picks up where it left off.
+func drainToEOF(f *os.File, offset int64, buf []byte, out io.Writer) (int64, error) {
+	for {
+		st, err := f.Stat()
+		if err != nil {
+			return offset, fmt.Errorf("job file stat: %w", err)
+		}
+		if st.Size() <= offset {
+			return offset, nil
+		}
+		n, err := f.ReadAt(buf[:min(int64(len(buf)), st.Size()-offset)], offset)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return offset, werr
+			}
+			offset += int64(n)
+		}
+		if err != nil {
+			return offset, nil
 		}
 	}
 }

@@ -21,6 +21,12 @@ const (
 	MaxBytes int64 = 16 << 20
 	// KeepPerLane is how many job files a lane keeps, newest first.
 	KeepPerLane = 10
+	// CutLine is written through the run's output tee when a pseudo-console
+	// drain is cut: conhost delivered nothing for a whole grace window while
+	// the job's bytes were still in flight. Unlike the size cap, the tail is
+	// lost everywhere at once, stdout included, so the marker says so. CRLF
+	// and the prefix match markTruncated, whose stream this is.
+	CutLine = "\r\nincoda: job output cut: the pseudo-console stopped draining; the tail after this line was lost\r\n"
 
 	dirName = "jobs"
 	jobExt  = ".out"
@@ -50,7 +56,10 @@ type Writer struct {
 
 // Create opens the job file for ticket, creating the lane's jobs/ directory
 // and trimming it to the newest KeepPerLane-1 files first (the new file is
-// the KeepPerLane-th).
+// the KeepPerLane-th). The file is created exclusively: a fresh ticket's
+// job file must not exist yet, and one that does is either a collision or
+// a plant (a hard link to a file its creator wants overwritten), so it is
+// refused rather than truncated through.
 func Create(laneDir, ticket string) (*Writer, error) {
 	path, err := Path(laneDir, ticket)
 	if err != nil {
@@ -62,7 +71,13 @@ func Create(laneDir, ticket string) (*Writer, error) {
 	if err := sweep(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("joblog: %s already exists; a fresh ticket's job file must be created, not reopened", path)
+		}
+		return nil, fmt.Errorf("joblog: %w", err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("joblog: %w", err)
 	}
@@ -116,12 +131,22 @@ func (w *Writer) markTruncated(why string) {
 
 // sweep deletes the oldest job files so that at most keep-1 remain, by name:
 // ticket names are zero-padded arrival nanoseconds, so lexicographic order
-// is arrival order. Failures are ignored the way log rotation ignores them;
-// the cap on any one file still holds.
+// is arrival order. Only names with a ticket's shape count and get deleted:
+// anything else in the directory is not ours to manage, and foreign names
+// squatting the retention window would starve real job files of it. Failures
+// are ignored the way log rotation ignores them; the cap on any one file
+// still holds.
 func sweep(dir string) error {
-	names, err := filepath.Glob(filepath.Join(dir, "*"+jobExt))
+	all, err := filepath.Glob(filepath.Join(dir, "*"+jobExt))
 	if err != nil {
 		return fmt.Errorf("joblog: %w", err)
+	}
+	names := all[:0]
+	for _, name := range all {
+		if !lane.ValidTicketName(strings.TrimSuffix(filepath.Base(name), jobExt) + ".ticket") {
+			continue
+		}
+		names = append(names, name)
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	if len(names) < KeepPerLane-1 {

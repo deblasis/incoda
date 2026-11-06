@@ -45,10 +45,30 @@ func main() {
 			fmt.Fprintln(os.Stderr, "write:", err)
 			os.Exit(3)
 		}
+	case "env":
+		// env <NAME>...: an "envcount=N" line, then one "env:NAME=value"
+		// line per requested name (UNSET when the variable did not reach
+		// us). The count pins that the whole environment survived the
+		// spawn, which asking for two names alone never would.
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: ttyecho env <NAME>...")
+			os.Exit(2)
+		}
+		fmt.Printf("envcount=%d\n", len(os.Environ()))
+		for _, name := range os.Args[2:] {
+			v, ok := os.LookupEnv(name)
+			if !ok {
+				v = "UNSET"
+			}
+			fmt.Printf("env:%s=%s\n", name, v)
+		}
 	case "spin":
 		// spin <marker> <every-millis> <max-seconds>: one marker line per
 		// tick until the time is up, then exit 0. The pattern is chosen so
-		// a live attach can see progress without a fixed line count.
+		// a live attach can see progress without a fixed line count. The
+		// ceiling is generous on purpose: a test that attaches mid-run
+		// under load needs the marker to keep coming, not the fixture to
+		// have already quit.
 		if len(os.Args) != 5 {
 			fmt.Fprintln(os.Stderr, "usage: ttyecho spin <marker> <every-millis> <max-seconds>")
 			os.Exit(2)

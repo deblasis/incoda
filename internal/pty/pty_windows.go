@@ -27,10 +27,14 @@ type Pty struct {
 
 	consoleOnce sync.Once
 	closeOnce   sync.Once
+	closeMIn    sync.Once
+	closeMOut   sync.Once
 }
 
 // New creates a pseudo-console of cols x rows. The conhost it starts is a
-// child of the calling process; ConhostPIDs finds it for adoption.
+// child of the calling process and dies when the pseudo-console handle
+// does; nothing needs to adopt it, and adopting it by pid would race pid
+// reuse into assigning an unrelated process to a kill-on-close job.
 func New(cols, rows int) (*Pty, error) {
 	if cols <= 0 {
 		cols = DefaultCols
@@ -176,22 +180,42 @@ func (p *Pty) CloseConsole() {
 	p.consoleOnce.Do(func() { windows.ClosePseudoConsole(p.hpc) })
 }
 
-// CloseReadEnd closes our read end only. It drops whatever is still buffered
-// in the pipe, so it is the force path for a reader stuck on a conhost that
-// never sent EOF, not part of a normal exit.
+// CloseInput closes our write end of the master input pipe. conhost reads
+// its input from the other end and exits on the EOF this produces, which is
+// what actually ends the session once the job is gone: closing the
+// pseudo-console handle returns at once and leaves conhost alive and the
+// master read parked (measured: ClosePseudoConsole back in 0s, reader still
+// parked 20s later; with the input end closed conhost sends its epilogue
+// and the master reaches EOF). Idempotent, and Close never closes the end
+// twice.
+func (p *Pty) CloseInput() {
+	p.closeMIn.Do(func() { _ = windows.CloseHandle(p.mIn) })
+}
+
+// CloseReadEnd cuts the reader loose: it cancels any read parked on the
+// master and then closes our read end. Closing alone does not do this: a
+// synchronous ReadFile blocked on the handle is not woken by another
+// thread's CloseHandle, it just never returns, so the cancel comes first
+// and unblocks the reader with an abort. Whatever is still buffered in the
+// pipe is dropped, so this is the force path for a conhost that never sent
+// EOF, not part of a normal exit.
 func (p *Pty) CloseReadEnd() {
-	windows.CloseHandle(p.mOut)
+	p.closeMOut.Do(func() {
+		_ = windows.CancelIoEx(p.mOut, nil)
+		_ = windows.CloseHandle(p.mOut)
+	})
 }
 
 // Close releases everything Pty owns: the master pipe ends and the attribute
 // list, plus the pseudo-console itself if CloseConsole was never called (in
 // its own goroutine, so a conhost wedged mid-teardown cannot wedge the run).
-// Idempotent.
+// Idempotent, and the master read end is closed here only if CloseReadEnd
+// never got it: both share the same once so the handle dies exactly once.
 func (p *Pty) Close() error {
 	p.closeOnce.Do(func() {
 		go p.CloseConsole()
-		windows.CloseHandle(p.mIn)
-		windows.CloseHandle(p.mOut)
+		p.CloseInput()
+		p.closeMOut.Do(func() { _ = windows.CloseHandle(p.mOut) })
 		p.attrs.Delete()
 	})
 	return nil
@@ -219,21 +243,24 @@ func environmentBlock(env []string) ([]uint16, error) {
 	}
 	block := make([]uint16, 0, 64*len(uniq))
 	for _, kv := range uniq {
+		// UTF16FromString terminates each entry with its own NUL, which is
+		// the separator the block format wants; only the block as a whole
+		// gets a second, empty entry at the end.
 		u, err := windows.UTF16FromString(kv)
 		if err != nil {
 			return nil, fmt.Errorf("entry %q: %w", kv, err)
 		}
 		block = append(block, u...)
-		block = append(block, 0)
 	}
 	block = append(block, 0)
 	return block, nil
 }
 
 // ConhostPIDs lists the pids of conhost.exe processes whose parent is
-// parentPID. CreatePseudoConsole starts exactly one such child; callers diff
-// the list around New to find it and adopt it into a job object, so the
-// pseudo-console dies with the job.
+// parentPID. CreatePseudoConsole starts exactly one such child, which ends
+// with the pseudo-console handle; this exists so tests can observe that it
+// is really gone, not to find conhosts for job-object games: a conhost pid
+// listed here can exit and be reused before anyone acts on it.
 func ConhostPIDs(parentPID int) ([]uint32, error) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {

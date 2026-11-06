@@ -159,15 +159,29 @@ the output exactly as the job wrote them. On other systems `--pty` is refused
 with exit `120`.
 
 Every byte the job writes still reaches the run's own stdout, and is also
-teed to a per-job file under the lane (`jobs/TICKET.out`, capped at 16 MiB
-with an in-band truncation marker; the newest 10 files are kept per queue).
+teed to one job file per lane the run holds (`jobs/TICKET.out` under each;
+`--queue a,b` holds two lanes, so the same bytes land in two files), capped
+at 16 MiB with an in-band truncation marker, and the newest 10 files are
+kept per lane. A nested run that passes through on a key its parent already
+holds has no ticket of its own and writes no job file: its bytes reach its
+stdout only, and there is nothing to attach to.
+
+ConPTY wraps the stream itself: the capture carries conhost's own prologue
+and epilogue (mode-set sequences such as `?9001h` and `?1004h`, a screen
+clear, and a title sequence naming the job executable's path) around
+whatever the job wrote. They pass through un-mangled like every other byte,
+so an attach opens with a screen clear and a title it did not write; that
+is conhost, not the job.
+
 `incoda attach --queue KEY --pid N` streams that file live from the start:
 useful when the run belongs to one terminal and a second one wants to watch.
 Attach is read-only and owner-gated (the same `--owner` / `INCODA_OWNER`
 identity the run recorded), and ends by itself when the job's run process is
-gone. Kill semantics are unchanged: the job sits in the same Job Object, and
-the pseudo-console dies with the run on a kill, a force-kill and process
-death.
+gone. What it prints is the raw captured stream, so attach only to jobs you
+know: the bytes are whatever the job wrote, and a job you did not start can
+write anything a terminal will render. Kill semantics are unchanged: the job
+sits in the same Job Object, and the pseudo-console dies with the run on a
+kill, a force-kill and process death.
 
 **Nested runs on a held key pass through.** `run` exports `INCODA_HELD` to
 its child, listing the keys it holds. A nested `incoda run` on one of those

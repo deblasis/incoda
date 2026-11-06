@@ -126,3 +126,82 @@ func TestPathRejectsNamesThatAreNotTickets(t *testing.T) {
 		t.Fatalf("Path = %q, want %q", p, want)
 	}
 }
+
+// A job file that already exists when its ticket's output is created is a
+// collision or a plant: a hard link pointed at a file someone wants
+// overwritten through the run, with the ticket's name readable from status
+// for the whole queue wait. The ticket names a job that has not started
+// yet, so its file cannot legitimately exist; Create must refuse rather
+// than truncate through the link.
+func TestCreateRefusesExistingJobFile(t *testing.T) {
+	dir := t.TempDir()
+	path, err := Path(dir, ticketName(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(dir, ticketName(1)); err == nil {
+		t.Fatal("Create reopened an existing job file instead of refusing it")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "precious" {
+		t.Fatalf("the pre-existing file was modified: %q", b)
+	}
+}
+
+// Files in the jobs directory that are not shaped like job files must not
+// count toward retention (foreign names squatting the window would starve
+// real job files of it) and must not be deleted: they are not ours.
+func TestSweepIgnoresForeignNames(t *testing.T) {
+	dir := t.TempDir()
+	jobs := filepath.Join(dir, dirName)
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []string{"notes.out", "definitely.out", "x-1.out"}
+	for _, name := range foreign {
+		if err := os.WriteFile(filepath.Join(jobs, name), []byte("not ours"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := int64(1); i <= 12; i++ {
+		stale := filepath.Join(jobs, strings.TrimSuffix(ticketName(i), ".ticket")+jobExt)
+		if err := os.WriteFile(stale, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := Create(dir, ticketName(13))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	names, err := os.ReadDir(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Ten kept job files plus the three foreign ones, untouched.
+	if len(names) != KeepPerLane+len(foreign) {
+		t.Fatalf("jobs dir holds %d files, want %d kept plus %d foreign left alone", len(names), KeepPerLane, len(foreign))
+	}
+	for _, name := range foreign {
+		b, err := os.ReadFile(filepath.Join(jobs, name))
+		if err != nil || string(b) != "not ours" {
+			t.Fatalf("foreign file %s was touched: %q, %v", name, b, err)
+		}
+	}
+	// The oldest three real files were swept as usual.
+	for _, i := range []int64{1, 2, 3} {
+		gone := filepath.Join(jobs, strings.TrimSuffix(ticketName(i), ".ticket")+jobExt)
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("oldest job file %s survived the sweep", gone)
+		}
+	}
+}

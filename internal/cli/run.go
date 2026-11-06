@@ -129,23 +129,33 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	}
 
 	// PTY mode: an explicit --pty/--pty=false wins; without one, the config
-	// of the first named key decides. One mode for the whole run: there is
-	// one spawn path, so every held lane gets the same ticket flag and the
-	// same per-job file.
+	// of the first key as the user named it decides (resolveKeys returns the
+	// plan order, which is sorted). One mode for the whole run: there is one
+	// spawn path, so every held lane gets the same ticket flag and the same
+	// per-job file.
 	ptyGiven := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "pty" {
 			ptyGiven = true
 		}
 	})
+	firstKey := *queue
+	if strings.TrimSpace(firstKey) == "" {
+		firstKey = os.Getenv("INCODA_QUEUE")
+	}
+	if k := strings.Split(firstKey, ",")[0]; strings.TrimSpace(k) != "" {
+		firstKey = strings.TrimSpace(k)
+	}
 	ptyOn := *pty
-	if !ptyGiven && len(keys) > 0 {
-		if cfg, cfgErr := lane.ReadConfig(lane.LaneDir(dir, keys[0])); cfgErr == nil {
+	if !ptyGiven {
+		if cfg, cfgErr := lane.ReadConfig(lane.LaneDir(dir, firstKey)); cfgErr == nil {
 			ptyOn = cfg.PTY
+		} else if !errors.Is(cfgErr, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "incoda: reading the pty default for queue %q failed (%v); running with pipes\n", firstKey, cfgErr)
 		}
 	}
 	if ptyOn && runtime.GOOS != "windows" {
-		return usagef("pty mode is not implemented on %s (Windows ConPTY only); unset --pty, or clear it with `incoda config %s --pty=false`", runtime.GOOS, keys[0])
+		return usagef("pty mode is not implemented on %s (Windows ConPTY only); unset --pty, or clear it with `incoda config %s --pty=false`", runtime.GOOS, firstKey)
 	}
 
 	// The plan (runplan) is the lane set in its total order, with every
@@ -242,7 +252,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			Exclusive: *exclusive && (pt.l.Named || !pt.l.Pool),
 			Command:   argv,
 			Reason:    *reason,
-			Owner:     *owner,
+			Owner:     strings.TrimSpace(*owner),
 			Hostname:  host,
 			Dir:       cwd,
 			Via:       pt.l.Via,

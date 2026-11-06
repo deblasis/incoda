@@ -9,8 +9,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/pty"
 	"golang.org/x/sys/windows"
+)
+
+// drainGrace caps the whole post-exit drain: however slowly conhost
+// delivers, once this much time has passed since the drain began (or since
+// the last delivered byte) the read is cut and the cut says so in-band,
+// because bytes still in flight die with it. quiesceWindow is the faster
+// path: with the job gone and the input end closed, a pipe that stays
+// silent this long is empty, so cutting the parked read drops nothing and
+// needs no marker. Measured on this build: ClosePseudoConsole returns
+// immediately and conhost's exit epilogue lands at once, but conhost never
+// exits while the master read end is open, so EOF is not what ends the
+// drain here; the quiesce cut is.
+const (
+	drainGrace    = 10 * time.Second
+	quiesceWindow = 3 * time.Second
 )
 
 // runPTY is Run with the pipes swapped for a pseudo-console. It keeps every
@@ -45,6 +61,7 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		return Result{}, err
 	}
 	defer windows.CloseHandle(sp.Proc)
+	defer windows.CloseHandle(sp.Thread)
 	if err := windows.AssignProcessToJobObject(job, sp.Proc); err != nil {
 		_ = windows.TerminateProcess(sp.Proc, 1)
 		_, _ = windows.WaitForSingleObject(sp.Proc, windows.INFINITE)
@@ -54,7 +71,6 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		sup.killTree()
 		return Result{}, fmt.Errorf("resume child: %w", err)
 	}
-	windows.CloseHandle(sp.Thread)
 
 	// Waiter: reports the exit code and releases the pseudo-console. The
 	// CloseConsole call runs in its own goroutine because a conhost wedged
@@ -80,17 +96,26 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// Reader: everything the job writes, master to tee, verbatim. A tee
 	// error tears the job down: on the pipe path a consumer that stopped
 	// reading kills the child through the broken pipe, and this is the same
-	// event.
+	// event. Every delivered read also publishes progress, which restarts
+	// the post-exit drain grace below.
 	readDone := make(chan struct{})
+	progress := make(chan struct{}, 1)
 	go func() {
 		defer close(readDone)
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := p.Read(buf)
-			if n > 0 && opt.PTY.Tee != nil {
-				if _, werr := opt.PTY.Tee.Write(buf[:n]); werr != nil {
-					sup.killTree()
-					return
+			if n > 0 {
+				if opt.PTY.Tee != nil {
+					if _, werr := opt.PTY.Tee.Write(buf[:n]); werr != nil {
+						fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); killing the job\n", werr)
+						sup.killTree()
+						return
+					}
+				}
+				select {
+				case progress <- struct{}{}:
+				default:
 				}
 			}
 			if err != nil {
@@ -138,14 +163,55 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// reading aborted.
 	wg.Wait()
 
-	// The waiter's CloseConsole ends conhost, which EOFs the master and
-	// finishes the tee. If conhost never gets there, cut the reader loose
-	// rather than hang the run on a teardown that will not finish.
-	select {
-	case <-readDone:
-	case <-time.After(10 * time.Second):
-		p.CloseReadEnd()
-		<-readDone
+	// The job is gone. Close the input end and the pseudo-console so
+	// conhost flushes whatever exit epilogue it has and stops serving the
+	// session: ClosePseudoConsole returns at once, and conhost on this
+	// build exits only once the master ends go, so the read below is ended
+	// by the quiesce cut rather than an EOF that never comes. Quiet for a
+	// whole quiesce window with the job dead means the pipe is empty and
+	// the cut drops nothing; a stream still moving gets the whole grace
+	// window, and the cut says so in-band because those bytes die with it,
+	// in every sink at once.
+	go p.CloseConsole()
+	p.CloseInput()
+	grace := time.NewTimer(drainGrace)
+	defer grace.Stop()
+	quiesce := time.NewTimer(quiesceWindow)
+	defer quiesce.Stop()
+drain:
+	for {
+		select {
+		case <-readDone:
+			break drain
+		case <-progress:
+			if !grace.Stop() {
+				select {
+				case <-grace.C:
+				default:
+				}
+			}
+			grace.Reset(drainGrace)
+			if !quiesce.Stop() {
+				select {
+				case <-quiesce.C:
+				default:
+				}
+			}
+			quiesce.Reset(quiesceWindow)
+		case <-grace.C:
+			p.CloseReadEnd()
+			<-readDone
+			if opt.PTY.Tee != nil {
+				_, _ = opt.PTY.Tee.Write([]byte(joblog.CutLine))
+			}
+			break drain
+		case <-quiesce.C:
+			// Silence with the job gone: nothing is in flight, so the
+			// parked read is cut without a marker.
+			p.CloseReadEnd()
+			<-readDone
+			break drain
+		}
 	}
 
 	// Accounting before dispose closes the job handle; the numbers go with it.
