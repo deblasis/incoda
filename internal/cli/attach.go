@@ -73,10 +73,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if entry == nil {
 		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
 	}
-	if err := validateEntryForAttach(key, entry); err != nil {
-		return err
-	}
-	if err := mayAttach(entry.Ticket, *owner); err != nil {
+	if err := authorizeAttach(key, entry, *owner); err != nil {
 		return err
 	}
 	if !entry.Ticket.PTY {
@@ -109,6 +106,19 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "attach: detached\n")
 	}
 	return nil
+}
+
+// authorizeAttach is every gate that decides whether this entry may be
+// streamed at all, ahead of any file being opened: the ticket must be fully
+// readable and self-consistent (validateEntryForAttach), and only its owner
+// may watch (mayAttach). One function so the wiring has one name to guard:
+// attach that skipped any of it would stream on the strength of a mangled
+// or foreign ticket.
+func authorizeAttach(key string, entry *lane.Entry, me string) error {
+	if err := validateEntryForAttach(key, entry); err != nil {
+		return err
+	}
+	return mayAttach(entry.Ticket, me)
 }
 
 // validateEntryForAttach refuses entries the owner gate alone must not

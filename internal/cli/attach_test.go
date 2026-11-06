@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/lockfile"
 )
 
 // TestMayAttachGate: attach is limited to the job's own owner, and every way
@@ -221,5 +225,47 @@ func TestDrainToEOFPropagatesReadError(t *testing.T) {
 	}
 	if out.Len() >= len(payload) {
 		t.Fatalf("delivered %d bytes of %d; the truncated delivery is the point", out.Len(), len(payload))
+	}
+}
+
+// TestAttachRefusesMangledTicketWiring drives the real attach command, not
+// the helper: a planted ticket whose file name and payload disagree about
+// the pid must be refused end to end, before any job file is opened. The
+// test holds the ticket's liveness lock itself so the lane scan lists the
+// ticket as a live participant (a lock-free ticket is skipped as not
+// enrolled). A wiring that dropped the authorization call would sail past
+// the owner gate (the owner here matches) and stall on a job file that does
+// not exist, which this test reads as a failure.
+func TestAttachRefusesMangledTicketWiring(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("INCODA_DIR", dir)
+	if code := Main([]string{"config", "seed"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate: %d", code)
+	}
+	name := fmt.Sprintf("%020d-%d.ticket", time.Now().UnixNano(), 4242)
+	laneDir := lane.LaneDir(dir, "seed")
+	if err := os.MkdirAll(laneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(laneDir, name)
+	payload := `{"pid":4243,"queue":"seed","owner":"alice","pty":true,"command":["x"]}`
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := lockfile.OpenExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	if err := lf.Lock(); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	code := Main([]string{"attach", "--queue", "seed", "--pid", "4243", "--owner", "alice"}, io.Discard, &stderr)
+	if code != ExitUsage {
+		t.Fatalf("a name/pid mismatch must refuse with 120, got %d:\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "names pid 4242") || !strings.Contains(stderr.String(), "claims pid 4243") {
+		t.Fatalf("refusal must name both pids, got:\n%s", stderr.String())
 	}
 }
