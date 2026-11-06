@@ -29,6 +29,17 @@ const (
 	quiesceWindow = 3 * time.Second
 )
 
+// quietCutOK is the drain's silent-cut gate: cutting the reader loose
+// without an in-band marker may drop only bytes that provably never
+// existed, so it returns true only when a peek sees the master pipe empty
+// at the moment of the cut. Pending bytes (a reader between Read calls,
+// or an arrival racing the timer) make it false, which keeps the drain
+// alive.
+func quietCutOK(p *pty.Pty) bool {
+	n, err := p.BytesAvailable()
+	return err == nil && n == 0
+}
+
 // runPTY is Run with the pipes swapped for a pseudo-console. It keeps every
 // property the pipe path has: the child goes into a Job Object with
 // KILL_ON_JOB_CLOSE before its first instruction, an abort (a kill request
@@ -206,8 +217,21 @@ drain:
 			}
 			break drain
 		case <-quiesce.C:
-			// Silence with the job gone: nothing is in flight, so the
-			// parked read is cut without a marker.
+			// Silence with the job gone, and the pipe provably empty:
+			// bytes can be sitting in the pipe while the reader is
+			// between Read calls, or have arrived the instant this
+			// timer fired; cutting there would drop them with no
+			// marker, so they keep the drain alive (their delivery
+			// restarts both timers, and a stream that never settles is
+			// cut by the grace timer WITH the marker, which is the
+			// honest outcome for bytes that die mid-flight). What no
+			// gate can see is conhost's own unwritten buffers; waiting
+			// for conhost to exit first is a deadlock, because it never
+			// exits while the master read end is open.
+			if !quietCutOK(p) {
+				quiesce.Reset(quiesceWindow)
+				continue
+			}
 			p.CloseReadEnd()
 			<-readDone
 			break drain
