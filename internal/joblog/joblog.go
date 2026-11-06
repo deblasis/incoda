@@ -78,9 +78,6 @@ func Create(laneDir, ticket string) (*Writer, error) {
 		}
 		return nil, fmt.Errorf("joblog: %w", err)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("joblog: %w", err)
-	}
 	return &Writer{f: f}, nil
 }
 
