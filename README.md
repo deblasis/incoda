@@ -230,6 +230,26 @@ adapts to light and dark terminals, honours `NO_COLOR`, and supports the
 mouse: click to select a row, double-click a queue to open it, scroll wheel
 to move selection.
 
+### OSC 7501 status in watch
+
+Programs that report what they are doing over the OSC 7501 program-status
+protocol (`ESC ] 7501 ; state=working:id=build:progress=40:msg=<base64> BEL`)
+show it in `watch` and plain `status`, at the end of the job's line:
+`[working 40%] compiling`, colored by state (working in the accent, done
+green, error red, blocked yellow, idle and clear dim). Two parts make that
+work, and both need `--pty`:
+
+- A job under `incoda run --pty` that asks its terminal whether OSC 7501 is
+  supported (`ESC ] 7501 ; ? BEL`) gets the support reply on its console
+  input; the output stream itself is passed through untouched (Windows only,
+  like pty mode).
+- `watch` reads the last 8 KiB of each held or running pty job's log, parses
+  the records, and shows the one with the fewest `id` path segments (the
+  latest on a tie), so a build's own record speaks for it, not its steps.
+
+A job on plain pipes emits nothing, so it has no status; that is by design.
+A job with no records shows the line it always did.
+
 ## Install
 
 macOS (Homebrew):

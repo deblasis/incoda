@@ -8,7 +8,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -337,9 +339,47 @@ func (m Model) renderQueue(w int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderParticipant is two lines per row: who and how long on the first,
-// the command and directory dimmed on the second. The selected row is a
-// solid highlight on the first line only, so the command stays readable.
+// programStatus reads the OSC 7501 root record from the tail of a pty
+// participant's job log (the path the capture view resolves) and returns it
+// as "[state p%] msg" with its state. Pipe jobs, waiters that have not
+// started, and logs without records give "".
+func (m Model) programStatus(p participant, w int) (string, string) {
+	t := p.entry.Ticket
+	if !t.PTY || p.entry.PayloadError != "" {
+		return "", ""
+	}
+	path, err := joblog.Path(lane.LaneDir(m.opt.Dir, m.key), p.entry.File)
+	if err != nil {
+		return "", ""
+	}
+	r, ok := osc7501.ReadLogStatus(path)
+	if !ok {
+		return "", ""
+	}
+	return r.Line(max(min(w/3, 60), 10)), r.State
+}
+
+// statusStyle colors a record by its state: working in the accent, done
+// green, error red, blocked yellow, idle and clear dim.
+func (m Model) statusStyle(state string) lipgloss.Style {
+	st := m.st
+	switch state {
+	case "working":
+		return st.accent
+	case "done":
+		return lipgloss.NewStyle().Foreground(st.green)
+	case "error":
+		return st.evBad
+	case "blocked":
+		return st.evConfig
+	}
+	return st.dim
+}
+
+// renderParticipant is three lines per row: who and how long on the first
+// (plus the job's own status when its log carries one), the command and
+// directory dimmed below. The selected row is a solid highlight on the
+// first line only, so the command stays readable.
 func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	st := m.st
 	t := p.entry.Ticket
@@ -360,14 +400,28 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	if t.Reason != "" {
 		first += "  " + t.Reason
 	}
-	first = trunc(first, w)
+	// The job's own status, from the tail of its log, claims the end of the
+	// line; the identity part gives up the room for it, not the other way
+	// round. No record, no change.
+	status, statusState := m.programStatus(p, w)
+	if status != "" {
+		first = trunc(first, max(w-lipgloss.Width(status)-2, 12))
+	} else {
+		first = trunc(first, w)
+	}
 	if selected {
+		if status != "" {
+			first += "  " + status
+		}
 		first = st.selected.Render(padRight("›"+first[1:], w))
 	} else {
 		if t.Exclusive {
 			first = strings.Replace(first, "EXCLUSIVE", st.badgeExcl.Render("EXCLUSIVE"), 1)
 		}
 		first = strings.Replace(first, fmt.Sprintf("pid %-7d", t.PID), st.bold.Render(fmt.Sprintf("pid %-7d", t.PID)), 1)
+		if status != "" {
+			first += "  " + m.statusStyle(statusState).Render(status)
+		}
 	}
 	second := st.dim.Render("    " + trunc(t.CommandString(), w-4))
 	third := st.dim.Render("    in " + trunc(orUnknown(t.Dir), w-7))

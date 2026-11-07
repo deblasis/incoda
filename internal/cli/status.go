@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -130,6 +132,41 @@ func ptyTag(e lane.Entry) string {
 	return ""
 }
 
+// programStatus is the participant's OSC 7501 status for the end of its
+// line: the root record found in the tail of its job log, painted by state.
+// Only a pty job has a log that can carry records; everything else, and a
+// log with none, gives "" and the line is what it always was.
+func programStatus(p colorize.Palette, laneDir string, e lane.Entry) string {
+	if !e.Ticket.PTY {
+		return ""
+	}
+	path, err := joblog.Path(laneDir, e.File)
+	if err != nil {
+		return ""
+	}
+	r, ok := osc7501.ReadLogStatus(path)
+	if !ok {
+		return ""
+	}
+	line := r.Line(statusMsgWidth)
+	switch r.State {
+	case "working":
+		line = p.Cyan(line)
+	case "done":
+		line = p.Green(line)
+	case "error":
+		line = p.Red(line)
+	case "blocked":
+		line = p.Yellow(line)
+	default:
+		line = p.Dim(line)
+	}
+	return "  " + line
+}
+
+// statusMsgWidth is how much of a record's msg the participant line keeps.
+const statusMsgWidth = 40
+
 func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	if !qr.Exists {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
@@ -154,8 +191,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		fmt.Fprintf(w, "  %s\n", p.Red("config unreadable: "+qr.ConfigError))
 	}
 	for _, e := range qr.Holders {
-		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
+		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
+			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e))
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
