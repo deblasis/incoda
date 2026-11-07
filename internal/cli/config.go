@@ -42,12 +42,14 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	fs.Var(removePool, "remove-pool", "remove these pools from the link (never the last one: use --unlink)")
 	unlink := fs.Bool("unlink", false, "remove the link; runs on the queue are then refused until it is linked again")
 	quietMachine := fs.Bool("quiet-machine", false, "every run on this queue takes quiet-machine: an exclusive ticket on every pool (--quiet-machine=false clears it)")
+	pty := fs.Bool("pty", false, "runs on this queue default to pseudo-console mode: a ConPTY pair around the job, its output teed to a per-job file, attachable live by the job's owner (--pty=false restores the pipe default)")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: time.Minute}
 	fs.Var(wait, "wait", "how long to wait for machine.lock and a state upgrade: a Go duration (1m) or bare seconds; negative waits forever")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: incoda config KEY [--slots N] [--description TEXT] [--require-reason[=false]] [--close MSG | --open]\n"+
-			"                   [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--wait DUR]\n\n")
+			"                   [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]]\n"+
+			"                   [--pty[=false]] [--wait DUR]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -104,6 +106,8 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 				cfg.Closed = *closeMsg
 			case "open":
 				cfg.Closed = ""
+			case "pty":
+				cfg.PTY = *pty
 			default:
 				return
 			}
@@ -112,7 +116,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		return changed
 	}
 	logConfig := func(cfg lane.Config) {
-		lane.AppendLog(lane.LaneDir(dir, key), "queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed))
+		lane.AppendLog(lane.LaneDir(dir, key), "queue=%s event=config pid=%d slots=%d require_reason=%v pty=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, cfg.PTY, textsafe.LogValue(cfg.Closed))
 	}
 	var cfg lane.Config
 	switch {
@@ -192,6 +196,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("closed:"), p.BoldRed(textsafe.Escape(cfg.Closed)))
 	}
+	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("pty default:"), yesNo(cfg.PTY))
 	if reg.IsPool(key) {
 		fmt.Fprintf(stdout, "  %s pool\n", p.Dim("kind:"))
 		return nil

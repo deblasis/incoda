@@ -481,6 +481,36 @@ func TestExclusiveTicketForcesOneSlot(t *testing.T) {
 	b.Release(0)
 }
 
+// TestConfigPTYRoundTripAndEnqueueLog: the pty default survives a
+// save/load cycle, participates in equality (a plan re-verify must see a
+// change of it), and a pty ticket says so on its enqueue line.
+func TestConfigPTYRoundTripAndEnqueueLog(t *testing.T) {
+	dir := t.TempDir()
+	q, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.SaveConfig(Config{PTY: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.LoadConfig()
+	if err != nil || !got.PTY {
+		t.Fatalf("pty default did not round-trip: %+v %v", got, err)
+	}
+	if EqualConfig(Config{PTY: true}, Config{}) {
+		t.Fatal("EqualConfig ignores pty, so a config change would go unnoticed")
+	}
+	en, err := q.Enroll(Ticket{Command: []string{"x"}, Reason: "r", PTY: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if line := lastLog(t, q); !strings.Contains(line, "pty=true") {
+		t.Fatalf("enqueue line should say pty=true, got %q", line)
+	}
+}
+
 func TestEnqueueLogsExclusive(t *testing.T) {
 	dir := t.TempDir()
 	q, err := Open(dir, "unit")
