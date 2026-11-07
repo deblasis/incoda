@@ -5,6 +5,7 @@ package child
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -136,6 +137,20 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// reading kills the child through the broken pipe, and this is the same
 	// event. Every delivered read also publishes progress, which restarts
 	// the post-exit drain grace below.
+	//
+	// The tee is wrapped in a status tap: it hands the bytes on unchanged
+	// and only watches them for OSC 7501 support queries. The reply to one
+	// is written to the job's input through input, the single serialized
+	// door to the master input pipe (the supervisor's Ctrl-C uses the same
+	// one), and by the replier's own goroutine, so a job that never reads
+	// its input cannot stall this loop.
+	input := &serialWriter{w: p}
+	replies := newReplier(keyWriter{w: input})
+	var tee io.Writer = io.Discard
+	if opt.PTY.Tee != nil {
+		tee = opt.PTY.Tee
+	}
+	tap := newStatusTap(tee, replies)
 	readDone := make(chan struct{})
 	progress := make(chan struct{}, 1)
 	go func() {
@@ -144,12 +159,10 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		for {
 			n, err := p.Read(buf)
 			if n > 0 {
-				if opt.PTY.Tee != nil {
-					if _, werr := opt.PTY.Tee.Write(buf[:n]); werr != nil {
-						fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); killing the job\n", werr)
-						sup.killTree()
-						return
-					}
+				if _, werr := tap.Write(buf[:n]); werr != nil {
+					fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); killing the job\n", werr)
+					sup.killTree()
+					return
 				}
 				select {
 				case progress <- struct{}{}:
@@ -182,7 +195,7 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 					continue
 				}
 				escalate = true
-				_, _ = p.Write([]byte{0x03})
+				_, _ = input.Write([]byte{0x03})
 			case <-abort:
 				aborted = true
 				sup.killTree()
@@ -211,6 +224,7 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// (or that its write end is gone, which is stronger). A stream still
 	// moving gets the whole grace window, and the cut says so in-band
 	// because those bytes die with it, in every sink at once.
+	replies.stop() // no reply may race the input handle closing below
 	go p.CloseConsole()
 	p.CloseInput()
 	grace := time.NewTimer(drainGrace)
