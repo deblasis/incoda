@@ -33,6 +33,8 @@ func (m Model) render() string {
 	switch m.screen {
 	case screenOverview:
 		body = m.renderOverview(w)
+	case screenPty:
+		body = m.renderPty(w)
 	default:
 		body = m.renderQueue(w)
 	}
@@ -247,6 +249,9 @@ func (m Model) renderQueueSummary(q *report.Queue, w int) string {
 		if who == "" {
 			who = "pid " + fmt.Sprint(e.Ticket.PID)
 		}
+		if e.Ticket.PTY {
+			who = "🖥️ " + who
+		}
 		parts = append(parts, fmt.Sprintf("%s %s", st.bold.Render(who), st.dim.Render(trunc(e.Ticket.CommandString(), 40))))
 	}
 	return "  " + st.dim.Render("holding: ") + strings.Join(parts, st.dim.Render(" · "))
@@ -343,6 +348,9 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 		when = "waited " + fmtSeconds(p.entry.WaitingSeconds)
 	}
 	first := fmt.Sprintf("  pid %-7d %-16s", t.PID, when)
+	if t.PTY {
+		first += " 🖥️"
+	}
 	if t.Exclusive {
 		first += " EXCLUSIVE"
 	}
@@ -403,6 +411,48 @@ func (m Model) renderPending(w int) string {
 	return st.box.Width(min(w-2, 90)).Render(lipgloss.JoinVertical(lipgloss.Left, line, st.dim.Render("reason: "+p.reason)))
 }
 
+// renderPty is the live capture screen: the job's bytes as captured, tail
+// last, raw — the stream is whatever the job wrote, ANSI and all — kept to
+// the screen the way a terminal keeps its scrollback.
+func (m Model) renderPty(w int) string {
+	st := m.st
+	if m.pty == nil {
+		return ""
+	}
+	p := m.pty
+	state := st.accent.Render("streaming…")
+	if p.ended {
+		state = st.dim.Render("job ended; the capture is complete")
+	}
+	head := st.title.Render(p.key) + "  " + st.bold.Render(fmt.Sprintf("pid %d", p.pid)) +
+		"  " + state + "  " + st.dim.Render("read-only, like attach")
+	lines := []string{head}
+	if p.capped {
+		lines = append(lines, st.dim.Render("… older output trimmed (the view is bounded)"))
+	}
+	if p.missed {
+		lines = append(lines, st.dim.Render("(the run ended before it captured any output)"))
+	}
+	if p.errText != "" {
+		lines = append(lines, st.toastErr.Render(trunc("read error: "+p.errText, w)))
+	}
+	lines = append(lines, ptyTailLines(string(p.buf), m.height-len(lines)-4)...)
+	return strings.Join(lines, "\n")
+}
+
+// ptyTailLines keeps the last n whole lines so the newest output is always
+// on screen; a job that rewrites one line with \r never walks the view away.
+func ptyTailLines(s string, n int) []string {
+	if n < 1 {
+		n = 1
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
 func (m Model) renderBottom(w int) string {
 	st := m.st
 	var help string
@@ -414,10 +464,12 @@ func (m Model) renderBottom(w int) string {
 		}
 	case screenQueue:
 		if m.single {
-			help = "↑/↓ or wheel · click select · k kill · K force-kill · r refresh · q quit"
+			help = "↑/↓ or wheel · click select · k kill · K force-kill · enter pty output · r refresh · q quit"
 		} else {
-			help = "↑/↓ or wheel · click select · k kill · K force-kill · r refresh · esc back · q quit"
+			help = "↑/↓ or wheel · click select · k kill · K force-kill · enter pty output · r refresh · esc back · q quit"
 		}
+	case screenPty:
+		help = "esc back · the stream is the job's own captured output, read-only"
 	case screenKillPrompt:
 		help = "type the reason · enter confirm · esc cancel"
 	case screenKillPending:

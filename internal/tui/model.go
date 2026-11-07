@@ -9,7 +9,10 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +21,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/report"
 )
 
@@ -27,6 +32,7 @@ type screen int
 const (
 	screenOverview screen = iota
 	screenQueue
+	screenPty
 	screenKillPrompt
 	screenKillPending
 )
@@ -47,12 +53,52 @@ type Options struct {
 	Killer   Killer
 	Load     func() (*report.Report, error)
 	Now      func() time.Time
+	// Owner is the identity the pty viewer checks against a job's ticket
+	// (the same --owner / $INCODA_OWNER attach checks).
+	Owner string
+	// PtyRead drains the job file past offset to its end; the default
+	// reads the real capture. PtyAlive says whether the run process is
+	// still there. Both are seams so the streaming screen is testable
+	// without a terminal, a state directory or a live job.
+	PtyRead  func(path string, offset int64) ([]byte, int64, error)
+	PtyAlive func(pid int) bool
 }
 
 // participant is one row of the queue screen: a holder or a waiter.
 type participant struct {
 	entry   lane.Entry
 	holding bool
+}
+
+// ptyView is the live capture of one pty job, shown the way attach streams
+// it: from the start, read-only, ending by itself when the run is gone.
+type ptyView struct {
+	key     string
+	pid     int
+	path    string
+	offset  int64
+	buf     []byte
+	capped  bool   // the head was dropped to stay bounded
+	ended   bool   // the run process is gone and the file is drained
+	missed  bool   // the run ended before any byte was captured
+	errText string // last read error, shown instead of failing silently
+}
+
+// ptyKeep bounds the capture the screen holds: the file keeps everything up
+// to its own cap; the view only needs what it can show.
+const ptyKeep = 64 * 1024
+
+// ptyTickEvery is the capture poll, the same cadence attach streams at.
+const ptyTickEvery = 150 * time.Millisecond
+
+// append keeps the last ptyKeep bytes, remembering the cut, so a job that
+// streams for hours still renders instantly.
+func (p *ptyView) append(chunk []byte) {
+	p.buf = append(p.buf, chunk...)
+	if len(p.buf) > ptyKeep {
+		p.buf = p.buf[len(p.buf)-ptyKeep:]
+		p.capped = true
+	}
 }
 
 type pendingKill struct {
@@ -83,6 +129,7 @@ type (
 		err error
 	}
 	tickMsg          time.Time
+	ptyTickMsg       struct{}
 	killRequestedMsg struct {
 		seq int
 		key string
@@ -117,10 +164,10 @@ type Model struct {
 	width   int
 	height  int
 
-	qsel int    // selected row in the overview
-	key  string // queue open in the queue screen
-	psel int    // selected participant in the queue screen
-
+	qsel      int    // selected row in the overview
+	key       string // queue open in the queue screen
+	psel      int    // selected participant in the queue screen
+	pty       *ptyView
 	input     textinput.Model
 	pending   *pendingKill
 	killSeq   int
@@ -142,6 +189,12 @@ func New(opt Options) Model {
 	}
 	if opt.Killer == nil {
 		opt.Killer = NewLaneKiller(opt.Dir)
+	}
+	if opt.PtyRead == nil {
+		opt.PtyRead = drainPtyFile
+	}
+	if opt.PtyAlive == nil {
+		opt.PtyAlive = procinfo.Alive
 	}
 	if opt.Load == nil {
 		dir, version, key, events := opt.Dir, opt.Version, opt.Key, opt.Events
@@ -196,6 +249,41 @@ func (m Model) load() tea.Cmd {
 
 func (m Model) tick() tea.Cmd {
 	return tea.Tick(m.opt.Interval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// ptyTick schedules the next capture read. The first one fires immediately
+// (zero delay), so opening a job with history fills the screen at once.
+func (m Model) ptyTick(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return ptyTickMsg{} })
+}
+
+// drainPtyFile reads every byte currently in the capture past offset. A
+// missing file is not an error: the run creates it between acquiring the
+// lane and starting the job, and until then there is nothing to show.
+func drainPtyFile(path string, offset int64) ([]byte, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, offset, nil
+		}
+		return nil, offset, err
+	}
+	defer f.Close()
+	var out []byte
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := f.ReadAt(buf, offset)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+			offset += int64(n)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return out, offset, nil
+			}
+			return out, offset, err
+		}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -288,6 +376,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending = nil
 		m.screen = screenQueue
 		return m, m.load()
+	case ptyTickMsg:
+		if m.screen != screenPty || m.pty == nil {
+			return m, nil
+		}
+		p := m.pty
+		chunk, off, err := m.opt.PtyRead(p.path, p.offset)
+		if err != nil {
+			p.errText = err.Error()
+		} else {
+			p.errText = ""
+			p.offset = off
+			p.append(chunk)
+		}
+		// Death is checked after the drain, the order attach uses, so this
+		// read (or the next one) carries the exit tail before the view ends.
+		if !m.opt.PtyAlive(p.pid) {
+			p.ended = true
+			p.missed = len(p.buf) == 0
+			return m, nil
+		}
+		return m, m.ptyTick(ptyTickEvery)
 	case tea.KeyPressMsg:
 		return m.key_(msg)
 	case tea.MouseMsg:
@@ -346,6 +455,10 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.psel--
 		case "down", "tab":
 			m.psel++
+		case "enter", "right", "l":
+			if p := m.participantAt(m.psel); p != nil {
+				return m.openPty(p)
+			}
 		case "k", "K", "shift+k":
 			if p := m.participantAt(m.psel); p != nil {
 				m.killSeq++
@@ -360,6 +473,13 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.help = !m.help
 		}
 		m.clamp()
+		return m, nil
+	case screenPty:
+		switch k {
+		case "esc", "escape", "left", "h", "backspace", "q":
+			m.pty = nil
+			m.screen = screenQueue
+		}
 		return m, nil
 	case screenKillPrompt:
 		switch k {
@@ -403,6 +523,34 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// openPty switches to the live capture of the selected participant. The
+// gates attach passes are the gates here, so the watch screen is not a side
+// door around the owner rule: a non-pty job and a waiter are named refusals,
+// and only the job's own owner gets the stream.
+func (m Model) openPty(p *participant) (tea.Model, tea.Cmd) {
+	t := p.entry.Ticket
+	if !t.PTY {
+		m.say(fmt.Sprintf("pid %d is not a pty job: its output goes to its run's stdout, and there is no capture to show", t.PID), true)
+		return m, nil
+	}
+	if !p.holding {
+		m.say(fmt.Sprintf("pid %d is still waiting for the lane; open it again once it holds and the job starts", t.PID), true)
+		return m, nil
+	}
+	if err := lane.MayAttach(t, m.opt.Owner); err != nil {
+		m.say(err.Error(), true)
+		return m, nil
+	}
+	path, err := joblog.Path(lane.LaneDir(m.opt.Dir, m.key), p.entry.File)
+	if err != nil {
+		m.say(fmt.Sprintf("cannot open the job capture: %v", err), true)
+		return m, nil
+	}
+	m.pty = &ptyView{key: m.key, pid: t.PID, path: path}
+	m.screen = screenPty
+	return m, m.ptyTick(0)
 }
 
 func (m Model) request(seq int, key string, pid int, reason string) tea.Cmd {

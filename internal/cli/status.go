@@ -96,6 +96,7 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 // renderReport paints the human view of a Report. With the Plain palette the
 // output is byte-for-byte what the uncolored renderer always produced, so
 // scripts that scrape it keep working.
+
 func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 	fmt.Fprintf(w, "%s %s  %s\n", p.Dim("state dir:"), rep.StateDir, p.Dim("("+rep.StateDirSource+")"))
 	if len(rep.Queues) == 0 {
@@ -116,6 +117,17 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 			fmt.Fprintln(w, p.Yellow(l))
 		}
 	}
+}
+
+// ptyMark sits next to every pty-mode participant, in status and watch
+// alike, so a glance tells which jobs carry a live captured stream.
+const ptyMark = " 🖥️"
+
+func ptyTag(e lane.Entry) string {
+	if e.Ticket.PTY {
+		return ptyMark
+	}
+	return ""
 }
 
 func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
@@ -142,8 +154,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		fmt.Fprintf(w, "  %s\n", p.Red("config unreadable: "+qr.ConfigError))
 	}
 	for _, e := range qr.Holders {
-		fmt.Fprintf(w, "  %s  pid %s held %s %s%s\n",
-			p.BoldCyan("HOLDER"), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
+		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s\n",
+			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -163,8 +175,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	} else {
 		fmt.Fprintf(w, "  %s\n", p.BoldYellow("WAITING (arrival order):"))
 		for n, e := range qr.Waiting {
-			fmt.Fprintf(w, "    %s pid %s waited %s %s%s\n",
-				p.Dim(fmt.Sprintf("%2d.", n+1)), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
+			fmt.Fprintf(w, "    %s%s pid %s waited %s %s%s\n",
+				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 			if e.Ticket.Owner != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
