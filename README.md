@@ -122,8 +122,8 @@ Linux) and nothing is ever resolved from the working directory.
 |---|---|
 | `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty` runs the job inside a Windows pseudo-console; see [PTY jobs](#pty-jobs). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
-| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. `--json` is a stable, versioned schema for scripts. |
-| `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
+| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job. `--json` is a stable, versioned schema for scripts. |
+| `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain] [--owner WHO]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live, read-only, ending by itself when the job does — the same owner gate as `attach` (`--owner` / `$INCODA_OWNER`). Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda attach --queue KEY --pid N [--owner WHO]` | Stream a pty job's output live, from its start, read-only, until the job's run process is gone. Only the job's own owner may attach; anyone else is refused with a named error. |
@@ -175,6 +175,9 @@ is conhost, not the job.
 
 `incoda attach --queue KEY --pid N` streams that file live from the start:
 useful when the run belongs to one terminal and a second one wants to watch.
+The same stream is built into `incoda watch`: pty jobs are marked `🖥️`, and
+pressing enter on one shows the capture inside the watch screen, gated by
+the same owner rule.
 Attach is read-only and owner-gated (the same `--owner` / `INCODA_OWNER`
 identity the run recorded), and ends by itself when the job's run process is
 gone. What it prints is the raw captured stream, so attach only to jobs you

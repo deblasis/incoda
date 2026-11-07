@@ -7,13 +7,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/procinfo"
-	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // cmdAttach streams a pty-mode job's captured output live to a second
@@ -111,14 +109,17 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 // authorizeAttach is every gate that decides whether this entry may be
 // streamed at all, ahead of any file being opened: the ticket must be fully
 // readable and self-consistent (validateEntryForAttach), and only its owner
-// may watch (mayAttach). One function so the wiring has one name to guard:
-// attach that skipped any of it would stream on the strength of a mangled
-// or foreign ticket.
+// may watch (lane.MayAttach). One function so the wiring has one name to
+// guard: attach that skipped any of it would stream on the strength of a
+// mangled or foreign ticket.
 func authorizeAttach(key string, entry *lane.Entry, me string) error {
 	if err := validateEntryForAttach(key, entry); err != nil {
 		return err
 	}
-	return mayAttach(entry.Ticket, me)
+	if err := lane.MayAttach(entry.Ticket, me); err != nil {
+		return usagef("%v", err)
+	}
+	return nil
 }
 
 // validateEntryForAttach refuses entries the owner gate alone must not
@@ -168,26 +169,6 @@ func findEntry(snap *lane.Snapshot, pid int) (*lane.Entry, bool, error) {
 		return nil, false, fmt.Errorf("pid %d appears on %d live tickets", pid, count)
 	}
 	return found, holding, nil
-}
-
-// mayAttach is the owner gate: fail closed on a missing identity, a ticket
-// with no recorded owner, and a mismatch, each named. Both sides are
-// compared trimmed: the run trims what it records, and a shell-exported
-// $INCODA_OWNER with stray whitespace must not make a job unattachable by
-// two visually identical names.
-func mayAttach(t lane.Ticket, me string) error {
-	me = strings.TrimSpace(me)
-	if me == "" {
-		return usagef("attach needs --owner or $INCODA_OWNER: attach is limited to the job's own owner")
-	}
-	if strings.TrimSpace(t.Owner) == "" {
-		return usagef("job pid %d on queue %q recorded no owner; attach is refused. Runs that want to be attachable must pass --owner", t.PID, t.Queue)
-	}
-	if strings.TrimSpace(t.Owner) != me {
-		return usagef("attach refused: job pid %d on queue %q belongs to owner %q; you are %q. Only the job's owner may attach",
-			t.PID, t.Queue, textsafe.Escape(t.Owner), textsafe.Escape(me))
-	}
-	return nil
 }
 
 // openJobFile waits briefly for the run to create the job file, then opens it
