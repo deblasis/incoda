@@ -114,8 +114,9 @@ func TestScanCaps(t *testing.T) {
 	}
 }
 
-// Field-level tolerance: progress range, unknown kind/keys, repeated key,
-// bad base64 and invalid UTF-8 are fields dropped, not the record.
+// Field-level tolerance: progress out of range or non-numeric is dropped, an
+// unknown kind or key is skipped, a repeated key takes the last value. Bad
+// text is not tolerated: that discards the report (see protocol_test.go).
 func TestScanFieldTolerance(t *testing.T) {
 	got := collect(
 		rec("state=working:progress=101", "\x07"),
@@ -123,8 +124,6 @@ func TestScanFieldTolerance(t *testing.T) {
 		rec("state=working:progress=0", "\x07"),
 		rec("state=blocked:kind=telepathy:future=1", "\x07"),
 		rec("state=working:id=one:id=two", "\x07"),
-		rec("state=working:msg=!!!notbase64", "\x07"),
-		rec("state=working:msg="+base64.StdEncoding.EncodeToString([]byte{0xff, 0xfe}), "\x07"),
 	)
 	want := []Record{
 		{State: "working"},
@@ -132,19 +131,17 @@ func TestScanFieldTolerance(t *testing.T) {
 		{State: "working", Progress: new(0)},
 		{State: "blocked"},
 		{State: "working", ID: "two"},
-		{State: "working"},
-		{State: "working"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 }
 
-// An ESC that does not start ST abandons the sequence in progress; the
-// record is not delivered and what follows parses.
-func TestScanAbandonedSequence(t *testing.T) {
-	got := collect("\x1b]7501;state=working:id=lost\x1b[31m" + rec("state=done:id=next", "\x07"))
-	if len(got) != 1 || got[0].ID != "next" {
+// An ESC ends the OSC the way the terminal's parser does: what the sequence
+// held is dispatched, and what follows parses on its own.
+func TestScanEscDispatchesThenContinues(t *testing.T) {
+	got := collect("\x1b]7501;state=working:id=first\x1b[31m" + rec("state=done:id=next", "\x07"))
+	if len(got) != 2 || got[0].ID != "first" || got[1].ID != "next" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -191,9 +188,11 @@ func (f *fakeWriter) Write(p []byte) (int, error) {
 }
 
 // A complete query makes the scanner write exactly one support reply, however
-// the query is split; records and noise around it produce no write.
+// the query is split; records and noise around it produce no write. The
+// reply ends with the terminator its query used.
 func TestQueryRepliesThroughWriter(t *testing.T) {
 	stream := "abc" + rec("state=working", "\x07") + "\x1b]7501;?\x07" + "mid" + "\x1b]7501;?\x1b\\" + "\x1b]0;x\x07"
+	wants := [][]byte{reply(true), SupportReply()}
 	for i := range len(stream) + 1 {
 		fw := &fakeWriter{}
 		var s Scanner
@@ -204,9 +203,9 @@ func TestQueryRepliesThroughWriter(t *testing.T) {
 		if len(fw.writes) != 2 {
 			t.Fatalf("split %d: want 2 replies, got %d", i, len(fw.writes))
 		}
-		for _, w := range fw.writes {
-			if !bytes.Equal(w, SupportReply()) {
-				t.Fatalf("split %d: reply %q", i, w)
+		for j, w := range fw.writes {
+			if !bytes.Equal(w, wants[j]) {
+				t.Fatalf("split %d: reply %d = %q", i, j, w)
 			}
 		}
 		if recs != 1 {
@@ -256,29 +255,29 @@ func TestLine(t *testing.T) {
 	}
 }
 
-func TestReadLogStatusTailOnly(t *testing.T) {
+func TestLogStatusReadsRecordsAndNothingElse(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "job.out")
-	// An old record far outside the last 8 KiB, noise, then a recent one
-	// whose start sits well inside the window; the file also begins the
-	// window mid-sequence.
 	old := rec("state=error:id=old:msg="+b64("stale"), "\x07")
 	body := old + strings.Repeat("x", 20000) + rec("state=working:id=job:progress=55:msg="+b64("linking"), "\x07") + "\r\nmore output\r\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r, ok := ReadLogStatus(path)
+	var st LogStatus
+	r, ok := st.Read(path)
 	if !ok || r.ID != "job" || r.State != "working" || r.Msg != "linking" {
 		t.Fatalf("got %+v ok=%v", r, ok)
 	}
-	if _, ok := ReadLogStatus(filepath.Join(dir, "missing.out")); ok {
+	var none LogStatus
+	if _, ok := none.Read(filepath.Join(dir, "missing.out")); ok {
 		t.Fatal("a missing log has no status")
 	}
 	plain := filepath.Join(dir, "plain.out")
 	if err := os.WriteFile(plain, []byte("just text\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := ReadLogStatus(plain); ok {
+	var pl LogStatus
+	if _, ok := pl.Read(plain); ok {
 		t.Fatal("a log with no records has no status")
 	}
 }

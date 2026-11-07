@@ -2,27 +2,36 @@
 // stream a job wrote to a terminal: ESC ] 7501 ; k=v:k=v BEL (or ESC \).
 // It exists for two readers that must never alter the stream they look at:
 // the pty runner, which answers a program's support query, and watch, which
-// shows the newest status from the tail of a job's log.
+// shows the newest status from a job's log.
 //
 // Everything arrives from another process, so every field is length-capped
-// and a record that breaks a cap is refused whole rather than clipped.
+// and a report that breaks a rule is discarded whole, the way the terminal
+// that defines the protocol discards it: a report watch shows is a report
+// the terminal would have accepted.
 package osc7501
 
 import (
 	"encoding/base64"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
-// Limits, in bytes, mirroring the terminal-side parser. Title and msg are
-// capped both encoded and decoded.
+// Limits, in bytes, mirroring the terminal-side parser. Every limit counts
+// bytes, not characters.
 const (
-	MaxSequenceBytes     = 4096
+	// MaxSequenceBytes is the longest whole sequence, ESC ] through the
+	// terminator; MaxBodyBytes is what is left for the body after "7501;"
+	// when the terminator is the longer ESC \.
+	MaxSequenceBytes = 4096
+	MaxBodyBytes     = MaxSequenceBytes - len("\x1b]7501;") - len("\x1b\\")
+
+	MaxKeyBytes          = 16
 	MaxIDBytes           = 128
 	MaxIDSegmentBytes    = 32
 	MaxIDDepth           = 8
@@ -32,16 +41,20 @@ const (
 	MaxMsgEncodedBytes   = 2732
 	MaxMsgBytes          = 2048
 
-	// TailBytes is how much of a job log ReadLogStatus looks at.
-	TailBytes = 8 << 10
+	// maxRecords bounds the record set a log is replayed into: a log of
+	// endless distinct ids must not grow the viewer without limit.
+	maxRecords = 64
 )
+
+const prefix = "7501;"
 
 var (
 	states = map[string]bool{"idle": true, "working": true, "done": true, "blocked": true, "error": true, "clear": true}
 	kinds  = map[string]bool{"permission": true, "question": true, "auth": true}
 )
 
-// Record is one status report. Progress is nil when the program sent none.
+// Record is one status report. Progress is nil when the program sent none
+// (or sent one the state does not carry).
 type Record struct {
 	ID       string
 	State    string
@@ -52,31 +65,44 @@ type Record struct {
 	Msg      string
 }
 
-// SupportReply is what a terminal answers to a query.
-func SupportReply() []byte {
-	return []byte("\x1b]7501;?:states=idle,working,done,blocked,error,clear:kinds=permission,question,auth\x1b\\")
+// SupportReply is what a terminal answers to a query, ending in ST.
+func SupportReply() []byte { return reply(false) }
+
+// IsQuery reports whether data is exactly one support query: ESC ] 7501 ; ?
+// and a BEL or ST terminator.
+func IsQuery(data []byte) bool {
+	return string(data) == "\x1b]7501;?\x07" || string(data) == "\x1b]7501;?\x1b\\"
 }
 
-// IsQuery reports whether data is exactly one support query.
-func IsQuery(data []byte) bool {
-	s := string(data)
-	return s == "\x1b]7501;?\x07" || s == "\x1b]7501;?\x1b\\"
+// reply is the support reply ending in the terminator the query used, so a
+// program that scans its input for a BEL-terminated answer recognizes it:
+// BEL for a BEL query, ESC \ for anything else.
+func reply(bel bool) []byte {
+	const body = "\x1b]7501;?:states=idle,working,done,blocked,error,clear:kinds=permission,question,auth"
+	if bel {
+		return []byte(body + "\x07")
+	}
+	return []byte(body + "\x1b\\")
 }
 
 const (
 	stNormal = iota
 	stEsc    // saw ESC
 	stOSC    // inside ESC ] ... collecting the body
-	stOSCEsc // inside the body, saw ESC (ST pending)
 )
 
 // Scanner finds OSC 7501 sequences in output delivered in arbitrary chunks;
 // a sequence cut by a chunk boundary is carried to the next Scan. The zero
 // value is ready. It never modifies or retains the data it is given.
+//
+// It follows the terminal's own state machine at the points that matter: ESC,
+// CAN and SUB end an OSC string (and dispatch what it holds), C0 controls
+// inside the body are ignored, BEL and ESC \ both terminate.
 type Scanner struct {
 	state    int
 	buf      []byte
 	overflow bool
+	skip     bool // an OSC that is not 7501: nothing is kept
 	w        io.Writer
 }
 
@@ -87,7 +113,8 @@ type Scanner struct {
 // same as on a terminal that lacks the protocol.
 func (s *Scanner) Respond(w io.Writer) { s.w = w }
 
-// Scan feeds the next chunk of output, calling cb for each complete record.
+// Scan feeds the next chunk of output, calling cb (when not nil) for each
+// complete record. With a nil cb nothing is decoded: only queries matter.
 func (s *Scanner) Scan(data []byte, cb func(Record)) {
 	for _, c := range data {
 		switch s.state {
@@ -96,33 +123,29 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 				s.state = stEsc
 			}
 		case stEsc:
-			switch c {
-			case ']':
+			switch {
+			case c == ']':
 				s.begin()
-			case 0x1b:
+			case c == 0x1b, c == 0x7f, c < 0x20 && c != 0x18 && c != 0x1a:
+				// the terminal stays in escape for these
 			default:
 				s.state = stNormal
 			}
 		case stOSC:
-			switch c {
-			case 0x07:
-				s.finish(cb)
-			case 0x1b:
-				s.state = stOSCEsc
-			case 0x18, 0x1a: // CAN, SUB abort a control string
+			switch {
+			case c == 0x07:
+				s.finish(cb, true)
 				s.state = stNormal
+			case c == 0x1b:
+				s.finish(cb, false)
+				s.state = stEsc
+			case c == 0x18, c == 0x1a: // CAN, SUB
+				s.finish(cb, false)
+				s.state = stNormal
+			case c < 0x20:
+				// ignored inside the string
 			default:
 				s.add(c)
-			}
-		case stOSCEsc:
-			switch c {
-			case '\\':
-				s.finish(cb)
-			case ']':
-				s.begin()
-			case 0x1b:
-			default:
-				s.state = stNormal
 			}
 		}
 	}
@@ -132,50 +155,64 @@ func (s *Scanner) begin() {
 	s.state = stOSC
 	s.buf = s.buf[:0]
 	s.overflow = false
+	s.skip = false
 }
 
 func (s *Scanner) add(c byte) {
-	if s.overflow {
+	if s.skip || s.overflow {
 		return
 	}
-	if len(s.buf) >= MaxSequenceBytes {
+	if len(s.buf) >= len(prefix)+MaxBodyBytes {
 		s.overflow = true
 		return
 	}
 	s.buf = append(s.buf, c)
+	if len(s.buf) == len(prefix) && string(s.buf) != prefix {
+		s.skip = true
+		s.buf = s.buf[:0]
+	}
 }
 
-func (s *Scanner) finish(cb func(Record)) {
-	s.state = stNormal
-	if s.overflow {
+func (s *Scanner) finish(cb func(Record), bel bool) {
+	if s.overflow || s.skip || len(s.buf) < len(prefix) {
 		return
 	}
-	body := string(s.buf)
-	if body == "7501;?" {
+	body := s.buf[len(prefix):]
+	if len(body) == 1 && body[0] == '?' {
 		if s.w != nil {
-			_, _ = s.w.Write(SupportReply())
+			_, _ = s.w.Write(reply(bel))
 		}
 		return
 	}
-	body, ok := strings.CutPrefix(body, "7501;")
-	if !ok {
+	if cb == nil {
 		return
 	}
-	if r, ok := parse(body); ok && cb != nil {
+	if r, ok := parse(string(body)); ok {
 		cb(r)
 	}
 }
 
-func nameOK(v string, limit int) bool {
-	if v == "" || len(v) > limit {
+// name bytes and value bytes, as the terminal's alphabet defines them.
+func nameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '_' || c == '.' || c == '+' || c == '-'
+}
+
+func valueOK(v string) bool {
+	for i := range len(v) {
+		if c := v[i]; !nameByte(c) && c != ',' && c != '/' && c != '=' {
+			return false
+		}
+	}
+	return true
+}
+
+func isName(v string) bool {
+	if v == "" {
 		return false
 	}
 	for i := range len(v) {
-		c := v[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
-			c == '_', c == '.', c == '+', c == '-':
-		default:
+		if !nameByte(v[i]) {
 			return false
 		}
 	}
@@ -186,75 +223,131 @@ func idOK(id string) bool {
 	if len(id) > MaxIDBytes {
 		return false
 	}
-	segs := strings.Split(id, "/")
-	if len(segs) > MaxIDDepth {
-		return false
-	}
-	for _, seg := range segs {
-		if !nameOK(seg, MaxIDSegmentBytes) {
+	depth := 0
+	for seg := range strings.SplitSeq(id, "/") {
+		depth++
+		if depth > MaxIDDepth || len(seg) > MaxIDSegmentBytes || !isName(seg) {
 			return false
 		}
 	}
 	return true
 }
 
-// text decodes a base64 field. ok=false refuses the record (over a cap);
-// a value that is merely malformed comes back empty with ok=true: the field
-// is dropped, the record stands.
-func text(v string, maxEnc, maxDec int) (string, bool) {
-	if len(v) > maxEnc {
+// text decodes a base64 title or msg: padding is optional, the text must be
+// UTF-8 with no control character, and the decoded size is capped.
+func text(v string, maxDec int) (string, bool) {
+	dec := base64.RawStdEncoding
+	if strings.HasSuffix(v, "=") {
+		dec = base64.StdEncoding
+	}
+	b, err := dec.DecodeString(v)
+	if err != nil || len(b) > maxDec || !utf8.Valid(b) {
 		return "", false
 	}
-	b, err := base64.StdEncoding.DecodeString(v)
-	if err != nil {
-		return "", true
-	}
-	if len(b) > maxDec {
-		return "", false
-	}
-	if !utf8.Valid(b) {
-		return "", true
+	for _, r := range string(b) {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f {
+			return "", false
+		}
 	}
 	return string(b), true
 }
 
+func progress(v string) *int {
+	if v == "" {
+		return nil
+	}
+	n := 0
+	for i := range len(v) {
+		if v[i] < '0' || v[i] > '9' {
+			return nil
+		}
+		n = n*10 + int(v[i]-'0')
+		if n > 100 {
+			return nil
+		}
+	}
+	return &n
+}
+
+const ascii = " \t\n\v\f\r"
+
+// parse reads one report body (everything after "7501;"). It is forgiving
+// about a single pair and strict about the report: a pair without "=", or
+// an unknown key, is skipped; any key or value over its limit, a bad id,
+// or text that is not base64 of safe UTF-8 discards the whole report, even
+// when a later pair of the same key would have replaced it.
 func parse(body string) (Record, bool) {
-	vals := map[string]string{}
-	for _, pair := range strings.Split(body, ":") {
-		k, v, ok := strings.Cut(pair, "=")
-		if !ok {
+	var state, id, kind, prog, app, title, msg string
+	for body != "" {
+		var field string
+		field, body, _ = strings.Cut(body, ":")
+		eq := strings.IndexByte(field, '=')
+		if eq < 0 {
 			continue
 		}
-		vals[strings.TrimSpace(k)] = strings.TrimSpace(v)
-	}
-	var r Record
-	if !states[vals["state"]] {
-		return r, false
-	}
-	r.State = vals["state"]
-	if id, ok := vals["id"]; ok {
-		if !idOK(id) {
-			return r, false
+		key := strings.Trim(field[:eq], ascii)
+		if len(key) > MaxKeyBytes {
+			return Record{}, false
 		}
-		r.ID = id
-	}
-	if k := vals["kind"]; kinds[k] {
-		r.Kind = k
-	}
-	if p, ok := vals["progress"]; ok {
-		if n, err := strconv.Atoi(p); err == nil && n >= 0 && n <= 100 {
-			r.Progress = &n
+		val := strings.Trim(field[eq+1:], ascii)
+		valid := valueOK(val)
+		switch key {
+		case "state":
+			if valid {
+				state = val
+			}
+		case "kind":
+			if valid {
+				kind = val
+			}
+		case "progress":
+			if valid {
+				prog = val
+			}
+		case "app":
+			if valid {
+				if len(val) > MaxAppBytes {
+					return Record{}, false
+				}
+				app = val
+			}
+		case "id":
+			if !valid || !idOK(val) {
+				return Record{}, false
+			}
+			id = val
+		case "title":
+			if !valid || len(val) > MaxTitleEncodedBytes {
+				return Record{}, false
+			}
+			t, ok := text(val, MaxTitleBytes)
+			if !ok {
+				return Record{}, false
+			}
+			title = t
+		case "msg":
+			if !valid || len(val) > MaxMsgEncodedBytes {
+				return Record{}, false
+			}
+			m, ok := text(val, MaxMsgBytes)
+			if !ok {
+				return Record{}, false
+			}
+			msg = m
 		}
 	}
-	if a := vals["app"]; nameOK(a, MaxAppBytes) {
-		r.App = a
+	if !states[state] {
+		return Record{}, false
 	}
-	var ok bool
-	if r.Title, ok = text(vals["title"], MaxTitleEncodedBytes, MaxTitleBytes); !ok {
-		return r, false
+	r := Record{ID: id, State: state, Title: title, Msg: msg}
+	if isName(app) {
+		r.App = app
 	}
-	if r.Msg, ok = text(vals["msg"], MaxMsgEncodedBytes, MaxMsgBytes); !ok {
-		return r, false
+	if state == "blocked" && kinds[kind] {
+		r.Kind = kind
+	}
+	if state == "working" || state == "blocked" {
+		r.Progress = progress(prog)
 	}
 	return r, true
 }
@@ -266,61 +359,111 @@ func depth(id string) int {
 	return strings.Count(id, "/") + 1
 }
 
-// Root picks the record that speaks for the whole job: the fewest id path
-// segments (an id-less record is shallowest), the latest one on a tie.
-func Root(rs []Record) (Record, bool) {
-	var best Record
-	found := false
-	for _, r := range rs {
-		if !found || depth(r.ID) <= depth(best.ID) {
-			best, found = r, true
-		}
-	}
-	return best, found
+// Set is the terminal's record set replayed from a stream of reports: one
+// record per id, a new report replacing the old one completely, and clear
+// removing the addressed record and every record beneath it (an id-less
+// clear removes them all). The zero value is empty.
+type Set struct {
+	recs []entry
+	seq  uint64
 }
 
-// Line is "[state p%] msg" for display, msg cut to maxMsg characters with an
-// ellipsis. The msg came from the job, so it is escaped first: a control
-// sequence in it must not repaint the viewer's terminal.
-func (r Record) Line(maxMsg int) string {
+type entry struct {
+	r   Record
+	seq uint64
+}
+
+// Apply folds one report into the set.
+func (s *Set) Apply(r Record) {
+	if r.State == "clear" {
+		if r.ID == "" {
+			s.recs = s.recs[:0]
+			return
+		}
+		kept := s.recs[:0]
+		for _, e := range s.recs {
+			if e.r.ID != r.ID && !strings.HasPrefix(e.r.ID, r.ID+"/") {
+				kept = append(kept, e)
+			}
+		}
+		s.recs = kept
+		return
+	}
+	s.seq++
+	for i := range s.recs {
+		if s.recs[i].r.ID == r.ID {
+			s.recs[i] = entry{r, s.seq}
+			return
+		}
+	}
+	if len(s.recs) >= maxRecords {
+		oldest := 0
+		for i, e := range s.recs {
+			if e.seq < s.recs[oldest].seq {
+				oldest = i
+			}
+		}
+		s.recs[oldest] = entry{r, s.seq}
+		return
+	}
+	s.recs = append(s.recs, entry{r, s.seq})
+}
+
+// Root picks the record that speaks for the whole job: the fewest id path
+// segments (an id-less record is shallowest), the latest report on a tie.
+func (s *Set) Root() (Record, bool) {
+	best := -1
+	for i, e := range s.recs {
+		if best < 0 {
+			best = i
+			continue
+		}
+		d, bd := depth(e.r.ID), depth(s.recs[best].r.ID)
+		if d < bd || d == bd && e.seq > s.recs[best].seq {
+			best = i
+		}
+	}
+	if best < 0 {
+		return Record{}, false
+	}
+	return s.recs[best].r, true
+}
+
+// Root replays rs into a Set and returns its root record.
+func Root(rs []Record) (Record, bool) {
+	var s Set
+	for _, r := range rs {
+		s.Apply(r)
+	}
+	return s.Root()
+}
+
+func cellWidth(s string) int { return runewidth.StringWidth(s) }
+
+// Head is "[state p%]": the part of the display line that is never cut.
+func (r Record) Head() string {
 	head := r.State
 	if r.Progress != nil {
 		head += " " + strconv.Itoa(*r.Progress) + "%"
 	}
-	line := "[" + head + "]"
-	if r.Msg == "" {
-		return line
-	}
-	msg := []rune(textsafe.Escape(r.Msg))
-	if len(msg) > maxMsg {
-		if maxMsg < 1 {
-			return line
-		}
-		msg = append(msg[:maxMsg-1], '…')
-	}
-	return line + " " + string(msg)
+	return "[" + head + "]"
 }
 
-// ReadLogStatus reads the last TailBytes of the job log at path and returns
-// the root record found there. No file, no records: no status.
-func ReadLogStatus(path string) (Record, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Record{}, false
+// Line is "[state p%] msg" for display, msg cut to maxMsg terminal cells
+// with an ellipsis. The msg came from the job, so it is escaped first: a
+// control sequence in it must not repaint the viewer's terminal.
+func (r Record) Line(maxMsg int) string {
+	return JoinMsg(r.Head(), textsafe.Escape(r.Msg), maxMsg)
+}
+
+// JoinMsg is head, a space and msg cut to maxMsg cells; no msg, or no room
+// for one, gives head alone.
+func JoinMsg(head, msg string, maxMsg int) string {
+	if msg == "" || maxMsg < 1 {
+		return head
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return Record{}, false
+	if cellWidth(msg) > maxMsg {
+		msg = runewidth.Truncate(msg, maxMsg, "…")
 	}
-	off := max(fi.Size()-TailBytes, 0)
-	buf := make([]byte, min(fi.Size(), TailBytes))
-	n, err := f.ReadAt(buf, off)
-	if n == 0 && err != nil {
-		return Record{}, false
-	}
-	var s Scanner
-	var rs []Record
-	s.Scan(buf[:n], func(r Record) { rs = append(rs, r) })
-	return Root(rs)
+	return head + " " + msg
 }

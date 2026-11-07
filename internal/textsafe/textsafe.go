@@ -24,7 +24,7 @@ func unsafeRune(r rune) bool {
 	switch {
 	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 		return true
-	case r == 0x200e, r == 0x200f:
+	case r == 0x200e, r == 0x200f, r == 0x061c, r == 0x2028, r == 0x2029, r == 0xfeff:
 		return true
 	case r >= 0x202a && r <= 0x202e:
 		return true
