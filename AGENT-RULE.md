@@ -39,8 +39,8 @@ Commands:
 
 ```
 incoda run --queue <KEY> --reason "what this is" -- <cmd...>
-incoda status --queue <KEY>          # who holds it, from which folder, and who is waiting
-incoda watch                         # live overview of every queue; enter opens one
+incoda status --queue <KEY>          # who holds it, from which folder, and who is waiting; a 🖥️ marks a pty job
+incoda watch                         # live overview of every queue; enter opens one, and on a 🖥️ job it streams the job's captured output, read-only
 ```
 
 - `run` blocks while the queue is busy and releases on exit, including on a
@@ -60,7 +60,9 @@ incoda watch                         # live overview of every queue; enter opens
   that build in and why" is the first question anyone asks, and `status` can
   only answer it if you said.
 - Set `INCODA_OWNER` once per session (your session id or worktree name) so
-  `status` and `watch` can say whose job is whose without reading the cwd.
+  `status` and `watch` can say whose job is whose without reading the cwd; it is
+  also the identity the pty stream checks, so `incoda attach --queue <KEY>
+  --pid N` and the watch screen's capture view work without extra flags.
 - A recipe that takes its own lane is safe to wrap in `run` on the same key:
   the nested run passes through instead of queueing behind you.
 
