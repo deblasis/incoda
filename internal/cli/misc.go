@@ -82,7 +82,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		if rep.Banner != "" {
 			fmt.Fprintf(stdout, "%s\n\n", p.Yellow("incoda: "+rep.Banner))
 		}
-		renderReport(stdout, p, rep)
+		renderReport(stdout, p, rep, *owner)
 		if *once {
 			return nil
 		}

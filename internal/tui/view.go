@@ -8,9 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
-	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -58,15 +56,34 @@ func (m Model) render() string {
 func (m Model) renderHeader(w int) string {
 	st := m.st
 	left := st.brand.Render("incoda") + " " + st.accent.Render("watch")
-	mid := ""
+	leftW := lipgloss.Width(left)
+	midText := ""
 	if m.rep != nil {
-		mid = st.dim.Render(m.rep.Host) + "  " + st.dim.Render("state: "+m.rep.StateDirSource)
+		midText = m.rep.Host + "  state: " + m.rep.StateDirSource
 	}
-	right := st.dim.Render(m.opt.Now().Format("15:04:05"))
+	rightText := m.opt.Now().Format("15:04:05")
 	if m.rep != nil && m.rep.Version != "" {
-		right = st.dim.Render(m.rep.Version) + "  " + right
+		rightText = m.rep.Version + "  " + rightText
 	}
-	gap := w - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right) - 4
+	// A narrow terminal: the middle gives up room first, then the version,
+	// so the header always fits on one line (a wider line would pad every
+	// other row past the width when the screen is joined).
+	room := w - leftW - lipgloss.Width(rightText) - 4
+	if room < 1 && m.rep != nil && m.rep.Version != "" {
+		rightText = m.opt.Now().Format("15:04:05")
+		room = w - leftW - lipgloss.Width(rightText) - 4
+	}
+	if room < 1 {
+		rightText = trunc(rightText, max(w-leftW-2, 2))
+		room = 0
+	}
+	midText = trunc(midText, room)
+	mid := ""
+	if midText != "" {
+		mid = st.dim.Render(midText)
+	}
+	right := st.dim.Render(rightText)
+	gap := w - leftW - lipgloss.Width(mid) - lipgloss.Width(right) - 4
 	if gap < 1 {
 		gap = 1
 	}
@@ -281,18 +298,18 @@ func (m Model) renderQueue(w int) string {
 	if q.IsPool {
 		lines = append(lines, st.dim.Render("kind: pool (machine-wide)"))
 	} else if len(q.Config.Pools) > 0 {
-		lines = append(lines, st.dim.Render("linked: → "+strings.Join(q.Config.Pools, ", ")))
+		lines = append(lines, st.dim.Render(trunc("linked: → "+strings.Join(q.Config.Pools, ", "), w)))
 	} else {
-		lines = append(lines, st.evBad.Render("unlinked")+st.dim.Render(": runs are refused until it links a pool (incoda link "+q.Key+")"))
+		lines = append(lines, m.st.evBad.Render("unlinked")+st.dim.Render(": "+trunc("runs are refused until it links a pool (incoda link "+q.Key+")", max(w-10, 12))))
 	}
 	if q.Config.Description != "" {
-		lines = append(lines, st.dim.Render(q.Config.Description))
+		lines = append(lines, st.dim.Render(trunc(q.Config.Description, w)))
 	}
 	if q.Config.Closed != "" {
-		lines = append(lines, st.evBad.Render("closed: ")+q.Config.Closed)
+		lines = append(lines, st.evBad.Render(trunc("closed: "+q.Config.Closed, w)))
 	}
 	if q.ConfigError != "" {
-		lines = append(lines, st.evBad.Render("config unreadable: "+q.ConfigError))
+		lines = append(lines, st.evBad.Render(trunc("config unreadable: "+q.ConfigError, w)))
 	}
 	lines = append(lines, "")
 
@@ -337,26 +354,6 @@ func (m Model) renderQueue(w int) string {
 		lines = append(lines, "", m.renderPending(w))
 	}
 	return strings.Join(lines, "\n")
-}
-
-// programStatus reads the OSC 7501 root record from the tail of a pty
-// participant's job log (the path the capture view resolves) and returns it
-// as "[state p%] msg" with its state. Pipe jobs, waiters that have not
-// started, and logs without records give "".
-func (m Model) programStatus(p participant, w int) (string, string) {
-	t := p.entry.Ticket
-	if !t.PTY || p.entry.PayloadError != "" {
-		return "", ""
-	}
-	path, err := joblog.Path(lane.LaneDir(m.opt.Dir, m.key), p.entry.File)
-	if err != nil {
-		return "", ""
-	}
-	r, ok := osc7501.ReadLogStatus(path)
-	if !ok {
-		return "", ""
-	}
-	return r.Line(max(min(w/3, 60), 10)), r.State
 }
 
 // statusStyle colors a record by its state: working in the accent, done
@@ -405,7 +402,7 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	// round. No record, no change.
 	status, statusState := m.programStatus(p, w)
 	if status != "" {
-		first = trunc(first, max(w-lipgloss.Width(status)-2, 12))
+		first = trunc(first, max(w-lipgloss.Width(status)-2, identityFloor))
 	} else {
 		first = trunc(first, w)
 	}

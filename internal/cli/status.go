@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	asJSON := fs.Bool("json", false, "emit the stable JSON report")
 	events := fs.Int("events", 5, "how many recent log events to show")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
+	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity that may see a pty job's program status (--owner / $INCODA_OWNER, the same as attach)")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for status"}
 	}
@@ -47,7 +49,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
-	renderReport(stdout, paletteFor(stdout, *noColor), rep)
+	renderReport(stdout, paletteFor(stdout, *noColor), rep, *owner)
 	return nil
 }
 
@@ -99,7 +101,7 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 // output is byte-for-byte what the uncolored renderer always produced, so
 // scripts that scrape it keep working.
 
-func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
+func renderReport(w io.Writer, p colorize.Palette, rep *Report, owner string) {
 	fmt.Fprintf(w, "%s %s  %s\n", p.Dim("state dir:"), rep.StateDir, p.Dim("("+rep.StateDirSource+")"))
 	if len(rep.Queues) == 0 {
 		fmt.Fprintln(w, p.Dim("no queues have state on this machine"))
@@ -108,7 +110,7 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		renderQueue(w, p, qr)
+		renderQueue(w, p, qr, owner)
 	}
 	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
 	// Warnings go after every existing line, so scrapers of the lines
@@ -133,18 +135,21 @@ func ptyTag(e lane.Entry) string {
 }
 
 // programStatus is the participant's OSC 7501 status for the end of its
-// line: the root record found in the tail of its job log, painted by state.
-// Only a pty job has a log that can carry records; everything else, and a
-// log with none, gives "" and the line is what it always was.
-func programStatus(p colorize.Palette, laneDir string, e lane.Entry) string {
-	if !e.Ticket.PTY {
+// line: the root record of its job log, painted by state. Only a pty job
+// has a log that can carry records, and only its owner sees what it wrote
+// (the same rule attach and the watch capture view apply, lane.MayAttach);
+// everything else, and a log with no records, gives "" and the line is what
+// it always was.
+func programStatus(p colorize.Palette, laneDir string, e lane.Entry, owner string) string {
+	if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, owner) != nil {
 		return ""
 	}
 	path, err := joblog.Path(laneDir, e.File)
 	if err != nil {
 		return ""
 	}
-	r, ok := osc7501.ReadLogStatus(path)
+	var ls osc7501.LogStatus
+	r, ok := ls.Read(path)
 	if !ok {
 		return ""
 	}
@@ -167,7 +172,7 @@ func programStatus(p colorize.Palette, laneDir string, e lane.Entry) string {
 // statusMsgWidth is how much of a record's msg the participant line keeps.
 const statusMsgWidth = 40
 
-func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
+func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, owner string) {
 	if !qr.Exists {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
 		return
@@ -192,7 +197,7 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	}
 	for _, e := range qr.Holders {
 		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e))
+			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, owner))
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)

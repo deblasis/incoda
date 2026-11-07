@@ -29,7 +29,7 @@ func TestStatusMarksPtyParticipants(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr)
+	renderQueue(&buf, colorize.Plain, qr, "alice")
 	out := buf.String()
 	if !strings.Contains(out, "HOLDER 🖥️") {
 		t.Fatalf("a pty holder must carry the mark next to it, got:\n%s", out)
@@ -41,7 +41,7 @@ func TestStatusMarksPtyParticipants(t *testing.T) {
 	qr.Holders[0].Ticket.PTY = false
 	qr.Waiting[0].Ticket.PTY = false
 	buf.Reset()
-	renderQueue(&buf, colorize.Plain, qr)
+	renderQueue(&buf, colorize.Plain, qr, "alice")
 	if strings.Contains(buf.String(), "🖥️") {
 		t.Fatalf("pipe-mode participants must carry no mark, got:\n%s", buf.String())
 	}
@@ -72,12 +72,12 @@ func TestStatusShowsProgramStatusFromJobLog(t *testing.T) {
 	qr := QueueReport{
 		Key: "builds", Exists: true, EffectiveSlots: 2, Dir: laneDir,
 		Holders: []lane.Entry{
-			{Holding: true, HeldSeconds: 5, File: withLog, Ticket: lane.Ticket{PID: 111, PTY: true, Command: []string{"just", "merge"}}},
-			{Holding: true, HeldSeconds: 5, File: noLog, Ticket: lane.Ticket{PID: 222, PTY: true, Command: []string{"zig", "build"}}},
+			{Holding: true, HeldSeconds: 5, File: withLog, Ticket: lane.Ticket{PID: 111, PTY: true, Owner: "alice", Command: []string{"just", "merge"}}},
+			{Holding: true, HeldSeconds: 5, File: noLog, Ticket: lane.Ticket{PID: 222, PTY: true, Owner: "alice", Command: []string{"zig", "build"}}},
 		},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr)
+	renderQueue(&buf, colorize.Plain, qr, "alice")
 	out := buf.String()
 	if !strings.Contains(out, "[working 55%] linking") {
 		t.Fatalf("holder with records must show the root record, got:\n%s", out)
@@ -91,7 +91,7 @@ func TestStatusShowsProgramStatusFromJobLog(t *testing.T) {
 	// Pipe-mode job: no status even with a log file that holds records.
 	qr.Holders[0].Ticket.PTY = false
 	buf.Reset()
-	renderQueue(&buf, colorize.Plain, qr)
+	renderQueue(&buf, colorize.Plain, qr, "alice")
 	if strings.Contains(buf.String(), "[working") {
 		t.Fatalf("a non-pty job shows no status, got:\n%s", buf.String())
 	}
