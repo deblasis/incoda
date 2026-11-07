@@ -178,6 +178,9 @@ useful when the run belongs to one terminal and a second one wants to watch.
 The same stream is built into `incoda watch`: pty jobs are marked `🖥️`, and
 pressing enter on one shows the capture inside the watch screen, gated by
 the same owner rule.
+
+![incoda watch: enter on the 🖥️-marked pty job opens its captured output live, read-only; esc returns to the queue](docs/img/watch-pty.gif)
+
 Attach is read-only and owner-gated (the same `--owner` / `INCODA_OWNER`
 identity the run recorded), and ends by itself when the job's run process is
 gone. What it prints is the raw captured stream, so attach only to jobs you

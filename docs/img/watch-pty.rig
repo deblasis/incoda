@@ -1,0 +1,9 @@
+# v0.8.1 watch screen: queue -> enter on the 🖥️ job -> live capture -> esc back
+expect "HOLDING (1)" 20s
+key enter
+expect "tick" 10s
+sleep 2s
+key esc
+expect "HOLDING (1)" 5s
+key q
+exit 5s
