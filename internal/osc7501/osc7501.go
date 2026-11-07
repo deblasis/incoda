@@ -89,6 +89,7 @@ const (
 	stNormal = iota
 	stEsc    // saw ESC
 	stOSC    // inside ESC ] ... collecting the body
+	stString // inside a DCS/APC/SOS/PM string
 )
 
 // Scanner finds OSC 7501 sequences in output delivered in arbitrary chunks;
@@ -126,9 +127,21 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 			switch {
 			case c == ']':
 				s.begin()
+			case c == 'P', c == '_', c == 'X', c == '^':
+				// DCS, APC, SOS, PM: a string to the terminal. It ends at the
+				// next ESC the way the terminal's parser leaves it (dispatch and
+				// re-enter escape), so a query that follows is a query.
+				s.state = stString
 			case c == 0x1b, c == 0x7f, c < 0x20 && c != 0x18 && c != 0x1a:
 				// the terminal stays in escape for these
 			default:
+				s.state = stNormal
+			}
+		case stString:
+			switch {
+			case c == 0x1b:
+				s.state = stEsc
+			case c == 0x18, c == 0x1a: // CAN, SUB end the string
 				s.state = stNormal
 			}
 		case stOSC:

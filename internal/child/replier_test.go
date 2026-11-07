@@ -62,9 +62,10 @@ func TestScanTeeAnswersQueriesAndPassesBytesThrough(t *testing.T) {
 	if !bytes.Equal(tee.Bytes(), stream) {
 		t.Fatalf("passthrough mutated: %q", tee.Bytes())
 	}
-	want := string(osc7501.SupportReply()) + string(osc7501.SupportReply())
+	body := "\x1b]7501;?:states=idle,working,done,blocked,error,clear:kinds=permission,question,auth"
+	want := body + "\x07" + body + "\x1b\\"
 	if w.String() != want {
-		t.Fatalf("replies = %q, want two support replies", w.String())
+		t.Fatalf("replies = %q, want one reply per query, each ending in its query's terminator", w.String())
 	}
 }
 
@@ -79,7 +80,7 @@ func TestReplierNeverBlocksTheReader(t *testing.T) {
 	go func() {
 		defer close(done)
 		for range 100 {
-			r.reply()
+			r.Write(osc7501.SupportReply())
 		}
 		r.stop()
 	}()
@@ -97,29 +98,9 @@ func TestReplierStoppedWritesNothing(t *testing.T) {
 	w := &recWriter{}
 	r := newReplier(w)
 	r.stop()
-	r.reply()
+	r.Write(osc7501.SupportReply())
 	time.Sleep(20 * time.Millisecond)
 	if w.String() != "" {
 		t.Fatalf("write after stop: %q", w.String())
-	}
-}
-
-// ConPTY announces win32-input-mode (?9001h) and then parses plain input
-// as VT, which swallows an ESC-led reply. Each reply character therefore
-// goes in as a key event, down then up, and the whole reply is ONE write to
-// the serialized input so nothing can land between its events.
-func TestKeyWriterEncodesWin32InputEventsInOneWrite(t *testing.T) {
-	w := &recWriter{}
-	kw := keyWriter{w: w}
-	n, err := kw.Write([]byte("\x1b]"))
-	if err != nil || n != 2 {
-		t.Fatalf("Write = %d, %v; want 2, nil", n, err)
-	}
-	want := "\x1b[0;0;27;1;0;1_\x1b[0;0;27;0;0;1_" + "\x1b[0;0;93;1;0;1_\x1b[0;0;93;0;0;1_"
-	if w.String() != want {
-		t.Fatalf("encoded = %q, want %q", w.String(), want)
-	}
-	if got := len(w.writesSeen()); got != 1 {
-		t.Fatalf("want one underlying write, got %d", got)
 	}
 }

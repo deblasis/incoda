@@ -54,7 +54,7 @@ func TestPTYAnswersOSC7501Query(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run exited %d:\n%s\n%s", code, out, errb)
 	}
-	want := `'\x1b]7501;?:states=idle,working,done,blocked,error,clear:kinds=permission,question,auth\x1b\\'`
+	want := `'\x1b]7501;?:states=idle,working,done,blocked,error,clear:kinds=permission,question,auth\x07'`
 	if !strings.Contains(out, "REPLY<"+want+">END") {
 		if strings.Contains(out, "REPLY<''>END") {
 			t.Fatalf("the job asked and got no reply on its input:\n%q", out)

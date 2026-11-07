@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 	"testing"
 	"time"
 )
@@ -105,5 +107,44 @@ func TestCloseReadEndWakesParkedReader(t *testing.T) {
 			t.Fatalf("conhost still alive after Close: %v (err %v)", pids, cerr)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// A write parked on the master input pipe (a reply to a job that stopped
+// reading its input) must not wedge the teardown behind it: CloseHandle
+// alone does not wake a synchronous WriteFile, so CloseInput cancels first,
+// exactly like the read-end cut it mirrors.
+func TestCloseInputUnparksAWedgedWrite(t *testing.T) {
+	var r, w windows.Handle
+	if err := windows.CreatePipe(&r, &w, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(r)
+	p := &Pty{mIn: w}
+	writeDone := make(chan error, 1)
+	go func() {
+		chunk := make([]byte, 4096)
+		for {
+			if _, err := p.Write(chunk); err != nil {
+				writeDone <- err
+				return
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() { p.CloseInput(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseInput blocked behind a parked Write")
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("the parked write returned nil; it should report the abort")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the parked write never returned after the cancel")
 	}
 }

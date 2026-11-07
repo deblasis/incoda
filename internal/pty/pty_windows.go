@@ -214,9 +214,14 @@ func (p *Pty) CloseConsole() {
 // master read parked (measured: ClosePseudoConsole back in 0s, reader still
 // parked 20s later; with the input end closed conhost sends its epilogue
 // and the master reaches EOF). Idempotent, and Close never closes the end
-// twice.
+// twice. A synchronous WriteFile parked on the handle (a reply to a job
+// that stopped reading its input) is not woken by CloseHandle either, so
+// the cancel comes first, for the same reason as CloseReadEnd's.
 func (p *Pty) CloseInput() {
-	p.closeMIn.Do(func() { _ = windows.CloseHandle(p.mIn) })
+	p.closeMIn.Do(func() {
+		_ = windows.CancelIoEx(p.mIn, nil)
+		_ = windows.CloseHandle(p.mIn)
+	})
 }
 
 // CloseReadEnd cuts the reader loose: it cancels any read parked on the

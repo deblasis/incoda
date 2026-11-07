@@ -139,13 +139,17 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// the post-exit drain grace below.
 	//
 	// The tee is wrapped in a status tap: it hands the bytes on unchanged
-	// and only watches them for OSC 7501 support queries. The reply to one
-	// is written to the job's input through input, the single serialized
-	// door to the master input pipe (the supervisor's Ctrl-C uses the same
-	// one), and by the replier's own goroutine, so a job that never reads
-	// its input cannot stall this loop.
+	// and only watches them for OSC 7501 support queries. The reply is
+	// injected by the replier's own goroutine, off this pipe entirely, so a
+	// job that never reads its input cannot stall this loop. input remains
+	// the one serialized door to the master input pipe: the supervisor's
+	// Ctrl-C path.
 	input := &serialWriter{w: p}
-	replies := newReplier(keyWriter{w: input})
+	// Replies go in through the injector (see coninj_windows.go): the pipe
+	// this serialWriter guards is the Ctrl-C path, and a reply written to
+	// it would either be swallowed as VT input or echoed by a cooked-mode
+	// reader into the job's own output.
+	replies := newReplier(consoleInjector{pid: sp.PID})
 	var tee io.Writer = io.Discard
 	if opt.PTY.Tee != nil {
 		tee = opt.PTY.Tee
@@ -226,7 +230,8 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// because those bytes die with it, in every sink at once.
 	replies.stop() // no reply may race the input handle closing below
 	go p.CloseConsole()
-	p.CloseInput()
+	input.Close()  // the pump stops taking writes; its in-flight one is cancelled below
+	p.CloseInput() // the cancel unblocks a reply write parked on an unread input
 	grace := time.NewTimer(drainGrace)
 	defer grace.Stop()
 	quiesce := time.NewTimer(quiesceWindow)
