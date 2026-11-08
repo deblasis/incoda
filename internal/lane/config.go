@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/deblasis/incoda/internal/atomicfile"
 	"github.com/deblasis/incoda/internal/textsafe"
@@ -41,6 +42,13 @@ type Config struct {
 	Pools []string `json:"pools,omitempty"`
 	// QuietMachine makes every run on this project lane take quiet-machine.
 	QuietMachine bool `json:"quiet_machine,omitempty"`
+	// MaxRun is the lane's default for `run --max-run`: a job that has held
+	// the lane this long is killed. Zero is no limit; a run's own flag
+	// overrides it (0 turns it off for that run).
+	MaxRun time.Duration `json:"-"`
+	// Stall is the lane's default for `run --stall`: a job whose process
+	// tree used no CPU time for this long is killed. Zero is no limit.
+	Stall time.Duration `json:"-"`
 	// Schema is the file format version; a file without it is schema 1 and
 	// is upgraded on its next write. (The retired "pty" key of schema 2
 	// configs is preserved as an unknown field and ignored: consoles are
@@ -70,7 +78,7 @@ func (e *NewerSchemaError) Error() string {
 // configKnown lists the JSON names Config owns; everything else is extra.
 var configKnown = map[string]bool{
 	"slots": true, "description": true, "require_reason": true, "closed": true,
-	"pools": true, "quiet_machine": true, "schema": true,
+	"pools": true, "quiet_machine": true, "schema": true, "max_run": true, "stall": true,
 }
 
 type configJSON struct {
@@ -80,7 +88,29 @@ type configJSON struct {
 	Closed        string   `json:"closed,omitempty"`
 	Pools         []string `json:"pools,omitempty"`
 	QuietMachine  bool     `json:"quiet_machine,omitempty"`
+	MaxRun        string   `json:"max_run,omitempty"`
+	Stall         string   `json:"stall,omitempty"`
 	Schema        int      `json:"schema,omitempty"`
+}
+
+// parseLimitField reads a stored limit: a Go duration, never negative. The
+// empty string is no limit.
+func parseLimitField(name, s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("config field %q must be a non-negative duration like 30m, got %q", name, s)
+	}
+	return d, nil
+}
+
+func limitText(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }
 
 // UnmarshalJSON reads the known fields and keeps the rest in extra.
@@ -93,10 +123,18 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &all); err != nil {
 		return err
 	}
+	maxRun, err := parseLimitField("max_run", known.MaxRun)
+	if err != nil {
+		return err
+	}
+	stall, err := parseLimitField("stall", known.Stall)
+	if err != nil {
+		return err
+	}
 	*c = Config{
 		Slots: known.Slots, Description: known.Description, RequireReason: known.RequireReason,
 		Closed: known.Closed, Pools: known.Pools, QuietMachine: known.QuietMachine,
-		Schema: known.Schema,
+		MaxRun: maxRun, Stall: stall, Schema: known.Schema,
 	}
 	for k, v := range all {
 		if !configKnown[k] {
@@ -114,7 +152,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	b, err := json.Marshal(configJSON{
 		Slots: c.Slots, Description: c.Description, RequireReason: c.RequireReason,
 		Closed: c.Closed, Pools: c.Pools, QuietMachine: c.QuietMachine,
-		Schema: c.Schema,
+		MaxRun: limitText(c.MaxRun), Stall: limitText(c.Stall), Schema: c.Schema,
 	})
 	if err != nil || len(c.extra) == 0 {
 		return b, err
@@ -139,6 +177,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 func EqualConfig(a, b Config) bool {
 	if a.Slots != b.Slots || a.Description != b.Description || a.RequireReason != b.RequireReason ||
 		a.Closed != b.Closed || a.QuietMachine != b.QuietMachine ||
+		a.MaxRun != b.MaxRun || a.Stall != b.Stall ||
 		len(a.Pools) != len(b.Pools) {
 		return false
 	}

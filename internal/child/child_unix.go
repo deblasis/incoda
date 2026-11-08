@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+
+	"github.com/deblasis/incoda/internal/procinfo"
 )
 
 type supervisor struct {
@@ -83,6 +85,44 @@ func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.
 		peak, havePeak = uint64(ru.Maxrss)*unit, true
 	}
 	return peak, havePeak, cpu, haveCPU
+}
+
+// liveCPU is the CPU the live job tree has used so far: the child, every
+// descendant of it, and every member of its process group when it has one.
+// Only processes still alive are counted (a reaped grandchild takes its time
+// with it), so the sum can fall as well as rise; a caller treats any change as
+// activity.
+func (s *supervisor) liveCPU() (time.Duration, bool) {
+	if s.pid <= 0 {
+		return 0, false
+	}
+	ps, err := procinfo.List()
+	if err != nil {
+		return 0, false
+	}
+	return treeCPU(ps, s.pid, s.pgid), true
+}
+
+// treeCPU sums the CPU of root, its descendants and, when pgid is positive,
+// the members of that group.
+func treeCPU(ps []procinfo.Proc, root, pgid int) time.Duration {
+	in := map[int]bool{root: true}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range ps {
+			if !in[p.PID] && (in[p.PPID] || (pgid > 0 && p.PGID == pgid)) {
+				in[p.PID] = true
+				changed = true
+			}
+		}
+	}
+	var total time.Duration
+	for _, p := range ps {
+		if in[p.PID] {
+			total += p.CPU
+		}
+	}
+	return total
 }
 
 func (s *supervisor) killTree() {

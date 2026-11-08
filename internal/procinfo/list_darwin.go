@@ -5,6 +5,7 @@ package procinfo
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,6 +31,7 @@ func fromKinfo(k *unix.KinfoProc) Proc {
 		PGID:  int(k.Eproc.Pgid),
 		Start: uint64(k.Proc.P_starttime.Sec)*1_000_000 + uint64(k.Proc.P_starttime.Usec),
 		State: st,
+		CPU:   time.Duration(k.Proc.P_uticks+k.Proc.P_sticks) * tick,
 	}
 }
 

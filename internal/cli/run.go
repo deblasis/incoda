@@ -57,6 +57,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: 30 * time.Minute}
 	fs.Var(wait, "wait", "max time to queue: a Go duration (30m) or bare seconds (1800); 0 fails immediately, negative waits forever")
+	maxRun := &limitValue{}
+	fs.Var(maxRun, "max-run", "kill the job once it has held the lane this long: a Go duration (90m) or bare seconds; exits 131. Takes the lane's `config --max-run` default when absent; 0 turns that default off")
+	stall := &limitValue{}
+	fs.Var(stall, "stall", "kill the job when its whole process tree has used no CPU time for this long: a Go duration (20m) or bare seconds; exits 132. Takes the lane's `config --stall` default when absent; 0 turns that default off")
 	pool := &poolsValue{}
 	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
 	fs.Var(pool, "pools", "alias of --pool")
@@ -64,8 +68,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		"run the job inside a Windows pseudo-console (ConPTY): the job sees a TTY, so it may colour its output, draw progress bars, or wait on a prompt where the pipe path would have failed fast; its merged output is teed to a per-job file readable live with `incoda attach --queue KEY --pid N`. Default ON on Windows; --pty=false runs the job on pipes")
 
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] [--] <cmd...>\n\n")
-		fmt.Fprintf(stderr, "Runs without --max-cpu bypass the load gate entirely; a gated run shares its --wait budget between queueing and waiting for idle (expiry exits 121).\n\n")
+		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--max-run DUR] [--stall DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "Runs without --max-cpu bypass the load gate entirely; a gated run shares its --wait budget between queueing and waiting for idle (expiry exits 121).\n")
+		fmt.Fprintf(stderr, "A job ended by --max-run exits 131 and one ended by --stall exits 132; the release line in lane.log records which limit fired.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -405,7 +410,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			var killed *lane.KilledError
 			if errors.As(acqErr, &killed) {
 				rc = ExitKilled
-				logKill(toTake, killed.Request)
+				logKill(toTake, killed.Request, "")
 				return "", exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while queued on %q by %s: %s",
 					key, textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
 			}
@@ -538,13 +543,30 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Dim("load gate skipped: running inside a parent lane (re-entrant)"))
 			}
-			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
+			// The parent's ticket is what holds the lane, so the lane's
+			// defaults belong to the parent; only limits this run was given
+			// itself apply, to its own child.
+			ownRun, ownStall := resolveLimits(maxRun.given(), stall.given(), nil)
+			if ownStall > 0 && !stallSupported(runtime.GOOS) {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(stallUnsupportedLine()))
+			}
+			ownGate, ownProbe, ownStop := newAbortGate(), &child.Probe{}, make(chan struct{})
+			ownDone := watchLimits(ownRun, ownStall, ownProbe, *poll, time.Now(), ownGate, ownStop)
+			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, ownGate.Done(), child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
 				PTY:      ptyOptions(ptyOn, os.Stdout, nil, nil),
+				Probe:    ownProbe,
 			})
+			close(ownStop)
+			<-ownDone
 			if runErr != nil {
 				return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
+			}
+			if req, limit, ok := ownGate.Fired(); ok && res.Aborted {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
+					p.Red(fmt.Sprintf("killed by %s: %s", textsafe.Escape(req.By), textsafe.Escape(req.Reason))))
+				return &exitCode{code: limitExit(limit)}
 			}
 			if res.Code != 0 {
 				return &exitCode{code: res.Code}
@@ -663,7 +685,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					var killed *lane.KilledError
 					if errors.As(gerr, &killed) {
 						rc = ExitKilled
-						logKill(toTake, killed.Request)
+						logKill(toTake, killed.Request, "")
 						return exitWith(ExitKilled, "%s", p.Red(fmt.Sprintf("cancelled while waiting for idle by %s: %s",
 							textsafe.Escape(killed.Request.By), textsafe.Escape(killed.Request.Reason))))
 					}
@@ -775,8 +797,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// the poll interval. A request closes abort, which takes the job tree
 	// down; the message is printed here, after the child is gone, so it is
 	// the last thing on stderr rather than buried under the build's tail.
-	abort := make(chan struct{})
-	killed := make(chan lane.KillRequest, 1)
+	//
+	// A limit (--max-run, --stall) takes the job down through the same door
+	// as a kill request: the gate. Whichever arrives first is the one
+	// reported.
+	stopGate := newAbortGate()
 	stopWatch := make(chan struct{})
 	watchDone := make(chan struct{})
 	go func() {
@@ -790,14 +815,31 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			case <-t.C:
 				for _, pt := range toTake {
 					if req, ok := pt.en.KillRequested(); ok {
-						killed <- req
-						close(abort)
+						stopGate.Trigger(req, "")
 						return
 					}
 				}
 			}
 		}
 	}()
+
+	// The limits in force: a flag the caller gave wins over the lanes'
+	// defaults, read fresh because a plan can be old after a long wait. The
+	// clock starts here, with every lane held.
+	cfgs := make([]lane.Config, 0, len(toTake))
+	for _, pt := range toTake {
+		cfg, cerr := lane.ReadConfig(pt.q.Dir)
+		if cerr != nil {
+			cfg = pt.l.Cfg
+		}
+		cfgs = append(cfgs, cfg)
+	}
+	maxRunFor, stallFor := resolveLimits(maxRun.given(), stall.given(), cfgs)
+	if stallFor > 0 && !stallSupported(runtime.GOOS) {
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(stallUnsupportedLine()))
+	}
+	probe := &child.Probe{}
+	limitsDone := watchLimits(maxRunFor, stallFor, probe, *poll, time.Now(), stopGate, stopWatch)
 
 	// Answers ride their own goroutine, never the kill poll's: a console
 	// that is slow to read what was typed must not delay a kill. The loop
@@ -855,13 +897,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	for _, pt := range toTake {
 		own = append(own, held.Entry{Key: pt.key, Ticket: pt.en.Name()})
 	}
-	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
+	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, stopGate.Done(), child.Options{
 		Env:      childEnv(startEnv, held.Format(held.Merge(inherited.L, own))),
 		OwnGroup: len(inherited.L) == 0,
 		PTY:      ptyOptions(ptyOn, tee, jobClosers, answerDoor),
+		Probe:    probe,
 	})
 	close(stopWatch)
 	<-watchDone
+	<-limitsDone
 	<-answersDone
 	if runErr != nil {
 		rc = ExitSpawn
@@ -872,13 +916,14 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	// finished on its own did not kill anything; the job's real exit code
 	// is the truth then, and the request goes away with the ticket.
 	if res.Aborted {
-		req := <-killed
-		rc = ExitKilled
-		logKill(toTake, req)
+		req, limit, _ := stopGate.Fired()
+		rc = limitExit(limit)
+		stats.Limit = limit
+		logKill(toTake, req, limit)
 		release()
 		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 			p.Red(fmt.Sprintf("killed by %s: %s", textsafe.Escape(req.By), textsafe.Escape(req.Reason))))
-		return &exitCode{code: ExitKilled}
+		return &exitCode{code: rc}
 	}
 	rc = res.Code
 	release()
@@ -1041,9 +1086,13 @@ func waitingCheck(laneDir, key string) error {
 
 // logKill records the kill on every queue the run held, next to the
 // request the killer left, so the history reads request then outcome.
-func logKill(parts []*lanePart, req lane.KillRequest) {
+func logKill(parts []*lanePart, req lane.KillRequest, limit string) {
+	which := ""
+	if limit != "" {
+		which = " limit=" + limit
+	}
 	for _, pt := range parts {
-		pt.q.Logf("queue=%s event=kill pid=%d by=%s reason=%s", pt.key, os.Getpid(), textsafe.LogValue(req.By), textsafe.LogValue(req.Reason))
+		pt.q.Logf("queue=%s event=kill pid=%d by=%s reason=%s%s", pt.key, os.Getpid(), textsafe.LogValue(req.By), textsafe.LogValue(req.Reason), which)
 	}
 }
 

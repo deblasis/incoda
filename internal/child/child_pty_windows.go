@@ -111,6 +111,9 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		return Result{}, fmt.Errorf("resume child: %w", err)
 	}
 
+	opt.Probe.arm(sup.liveCPU)
+	defer opt.Probe.disarm()
+
 	// Waiter: reports the exit code and releases the pseudo-console. The
 	// CloseConsole call runs in its own goroutine because a conhost wedged
 	// mid-teardown must not wedge the run's exit path with it.

@@ -23,6 +23,10 @@ type Stats struct {
 	// direct child and whatever it waited for (Unix).
 	CPU     time.Duration
 	HaveCPU bool
+	// Limit names the run limit that ended the job ("max-run" or "stall"),
+	// or is empty when none did. It is recorded on the release line so the
+	// cost of wedged jobs can be read from the log without the job's output.
+	Limit string
 }
 
 // logFields renders the stats as " key=value" pairs for a lane.log line, or
@@ -35,6 +39,9 @@ func (s Stats) logFields() string {
 	}
 	if s.HaveCPU {
 		out += " cpu=" + s.CPU.Round(time.Second).String()
+	}
+	if s.Limit != "" {
+		out += " limit=" + s.Limit
 	}
 	return out
 }

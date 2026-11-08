@@ -120,8 +120,8 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
-| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
+| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--max-run DUR] [--stall DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). `--max-run DUR` kills the job once it has held the lane for `DUR`, and `--stall DUR` kills it when its whole process tree has used no CPU time for `DUR` (see [Run limits](#run-limits)). |
+| `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--max-run DUR] [--stall DUR] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, the link to the machine-wide pools the key's jobs take, and the default `--max-run` and `--stall` its runs take (`0` clears one). |
 | `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live, read-only, ending by itself when the job does — viewing is open to everyone. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
@@ -137,7 +137,48 @@ use a separate band, documented and stable: `120` usage, `121` wait elapsed
 while still queued or waiting for idle,
 `122` state unusable, `123` spawn failure, `124` killed through the lane,
 `125` a kill that was not acknowledged, `126` an answer no run took in
-time, `130` interrupted while queueing.
+time, `130` interrupted while queueing, `131` the job was ended by
+`--max-run`, `132` the job was ended by `--stall`. The two limit codes sit
+above the others so a caller can tell "stopped by the limit" from "failed"
+(the child's own code) and from "killed by a person" (`124`); as with every
+code above 124, a child that exits with the same number by itself cannot be
+told apart, so a script that must be sure reads the `limit=` field on the
+release line in `lane.log`.
+
+### Run limits
+
+A job that wedges keeps its slot until someone notices, and everything queued
+behind it waits. Two limits release it:
+
+```
+incoda run --queue builds --max-run 90m --stall 20m -- zig build
+incoda config builds --max-run 90m --stall 20m   # the lane's default for every run
+```
+
+- `--max-run DUR` kills the job once it has held the lane for `DUR`, counted
+  from the moment the command starts.
+- `--stall DUR` kills the job when its whole process tree (the command and
+  every descendant) has used no CPU time for `DUR`. Any CPU use restarts the
+  window. It reads the Job Object on Windows and the live process list on
+  Linux and macOS, where a descendant that has already exited takes its time
+  with it; on another OS it cannot fire and the run says so.
+
+`DUR` is a Go duration (`90m`) or bare seconds (`5400`). A flag given on `run`
+beats the lane's default, and `--max-run 0` or `--stall 0` turns the default
+off for that run. When a run holds several lanes without a flag, the tightest
+non-zero default among them applies.
+
+A limit takes the job down the way `incoda kill` does: the run ends the job
+tree, prints on stderr which limit fired and why, releases the lane, and exits
+`131` for `--max-run` or `132` for `--stall`. The `event=kill` line and the
+`event=release` line in `lane.log` both carry `limit=max-run` or
+`limit=stall`, so the cost of wedged jobs can be read without the job's output.
+
+A nested `run` on a lane its parent already holds has no ticket of its own:
+the lane's defaults belong to the parent, which enforces them against the
+whole tree. Only a limit the nested run was given by flag applies, to its own
+child, and it exits with the limit's code, which the parent sees as the
+child's ordinary exit status.
 
 Output is colored on a terminal and plain everywhere else. The standard
 opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and

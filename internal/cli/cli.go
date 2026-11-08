@@ -29,6 +29,8 @@ const (
 	ExitKillPending   = 125 // kill: the participant did not acknowledge in time
 	ExitAnswerPending = 126 // answer: the run did not deliver the reply or refuse it in time
 	ExitInterrupt     = 130 // incoda itself was interrupted while queueing
+	ExitMaxRun        = 131 // run: the job held the lane past --max-run and was killed
+	ExitStall         = 132 // run: the job tree used no CPU time for --stall and was killed
 )
 
 type usageError struct{ msg string }
@@ -42,11 +44,11 @@ func usagef(format string, args ...any) error {
 const rootUsage = `incoda - keyed queueing for heavy processes (builds, GUI/UI test runs)
 
 usage:
-  incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] [--] <cmd...>
+  incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--max-run DUR] [--stall DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] [--] <cmd...>
   incoda status [--queue KEY] [--all] [--json]
   incoda watch [--queue KEY] [--interval 2s] [--once | --plain]
   incoda queues
-  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--wait DUR]
+  incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--max-run DUR] [--stall DUR] [--wait DUR]
   incoda attach --queue KEY --pid N
   incoda answer --queue KEY --pid N --text TEXT [--owner WHO] [--raw] [--wait 10s]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
@@ -90,6 +92,9 @@ exit codes:
   125      kill: the participant did not acknowledge in time (rerun with --force)
   126      answer: the run did not deliver the reply or refuse it in time
   130      incoda was interrupted while queueing
+  131      run: the job held the lane past --max-run and was killed (stderr and the
+           release line in lane.log say so)
+  132      run: the job tree used no CPU time for --stall and was killed
 
 run 'incoda <command> -h' for per-command flags.
 `

@@ -57,7 +57,45 @@ type Options struct {
 	// writes is read off the pty master and copied to PTY.Tee verbatim. The
 	// stdin/stdout/stderr arguments to Run are ignored in this mode.
 	PTY *PTYOptions
+	// Probe, when non-nil, is armed once the job is running and disarmed
+	// before the job's accounting goes away: a live reading of the CPU the
+	// whole job tree has used so far.
+	Probe *Probe
 }
+
+// Probe reads the CPU time a running job tree has used, for a caller that
+// watches it from another goroutine (the stall limit). Before the job starts
+// and after it ends CPU reports no reading; that is never a stall.
+type Probe struct {
+	mu sync.Mutex
+	fn func() (time.Duration, bool)
+}
+
+// CPU is the user plus kernel time of the job tree so far. The reading is
+// false while the probe is not armed or the platform cannot tell.
+func (p *Probe) CPU() (time.Duration, bool) {
+	if p == nil {
+		return 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fn == nil {
+		return 0, false
+	}
+	return p.fn()
+}
+
+func (p *Probe) arm(fn func() (time.Duration, bool)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.fn = fn
+	p.mu.Unlock()
+}
+
+// disarm waits out a reading in flight, so nothing touches the job after it.
+func (p *Probe) disarm() { p.arm(nil) }
 
 // PTYOptions is the pty half of Options.
 type PTYOptions struct {
@@ -116,6 +154,8 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan st
 		_ = cmd.Wait()
 		return Result{}, err
 	}
+	opt.Probe.arm(sup.liveCPU)
+	defer opt.Probe.disarm()
 
 	sigc := make(chan os.Signal, 4)
 	signal.Notify(sigc, forwardedSignals()...)
