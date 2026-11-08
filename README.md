@@ -155,21 +155,52 @@ incoda run --queue builds --max-run 90m --stall 20m -- zig build
 incoda config builds --max-run 90m --stall 20m   # the lane's default for every run
 ```
 
-- `--max-run DUR` kills the job once it has held the lane for `DUR`, counted
-  from the moment the command starts.
-- `--stall DUR` kills the job when its whole process tree (the command and
-  every descendant) has used no CPU time for `DUR`. Any CPU use restarts the
-  window. It reads the Job Object on Windows and the live process list on
-  Linux and macOS, where a descendant that has already exited takes its time
-  with it; on another OS it cannot fire and the run says so.
+- `--max-run DUR` kills the job once the command has been running for `DUR`.
+  The clock starts when the command starts, so time spent queued, or waiting
+  for an idle machine under `--max-cpu`, is not counted.
+- `--stall DUR` kills the job when its process tree has used no CPU time for
+  `DUR`; any CPU use inside the tree restarts the window. What counts as the
+  tree: on Windows, every process that runs in the job, exited ones included
+  (the Job Object's accounting); on Linux and macOS, the command, its live
+  descendants and the members of its process group, read from the process
+  list at each sample, so a process that has exited takes its CPU time with
+  it, and one that starts and ends between two samples is not seen.
+
+**What `--stall` cannot see.** CPU used outside the tree is invisible: a build
+server or daemon that was already running and does the real work for the job,
+or a descendant that detached from the tree. A job in a long wait for disk,
+network or input, or one waiting for a person to `incoda answer`, uses no CPU
+and reads as idle, so it can be killed. Set `--stall` above the longest such
+wait, or `--stall 0` for a job that waits on people. A `--stall` under 30
+seconds draws a warning, one under a second is refused, and a bare number is
+seconds (`--stall 20` is twenty seconds, not twenty minutes).
+
+`--stall` is armed only after incoda has seen the CPU counter rise: it starts a
+short process that spins and requires the reading to move. A counter that never
+moves would make every job look idle, so on a platform whose counter fails that
+check, or has no reader, the run says so on stderr and in `lane.log`
+(`event=limit-unavailable`) and goes on without the limit. The same warning is
+given if the reading is lost while the job runs; it never kills on a reading it
+could not take. The check costs a fraction of a second per run that uses
+`--stall`.
 
 `DUR` is a Go duration (`90m`) or bare seconds (`5400`). A flag given on `run`
 beats the lane's default, and `--max-run 0` or `--stall 0` turns the default
 off for that run. When a run holds several lanes without a flag, the tightest
-non-zero default among them applies.
+non-zero default among them applies. A default that is not a duration (a hand
+edit of `config.json`) is reported and ignored; `incoda config KEY --max-run 0`
+clears it.
+
+The defaults appear in `status --json` as `max_run` and `stall` in each queue's
+`config` object, as Go duration strings (`"1h30m0s"`), and are absent when
+unset. A lane that carries a default is stamped with config schema 3, so an
+older incoda refuses it (exit `122`, "written by a newer incoda") rather than
+running it without the limit; clearing both returns the lane to schema 2.
 
 A limit takes the job down the way `incoda kill` does: the run ends the job
-tree, prints on stderr which limit fired and why, releases the lane, and exits
+tree (on Unix, the process group and every live descendant, repeated until none
+is left; a descendant already adopted by init is out of reach and survives),
+prints on stderr which limit fired and why, releases the lane, and exits
 `131` for `--max-run` or `132` for `--stall`. The `event=kill` line and the
 `event=release` line in `lane.log` both carry `limit=max-run` or
 `limit=stall`, so the cost of wedged jobs can be read without the job's output.
@@ -177,8 +208,10 @@ tree, prints on stderr which limit fired and why, releases the lane, and exits
 A nested `run` on a lane its parent already holds has no ticket of its own:
 the lane's defaults belong to the parent, which enforces them against the
 whole tree. Only a limit the nested run was given by flag applies, to its own
-child, and it exits with the limit's code, which the parent sees as the
-child's ordinary exit status.
+child and that child's descendants, and it exits with the limit's code, which
+the parent sees as the child's ordinary exit status. A job that exits with
+status 0 on its own is never reported as limited, whatever the timer did at the
+same instant.
 
 Output is colored on a terminal and plain everywhere else. The standard
 opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and

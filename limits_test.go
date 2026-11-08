@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -306,5 +307,344 @@ func TestParentLimitCoversNestedRun(t *testing.T) {
 	}
 	if rel := logLine(laneLog(t, state, "nest2"), "release"); !strings.Contains(rel, "limit=max-run") {
 		t.Fatalf("the holder's release line records the limit:\n%s", rel)
+	}
+}
+
+func run(incoda, state string, t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	return runIncoda(t, incoda, state, args...)
+}
+
+// TestLimitsOnPipes repeats the core behaviours on the pipe path, where the
+// CPU probe is armed by a different piece of code than on a pseudo-console.
+func TestLimitsOnPipes(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "pp")
+	base := []string{"run", "--queue", "pp", "--poll", "50ms", "--pty=false"}
+	with := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
+
+	if out, code := run(incoda, state, t, with("--max-run", "1s", "--", lim, "sleep", "30000")...); code != exitMaxRun {
+		t.Fatalf("pipes: --max-run kill: got %d:\n%s", code, out)
+	}
+	if out, code := run(incoda, state, t, with("--stall", "1s", "--", lim, "sleep", "30000")...); code != exitStall {
+		t.Fatalf("pipes: an idle job is stalled: got %d:\n%s", code, out)
+	}
+	if out, code := run(incoda, state, t, with("--stall", "1s", "--", lim, "spin", "3500")...); code != 0 {
+		t.Fatalf("pipes: a busy job is spared: got %d:\n%s", code, out)
+	}
+	if out, code := run(incoda, state, t, with("--stall", "1s", "--", lim, "tree", "spin", "3500")...); code != 0 {
+		t.Fatalf("pipes: a busy grandchild counts: got %d:\n%s", code, out)
+	}
+	if out, code := run(incoda, state, t, with("--stall", "1s", "--", lim, "tree", "sleep", "30000")...); code != exitStall {
+		t.Fatalf("pipes: an idle tree is stalled: got %d:\n%s", code, out)
+	}
+}
+
+// TestLimitKillLeavesNothingBehind: after a limit kill the lanes the run held
+// are free, no ticket is left on any of them, and a grandchild that was
+// running is gone, for a top-level run and for a nested one, on a
+// pseudo-console and on pipes.
+func TestLimitKillLeavesNothingBehind(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	for _, mode := range []struct {
+		name string
+		pty  string
+	}{{"pty", "--pty=true"}, {"pipes", "--pty=false"}} {
+		for _, nested := range []bool{false, true} {
+			name := mode.name + "/top"
+			if nested {
+				name = mode.name + "/nested"
+			}
+			t.Run(name, func(t *testing.T) {
+				state := t.TempDir()
+				key := "nb"
+				linkTestKeys(t, incoda, state, key)
+				pidfile := filepath.Join(t.TempDir(), "gc.pid")
+				args := []string{"run", "--queue", key, "--poll", "50ms", mode.pty}
+				inner := []string{lim, "tree", "sleep", "60000", pidfile}
+				if nested {
+					args = append(args, "--", incoda, "run", "--queue", key, "--poll", "50ms", mode.pty, "--max-run", "2s", "--")
+				} else {
+					args = append(args, "--max-run", "2s", "--")
+				}
+				args = append(args, inner...)
+				out, code := runIncoda(t, incoda, state, args...)
+				if code != exitMaxRun {
+					t.Fatalf("expected the limit exit %d, got %d:\n%s", exitMaxRun, code, out)
+				}
+				b, err := os.ReadFile(pidfile)
+				if err != nil {
+					t.Fatalf("the fixture never reported its grandchild: %v\n%s", err, out)
+				}
+				var pid int
+				fmt.Sscan(string(b), &pid)
+				deadline := time.Now().Add(10 * time.Second)
+				for pidAlive(pid) && time.Now().Before(deadline) {
+					time.Sleep(50 * time.Millisecond)
+				}
+				if pidAlive(pid) {
+					t.Fatalf("grandchild %d is still running after the limit kill", pid)
+				}
+				for _, k := range []string{key, testPool} {
+					if n := countTickets(t, state, k); n != 0 {
+						t.Fatalf("%d ticket(s) left on %q", n, k)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestLimitDefaultOnAPoolLane: the default lives on a pool the project lane
+// is linked to, and the lane itself has none. The run must take it, and the
+// tightest of several lanes' defaults wins either way round.
+func TestLimitDefaultOnAPoolLane(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "pl")
+
+	if out, code := runIncoda(t, incoda, state, "config", testPool, "--max-run", "1s"); code != 0 {
+		t.Fatalf("config pool: %d\n%s", code, out)
+	}
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "pl", "--poll", "50ms", "--", lim, "sleep", "30000")
+	if code != exitMaxRun {
+		t.Fatalf("a default on the linked pool applies to the run, got %d:\n%s", code, out)
+	}
+	// Tightest wins: lane 1s, pool 60s.
+	if out, code := runIncoda(t, incoda, state, "config", testPool, "--max-run", "60s"); code != 0 {
+		t.Fatalf("config pool: %d\n%s", code, out)
+	}
+	if out, code := runIncoda(t, incoda, state, "config", "pl", "--max-run", "1s"); code != 0 {
+		t.Fatalf("config lane: %d\n%s", code, out)
+	}
+	if out, code := runIncoda(t, incoda, state, "run", "--queue", "pl", "--poll", "50ms", "--", lim, "sleep", "30000"); code != exitMaxRun {
+		t.Fatalf("the lane's 1s beats the pool's 60s, got %d:\n%s", code, out)
+	}
+}
+
+// TestLimitConfigIsReadWhenTheJobStarts: a run that queued before the lane
+// got a default still takes it, because the config is read once the lane is
+// held, not when the run was planned.
+func TestLimitConfigIsReadWhenTheJobStarts(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fresh")
+
+	holder := exec.Command(incoda, "run", "--queue", "fresh", "--poll", "50ms", "--", lim, "sleep", "4000")
+	holder.Env = laneEnv(state)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Wait() }()
+	waitFor(t, incoda, state, "fresh", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	waiter := exec.Command(incoda, "run", "--queue", "fresh", "--poll", "50ms", "--wait", "60s", "--", lim, "sleep", "30000")
+	waiter.Env = laneEnv(state)
+	var wout strings.Builder
+	waiter.Stdout, waiter.Stderr = &wout, &wout
+	if err := waiter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, incoda, state, "fresh", func(q queueReport) bool { return len(q.Waiting) == 1 })
+	if out, code := runIncoda(t, incoda, state, "config", "fresh", "--max-run", "1s"); code != 0 {
+		t.Fatalf("config: %d\n%s", code, out)
+	}
+	if got := exitCodeOf(waiter.Wait()); got != exitMaxRun {
+		t.Fatalf("the default set while the run queued applies when it starts, got %d:\n%s", got, wout.String())
+	}
+}
+
+// TestMaxRunClockStartsWithTheCommand: time spent queued is not time held. A
+// run that waits three seconds behind another and then needs one second
+// finishes inside --max-run 2s.
+func TestMaxRunClockStartsWithTheCommand(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "clk")
+
+	holder := exec.Command(incoda, "run", "--queue", "clk", "--poll", "50ms", "--", lim, "sleep", "3000")
+	holder.Env = laneEnv(state)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Wait() }()
+	waitFor(t, incoda, state, "clk", func(q queueReport) bool { return len(q.Holders) == 1 })
+
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "clk", "--poll", "50ms", "--wait", "60s", "--max-run", "2s", "--", lim, "sleep", "1000")
+	if code != 0 {
+		t.Fatalf("queue time must not count against --max-run, got %d:\n%s", code, out)
+	}
+}
+
+// TestManualKillRacingALimit: a person's kill and a limit arrive together.
+// Exactly one wins, one kill event is logged, and the exit code, the release
+// line and the event agree on which it was.
+func TestManualKillRacingALimit(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "race")
+
+	run := exec.Command(incoda, "run", "--queue", "race", "--poll", "50ms", "--pty=false", "--max-run", "3s", "--", lim, "sleep", "30000")
+	run.Env = laneEnv(state)
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, incoda, state, "race", func(q queueReport) bool { return len(q.Holders) == 1 })
+	time.Sleep(2700 * time.Millisecond)
+	_, _ = runIncoda(t, incoda, state, "kill", "--queue", "race", "--pid", fmt.Sprint(run.Process.Pid), "--reason", "racing the limit", "--wait", "10s")
+	code := exitCodeOf(run.Wait())
+	if code != exitMaxRun && code != 124 {
+		t.Fatalf("the run ends by the limit (%d) or the kill (124), got %d", exitMaxRun, code)
+	}
+	log := laneLog(t, state, "race")
+	kills := 0
+	for _, l := range strings.Split(log, "\n") {
+		if strings.Contains(l, "event=kill ") {
+			kills++
+		}
+	}
+	if kills != 1 {
+		t.Fatalf("exactly one kill event, got %d:\n%s", kills, log)
+	}
+	rel := logLine(log, "release")
+	if !strings.Contains(rel, fmt.Sprintf("rc=%d", code)) || strings.Contains(rel, "limit=") != (code == exitMaxRun) {
+		t.Fatalf("release line disagrees with exit %d:\n%s", code, rel)
+	}
+}
+
+// TestMaxRunNeverReportsAFinishedJob: a job that ends by itself right at its
+// limit is not reported as killed. Each job writes its exit stamp before it
+// exits 0; a stamp together with a limit exit is a finished job called dead.
+func TestMaxRunNeverReportsAFinishedJob(t *testing.T) {
+	incoda, stamp := binaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "fin")
+	for i := 0; i < 12; i++ {
+		file := filepath.Join(t.TempDir(), "s.txt")
+		_, code := runIncoda(t, incoda, state, "run", "--queue", "fin", "--poll", "10ms", "--pty=false",
+			"--max-run", "300ms", "--", stamp, file, "j", "290")
+		if iv, ok := readInterval(t, file); ok && iv.exit != 0 && code != 0 {
+			t.Fatalf("iteration %d: the job finished (exit stamp written) yet the run exited %d", i, code)
+		}
+	}
+}
+
+// TestLimitFlagValuesAreRefused covers what the first validation test did
+// not: empty and exponent forms, and a --stall too short to sample.
+func TestLimitFlagValuesAreRefused(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "lf")
+	for _, args := range [][]string{
+		{"run", "--queue", "lf", "--max-run", "", "--", lim, "sleep", "1"},
+		{"run", "--queue", "lf", "--stall", "1e3", "--", lim, "sleep", "1"},
+		{"run", "--queue", "lf", "--stall", "500ms", "--", lim, "sleep", "1"},
+		{"config", "lf", "--stall", "500ms"},
+	} {
+		if out, code := runIncoda(t, incoda, state, args...); code != 120 {
+			t.Fatalf("%v: want usage error 120, got %d:\n%s", args, code, out)
+		}
+	}
+}
+
+// TestShortStallWarns: a --stall under 30s is allowed and says what it risks.
+func TestShortStallWarns(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "sw")
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "sw", "--poll", "50ms", "--stall", "5s", "--", lim, "sleep", "100")
+	if code != 0 || !strings.Contains(out, "warning: --stall 5s is under 30s") {
+		t.Fatalf("a short --stall warns (exit %d):\n%s", code, out)
+	}
+	out, _ = runIncoda(t, incoda, state, "run", "--queue", "sw", "--poll", "50ms", "--stall", "45s", "--", lim, "sleep", "100")
+	if strings.Contains(out, "warning") {
+		t.Fatalf("45s is no cause for a warning:\n%s", out)
+	}
+}
+
+// TestBadLimitInConfigDoesNotBrickTheLane: a hand-edited limit that is not a
+// duration is reported and ignored, status still works, a run still runs, and
+// the obvious repair command fixes it.
+func TestBadLimitInConfigDoesNotBrickTheLane(t *testing.T) {
+	incoda, _ := binaries(t)
+	lim := limitsBinary(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "bad")
+	path := filepath.Join(laneDir(state, "bad"), "config.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := strings.Replace(string(b), "{", `{"max_run":"soon",`, 1)
+	if err := os.WriteFile(path, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := runIncoda(t, incoda, state, "status", "--all"); code != 0 {
+		t.Fatalf("status must still work: %d\n%s", code, out)
+	}
+	out, code := runIncoda(t, incoda, state, "run", "--queue", "bad", "--poll", "50ms", "--", lim, "sleep", "100")
+	if code != 0 || !strings.Contains(out, "max_run") {
+		t.Fatalf("a run goes ahead, without the bad limit, and says so (exit %d):\n%s", code, out)
+	}
+	if out, code := runIncoda(t, incoda, state, "config", "bad", "--max-run", "0"); code != 0 {
+		t.Fatalf("the repair command must work: %d\n%s", code, out)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "max_run") {
+		t.Fatalf("the repair left the bad value:\n%s", b)
+	}
+}
+
+// TestLimitsAppearInStatusJSON pins the two keys scripts read, and that a
+// lane with a limit is stamped with the schema older binaries refuse.
+func TestLimitsAppearInStatusJSON(t *testing.T) {
+	incoda, _ := binaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, incoda, state, "js")
+	if out, code := runIncoda(t, incoda, state, "config", "js", "--max-run", "5m", "--stall", "2m"); code != 0 {
+		t.Fatalf("config: %d\n%s", code, out)
+	}
+	out, code := runIncoda(t, incoda, state, "status", "--json", "--queue", "js")
+	if code != 0 {
+		t.Fatalf("status --json: %d\n%s", code, out)
+	}
+	var rep struct {
+		Queues []struct {
+			Config map[string]any `json:"config"`
+		} `json:"queues"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || len(rep.Queues) != 1 {
+		t.Fatalf("bad status json: %v\n%s", err, out)
+	}
+	c := rep.Queues[0].Config
+	if c["max_run"] != "5m0s" || c["stall"] != "2m0s" {
+		t.Fatalf("status --json config must carry max_run and stall: %v", c)
+	}
+	raw, _ := os.ReadFile(filepath.Join(laneDir(state, "js"), "config.json"))
+	if !strings.Contains(string(raw), `"schema": 3`) {
+		t.Fatalf("a limited lane is stamped schema 3:\n%s", raw)
+	}
+	if out, code := runIncoda(t, incoda, state, "config", "js", "--max-run", "0", "--stall", "0"); code != 0 {
+		t.Fatalf("clear: %d\n%s", code, out)
+	}
+	raw, _ = os.ReadFile(filepath.Join(laneDir(state, "js"), "config.json"))
+	if !strings.Contains(string(raw), `"schema": 2`) {
+		t.Fatalf("a lane with no limit goes back to schema 2:\n%s", raw)
+	}
+}
+
+// TestCPUSpinHelper: the hidden command the stall calibration runs.
+func TestCPUSpinHelper(t *testing.T) {
+	incoda, _ := binaries(t)
+	if out, code := runIncoda(t, incoda, t.TempDir(), "__cpuspin", "100ms"); code != 0 {
+		t.Fatalf("__cpuspin: %d\n%s", code, out)
 	}
 }

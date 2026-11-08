@@ -48,12 +48,61 @@ func TestConfigLimitsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestConfigLimitsRejectGarbage(t *testing.T) {
+// A limit that is not a duration must not take the lane's config down with
+// it: the value is ignored (no limit, the safe direction), reported by
+// Warnings, and everything else in the file still reads.
+func TestConfigBadLimitIsIgnoredNotFatal(t *testing.T) {
 	var c Config
-	for _, bad := range []string{`{"max_run":"soon"}`, `{"stall":"-5s"}`} {
-		if err := json.Unmarshal([]byte(bad), &c); err == nil {
-			t.Fatalf("%s must not parse", bad)
+	if err := json.Unmarshal([]byte(`{"slots":2,"max_run":"soon","stall":"-5s"}`), &c); err != nil {
+		t.Fatalf("a bad limit must not fail the read: %v", err)
+	}
+	if c.Slots != 2 || c.MaxRun != 0 || c.Stall != 0 {
+		t.Fatalf("slots survive, limits are off: %+v", c)
+	}
+	w := c.Warnings()
+	if len(w) != 2 || !strings.Contains(w[0], "max_run") || !strings.Contains(w[1], "stall") {
+		t.Fatalf("both bad values are reported: %q", w)
+	}
+	var ok Config
+	if err := json.Unmarshal([]byte(`{"max_run":"5m"}`), &ok); err != nil || len(ok.Warnings()) != 0 {
+		t.Fatalf("a good value has no warnings: %v %q", err, ok.Warnings())
+	}
+}
+
+// A lane carrying a limit is stamped with a schema that an older incoda
+// refuses by name, instead of running the lane with no limit. A lane with no
+// limit keeps the schema older binaries read.
+func TestConfigSchemaFollowsLimits(t *testing.T) {
+	dir := t.TempDir()
+	q, err := Open(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	schema := func() int {
+		c, err := q.LoadConfig()
+		if err != nil {
+			t.Fatal(err)
 		}
+		return c.Schema
+	}
+	if _, err := q.UpdateConfig(func(c *Config) error { c.Slots = 2; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema(); got != 2 {
+		t.Fatalf("no limit, schema 2, got %d", got)
+	}
+	if _, err := q.UpdateConfig(func(c *Config) error { c.Stall = time.Minute; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema(); got != 3 {
+		t.Fatalf("a limit makes it schema 3, got %d", got)
+	}
+	if _, err := q.UpdateConfig(func(c *Config) error { c.Stall = 0; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema(); got != 2 {
+		t.Fatalf("clearing the limit returns to schema 2, got %d", got)
 	}
 }
 

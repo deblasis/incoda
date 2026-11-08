@@ -97,12 +97,12 @@ func TestConfigNewerSchemaFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := os.WriteFile(filepath.Join(q.Dir, configName), []byte(`{"schema":3}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(q.Dir, configName), []byte(`{"schema":4}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err = q.LoadConfig()
 	var ns *NewerSchemaError
-	if !errors.As(err, &ns) || ns.Schema != 3 {
+	if !errors.As(err, &ns) || ns.Schema != 4 {
 		t.Fatalf("want NewerSchemaError, got %v", err)
 	}
 	if _, err := q.UpdateConfig(func(*Config) error { return nil }); !errors.As(err, &ns) {

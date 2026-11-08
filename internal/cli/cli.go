@@ -116,6 +116,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		// internal/child/coninj_windows.go), not a user command. Its exit
 		// code is the delivery verdict the answer door reads.
 		return child.InjectConsoleInput(rest)
+	case child.SpinCommand:
+		// Hidden, no usage: the stall calibration's CPU burner (see
+		// internal/child/calibrate.go), not a user command.
+		return child.Spin(rest)
 	case "status":
 		err = cmdStatus(rest, stdout, stderr)
 	case "watch":

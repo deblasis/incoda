@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +58,8 @@ type limitValue struct {
 	d   time.Duration
 	set bool
 	raw string
+	// floor, when set, refuses values the limit cannot honour.
+	floor func(time.Duration) error
 }
 
 func (v *limitValue) String() string {
@@ -75,6 +76,11 @@ func (v *limitValue) Set(s string) error {
 	d, err := parseLimit(s)
 	if err != nil {
 		return err
+	}
+	if v.floor != nil {
+		if err := v.floor(d); err != nil {
+			return err
+		}
 	}
 	v.d, v.set, v.raw = d, true, strings.TrimSpace(s)
 	return nil
@@ -119,6 +125,62 @@ func stallSupported(goos string) bool {
 		return true
 	}
 	return false
+}
+
+// calibrateCPU proves the CPU counter is live before --stall is armed. A seam
+// for tests; production runs the real calibration (child.CalibrateCPU).
+var calibrateCPU = child.CalibrateCPU
+
+// armStall decides whether --stall may be armed and returns the stall to
+// enforce (0 when it must not be) with the warning to print when it was
+// refused. A counter that never moves reads every job as idle, so the limit
+// is armed only on a platform that has a reader and after calibrate has seen
+// the counter rise; anything else leaves the job unbounded rather than at
+// the mercy of a dead counter.
+func armStall(stall time.Duration, goos string, calibrate func() error) (time.Duration, string) {
+	if stall <= 0 {
+		return 0, ""
+	}
+	if !stallSupported(goos) {
+		return 0, fmt.Sprintf("warning: CPU readout unavailable on %s; --stall is not armed for this run", goos)
+	}
+	if err := calibrate(); err != nil {
+		return 0, fmt.Sprintf("warning: the CPU counter on %s failed its liveness check (%v); --stall is not armed for this run", goos, err)
+	}
+	return stall, ""
+}
+
+// stallMinimum is the shortest --stall that can be sampled at all; stallAdvised
+// is the shortest that does not risk reading an ordinary wait as a stall.
+const (
+	stallMinimum = time.Second
+	stallAdvised = 30 * time.Second
+)
+
+// stallFloorError refuses a --stall too short for the sampler to judge.
+func stallFloorError(d time.Duration) error {
+	if d > 0 && d < stallMinimum {
+		return fmt.Errorf("--stall %s is under %s, the shortest window that can be sampled; use 0 for no limit", d, stallMinimum)
+	}
+	return nil
+}
+
+// stallWarning is the caution for a --stall short enough that a wait for
+// disk, network or input reads as a stall.
+func stallWarning(d time.Duration) string {
+	if d > 0 && d < stallAdvised {
+		return fmt.Sprintf("warning: --stall %s is under %s; a wait for I/O or input uses no CPU and will read as a stall", d, stallAdvised)
+	}
+	return ""
+}
+
+// unreadableBound is how long the CPU counter may stay unreadable before the
+// run says so: one window, and never more than a minute.
+func unreadableBound(stall time.Duration) time.Duration {
+	if stall > time.Minute {
+		return time.Minute
+	}
+	return stall
 }
 
 // stallClock decides when a job tree has been idle for long enough. Any
@@ -215,9 +277,12 @@ func cpuSampleEvery(stall, poll time.Duration) time.Duration {
 
 // watchLimits enforces the limits while the job runs: it triggers the gate
 // with the limit's name once the job has held the lane for maxRun, or its
-// tree has used no CPU for stall. It returns a channel that closes when the
-// watcher has stopped, which is when stop closes or after it has fired.
-func watchLimits(maxRun, stall time.Duration, probe *child.Probe, poll time.Duration, begin time.Time, g *abortGate, stop <-chan struct{}) <-chan struct{} {
+// tree has used no CPU for stall (cpu reads the tree's CPU so far). It
+// returns a channel that closes when the watcher has stopped, which is when
+// stop closes or after it has fired. A CPU reading that stays unavailable
+// for a whole window calls warn once and never kills: a limit that cannot
+// see must say so, not guess.
+func watchLimits(maxRun, stall time.Duration, cpu func() (time.Duration, bool), poll time.Duration, begin time.Time, g *abortGate, stop <-chan struct{}, warn func(string)) <-chan struct{} {
 	done := make(chan struct{})
 	if maxRun <= 0 && stall <= 0 {
 		close(done)
@@ -230,6 +295,8 @@ func watchLimits(maxRun, stall time.Duration, probe *child.Probe, poll time.Dura
 		var clock *stallClock
 		var lastSample time.Time
 		var every time.Duration
+		var blindSince time.Time
+		warned := false
 		if stall > 0 {
 			clock = newStallClock(stall, begin)
 			every = cpuSampleEvery(stall, poll)
@@ -250,8 +317,19 @@ func watchLimits(maxRun, stall time.Duration, probe *child.Probe, poll time.Dura
 					continue
 				}
 				lastSample = now
-				cpu, ok := probe.CPU()
-				if clock.Idle(now, cpu, ok) {
+				reading, ok := cpu()
+				if ok {
+					blindSince = time.Time{}
+				} else {
+					if blindSince.IsZero() {
+						blindSince = now
+					}
+					if !warned && now.Sub(blindSince) >= unreadableBound(stall) {
+						warned = true
+						warn(fmt.Sprintf("warning: the job tree's CPU could not be read for %s; --stall %s is not protecting this run", now.Sub(blindSince).Round(time.Second), stall))
+					}
+				}
+				if clock.Idle(now, reading, ok) {
 					g.Trigger(lane.KillRequest{
 						By: limitBy, ByPID: os.Getpid(),
 						Reason: fmt.Sprintf("--stall %s reached: the job tree used no CPU time for %s", stall, now.Sub(clock.since).Round(time.Second)),
@@ -262,10 +340,4 @@ func watchLimits(maxRun, stall time.Duration, probe *child.Probe, poll time.Dura
 		}
 	}()
 	return done
-}
-
-// stallUnsupportedLine is the line printed when --stall is in force on an OS
-// that cannot read a job tree's CPU.
-func stallUnsupportedLine() string {
-	return fmt.Sprintf("warning: CPU readout unavailable on %s; --stall cannot fire for this run", runtime.GOOS)
 }

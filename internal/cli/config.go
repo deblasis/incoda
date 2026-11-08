@@ -45,8 +45,8 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 
 	maxRun := &limitValue{}
 	fs.Var(maxRun, "max-run", "the lane's default for `run --max-run`: a job that has held the lane this long is killed (a Go duration like 90m or bare seconds; 0 clears it)")
-	stall := &limitValue{}
-	fs.Var(stall, "stall", "the lane's default for `run --stall`: a job whose process tree used no CPU time for this long is killed (a Go duration like 20m or bare seconds; 0 clears it)")
+	stall := &limitValue{floor: stallFloorError}
+	fs.Var(stall, "stall", "the lane's default for `run --stall`: a job whose process tree used no CPU time for this long is killed (a Go duration like 20m or bare seconds, at least 1s; 0 clears it). Waits for disk, network or input use no CPU and read as a stall")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: time.Minute}
 	fs.Var(wait, "wait", "how long to wait for machine.lock and a state upgrade: a Go duration (1m) or bare seconds; negative waits forever")
@@ -186,6 +186,14 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	}
 
 	p := paletteFor(stdout, *noColor)
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow("warning: "+w))
+	}
+	if given["stall"] {
+		if w := stallWarning(cfg.Stall); w != "" {
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(w))
+		}
+	}
 	fmt.Fprintf(stdout, "queue %q\n", key)
 	if cfg.Slots < 1 {
 		fmt.Fprintf(stdout, "  %s 1 %s\n", p.Dim("slots:"), p.Dim("(default)"))

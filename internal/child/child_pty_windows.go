@@ -308,7 +308,9 @@ drain:
 	}
 
 	// Accounting before dispose closes the job handle; the numbers go with it.
-	res := Result{Code: int(code), Aborted: aborted}
+	// An exit status of 0 is a job that finished by itself, whatever abort
+	// arrived while it was exiting: a terminated job never reports 0.
+	res := Result{Code: int(code), Aborted: aborted && code != 0}
 	res.PeakBytes, res.HavePeak, res.CPU, res.HaveCPU = sup.usage(nil)
 	return res, nil
 }

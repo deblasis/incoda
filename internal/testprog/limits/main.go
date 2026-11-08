@@ -2,8 +2,10 @@
 //
 //	limits sleep MS         idle for MS milliseconds, using no CPU
 //	limits spin MS          burn CPU for MS milliseconds
-//	limits tree MODE MS     start a grandchild in MODE (sleep or spin) for MS
-//	                        milliseconds and idle in the parent for as long
+//	limits tree MODE MS [PIDFILE]
+//	                        start a grandchild in MODE (sleep or spin) for MS
+//	                        milliseconds, write its pid to PIDFILE when given,
+//	                        and idle in the parent for as long
 //
 // The tree mode is what shows that CPU burned by a descendant counts for the
 // job: the process the run started stays idle while the grandchild works.
@@ -37,6 +39,17 @@ func main() {
 		if err := gc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+		if len(os.Args) > 4 {
+			tmp := os.Args[4] + ".tmp"
+			if err := os.WriteFile(tmp, []byte(strconv.Itoa(gc.Process.Pid)), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if err := os.Rename(tmp, os.Args[4]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 		// The parent only waits: whatever CPU the job uses, it is not this
 		// process's.

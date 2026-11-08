@@ -58,9 +58,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	wait := &waitValue{d: 30 * time.Minute}
 	fs.Var(wait, "wait", "max time to queue: a Go duration (30m) or bare seconds (1800); 0 fails immediately, negative waits forever")
 	maxRun := &limitValue{}
-	fs.Var(maxRun, "max-run", "kill the job once it has held the lane this long: a Go duration (90m) or bare seconds; exits 131. Takes the lane's `config --max-run` default when absent; 0 turns that default off")
-	stall := &limitValue{}
-	fs.Var(stall, "stall", "kill the job when its whole process tree has used no CPU time for this long: a Go duration (20m) or bare seconds; exits 132. Takes the lane's `config --stall` default when absent; 0 turns that default off")
+	fs.Var(maxRun, "max-run", "kill the job once the command has been running this long, counted from its start (after any queueing and load gate): a Go duration (90m) or bare seconds; exits 131. Takes the lane's `config --max-run` default when absent; 0 turns that default off")
+	stall := &limitValue{floor: stallFloorError}
+	fs.Var(stall, "stall", "kill the job when its process tree (the command and its live descendants; work outside the tree is not seen) has used no CPU time for this long: a Go duration (20m) or bare seconds, at least 1s; exits 132. A wait for disk, network or input uses no CPU and reads as a stall. Takes the lane's `config --stall` default when absent; 0 turns that default off")
 	pool := &poolsValue{}
 	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
 	fs.Var(pool, "pools", "alias of --pool")
@@ -547,11 +547,17 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			// defaults belong to the parent; only limits this run was given
 			// itself apply, to its own child.
 			ownRun, ownStall := resolveLimits(maxRun.given(), stall.given(), nil)
-			if ownStall > 0 && !stallSupported(runtime.GOOS) {
-				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(stallUnsupportedLine()))
+			if w := stallWarning(ownStall); w != "" {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(w))
+			}
+			ownStall, ownWarn := armStall(ownStall, runtime.GOOS, calibrateCPU)
+			if ownWarn != "" {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(ownWarn))
 			}
 			ownGate, ownProbe, ownStop := newAbortGate(), &child.Probe{}, make(chan struct{})
-			ownDone := watchLimits(ownRun, ownStall, ownProbe, *poll, time.Now(), ownGate, ownStop)
+			ownDone := watchLimits(ownRun, ownStall, ownProbe.CPU, *poll, time.Now(), ownGate, ownStop, func(msg string) {
+				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(msg))
+			})
 			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, ownGate.Done(), child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
@@ -831,15 +837,25 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		cfg, cerr := lane.ReadConfig(pt.q.Dir)
 		if cerr != nil {
 			cfg = pt.l.Cfg
+			limitNote(toTake, stderr, p, fmt.Sprintf("warning: the config of %q could not be re-read (%s); its run-limit defaults are as they were at plan time", pt.key, textsafe.Escape(cerr.Error())))
+		}
+		for _, w := range cfg.Warnings() {
+			limitNote(toTake, stderr, p, "warning: queue "+pt.key+": "+w)
 		}
 		cfgs = append(cfgs, cfg)
 	}
 	maxRunFor, stallFor := resolveLimits(maxRun.given(), stall.given(), cfgs)
-	if stallFor > 0 && !stallSupported(runtime.GOOS) {
-		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(stallUnsupportedLine()))
+	if w := stallWarning(stallFor); w != "" {
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(w))
+	}
+	stallFor, armWarn := armStall(stallFor, runtime.GOOS, calibrateCPU)
+	if armWarn != "" {
+		limitNote(toTake, stderr, p, armWarn)
 	}
 	probe := &child.Probe{}
-	limitsDone := watchLimits(maxRunFor, stallFor, probe, *poll, time.Now(), stopGate, stopWatch)
+	limitsDone := watchLimits(maxRunFor, stallFor, probe.CPU, *poll, time.Now(), stopGate, stopWatch, func(msg string) {
+		limitNote(toTake, stderr, p, msg)
+	})
 
 	// Answers ride their own goroutine, never the kill poll's: a console
 	// that is slow to read what was typed must not delay a kill. The loop
@@ -1082,6 +1098,16 @@ func waitingCheck(laneDir, key string) error {
 		return &machine.Refusal{Msg: fmt.Sprintf("closed-while-waiting: %q: %s", key, textsafe.Escape(cfg.Closed))}
 	}
 	return nil
+}
+
+// limitNote says that a run limit is not doing what was asked: once on
+// stderr, past --quiet, and as an event on every lane the run holds, so the
+// lane log shows a bound that was not in force.
+func limitNote(parts []*lanePart, stderr io.Writer, p colorize.Palette, msg string) {
+	fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(msg))
+	for _, pt := range parts {
+		pt.q.Logf("queue=%s event=limit-unavailable pid=%d msg=%s", pt.key, os.Getpid(), textsafe.LogValue(msg))
+	}
 }
 
 // logKill records the kill on every queue the run held, next to the

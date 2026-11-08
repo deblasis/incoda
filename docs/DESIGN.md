@@ -392,7 +392,28 @@ interface; scripts may rely on them.
 | `123` | the lane was acquired but the command could not be started |
 | `124` | the run was killed through the lane; stderr names who and why |
 | `125` | `kill`: the participant did not acknowledge within `--wait` and `--force` was not given |
+| `126` | `answer`: the run did not deliver the reply or refuse it in time |
 | `130` | `incoda` was interrupted while queueing |
+| `131` | `run`: the job was ended by `--max-run`; stderr names the limit, and `lane.log` carries `limit=max-run` on the kill and release lines |
+| `132` | `run`: the job was ended by `--stall`; as above with `limit=stall` |
+
+## Run limits
+
+A wedged job keeps its slot until someone notices, so `run` takes two limits,
+each settable per call and as a lane default in `config.json`
+(`max_run`, `stall`, stored as Go durations; `status --json` shows them in the
+queue's `config` object, and a lane that carries one is stamped schema 3 so an
+older incoda refuses it by name instead of running the lane unbounded).
+
+A limit ends the job through the same door as `incoda kill`: the run tears the
+job tree down, reports the cause on stderr, releases its tickets and exits with
+the limit's code. `--max-run` is a wall clock counted from the start of the
+command. `--stall` watches the CPU time the job tree has used: the Job Object's
+accounting on Windows, the live process list on Linux and macOS. It is armed
+only after a calibration run has seen the counter rise, because a counter that
+never moves would read every job as idle. A CPU wait of any kind (disk, network,
+a prompt) uses no CPU and counts as idle; work done by processes outside the
+tree is not seen.
 
 ## The memory readout
 

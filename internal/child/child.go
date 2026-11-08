@@ -212,5 +212,9 @@ func Run(argv []string, stdin *os.File, stdout, stderr *os.File, abort <-chan st
 		}
 		return Result{}, waitErr
 	}
+	// A job that ended with status 0 finished by itself: a kill (a signal on
+	// Unix, TerminateJobObject on Windows) never leaves 0, so an abort that
+	// arrived after the job had already exited must not turn it into a kill.
+	res.Aborted = false
 	return res, nil
 }
