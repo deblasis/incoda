@@ -74,6 +74,11 @@ type PTYOptions struct {
 	// its marker into the tee: the runner notes out-of-band that this job's
 	// log stopped recording (the marker text alone is forgeable by a job).
 	OnOutputCut func()
+	// Answer, when not nil, is armed by the pty runner after spawn: the
+	// door an owner's typed reply to a blocked job goes through (see
+	// answer.go). It stays inert on the pipe path, where Deliver refuses
+	// by name.
+	Answer *AnswerDoor
 }
 
 // Run starts argv, forwards interrupt signals to it, and returns its exit code

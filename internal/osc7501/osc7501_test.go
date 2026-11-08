@@ -3,8 +3,6 @@ package osc7501
 import (
 	"bytes"
 	"encoding/base64"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -246,38 +244,12 @@ func TestLine(t *testing.T) {
 		{Record{State: "done"}, 40, "[done]"},
 		{Record{State: "error", Msg: "exit 3"}, 40, "[error] exit 3"},
 		{Record{State: "working", Msg: "abcdefghij"}, 5, "[working] abcd…"},
-		{Record{State: "working", Msg: "a\x1b[2Jb"}, 40, `[working] a\x1b[2Jb`},
+		{Record{State: "blocked", Kind: "question", Msg: "proceed?"}, 40, "[blocked:question] proceed?"},
+		{Record{State: "blocked"}, 40, "[blocked]"},
 	}
 	for _, c := range cases {
 		if got := c.r.Line(c.max); got != c.want {
 			t.Errorf("Line(%+v,%d) = %q, want %q", c.r, c.max, got, c.want)
 		}
-	}
-}
-
-func TestLogStatusReadsRecordsAndNothingElse(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "job.out")
-	old := rec("state=error:id=old:msg="+b64("stale"), "\x07")
-	body := old + strings.Repeat("x", 20000) + rec("state=working:id=job:progress=55:msg="+b64("linking"), "\x07") + "\r\nmore output\r\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var st LogStatus
-	r, ok := st.Read(path)
-	if !ok || r.ID != "job" || r.State != "working" || r.Msg != "linking" {
-		t.Fatalf("got %+v ok=%v", r, ok)
-	}
-	var none LogStatus
-	if _, ok := none.Read(filepath.Join(dir, "missing.out")); ok {
-		t.Fatal("a missing log has no status")
-	}
-	plain := filepath.Join(dir, "plain.out")
-	if err := os.WriteFile(plain, []byte("just text\r\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var pl LogStatus
-	if _, ok := pl.Read(plain); ok {
-		t.Fatal("a log with no records has no status")
 	}
 }

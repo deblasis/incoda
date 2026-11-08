@@ -74,8 +74,9 @@ sys.stdin.readline()
 // in the real binary.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == ConinjCommand {
-		InjectConsoleInput(os.Args[2:])
-		os.Exit(0)
+		// The exit code is the delivery verdict the answer door reads;
+		// swallowing it here would make every test injection a success.
+		os.Exit(InjectConsoleInput(os.Args[2:]))
 	}
 	os.Exit(m.Run())
 }

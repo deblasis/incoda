@@ -1,4 +1,3 @@
-// Package cli implements incoda's command line.
 package cli
 
 import (
@@ -21,14 +20,15 @@ import (
 // documented here, in `incoda help`, and in the README, and they are part of the
 // interface: scripts may rely on them.
 const (
-	ExitOK          = 0
-	ExitUsage       = 120 // bad arguments, bad key, or a refused force-release
-	ExitTimeout     = 121 // --wait elapsed without a free slot
-	ExitState       = 122 // state directory or OS lock unusable
-	ExitSpawn       = 123 // the lane was acquired but the command could not start
-	ExitKilled      = 124 // the run was killed through the lane (`incoda kill`)
-	ExitKillPending = 125 // kill: the participant did not acknowledge in time
-	ExitInterrupt   = 130 // incoda itself was interrupted while queueing
+	ExitOK            = 0
+	ExitUsage         = 120 // bad arguments, bad key, or a refused force-release
+	ExitTimeout       = 121 // --wait elapsed without a free slot
+	ExitState         = 122 // state directory or OS lock unusable
+	ExitSpawn         = 123 // the lane was acquired but the command could not start
+	ExitKilled        = 124 // the run was killed through the lane (`incoda kill`)
+	ExitKillPending   = 125 // kill: the participant did not acknowledge in time
+	ExitAnswerPending = 126 // answer: the run did not deliver the reply or refuse it in time
+	ExitInterrupt     = 130 // incoda itself was interrupted while queueing
 )
 
 type usageError struct{ msg string }
@@ -48,6 +48,7 @@ usage:
   incoda queues
   incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG | --open] [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]] [--pty[=false]] [--wait DUR]
   incoda attach --queue KEY --pid N [--owner WHO]
+  incoda answer --queue KEY --pid N --text TEXT [--owner WHO] [--raw] [--wait 10s]
   incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]
   incoda force-release --queue KEY [--live]
   incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]
@@ -87,6 +88,7 @@ exit codes:
   123      lane acquired but the command could not be started
   124      the run was killed through the lane (incoda kill); stderr says by whom and why
   125      kill: the participant did not acknowledge in time (rerun with --force)
+  126      answer: the run did not deliver the reply or refuse it in time
   130      incoda was interrupted while queueing
 
 run 'incoda <command> -h' for per-command flags.
@@ -105,10 +107,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "run":
 		err = cmdRun(rest, stdout, stderr)
 	case child.ConinjCommand:
-		// Hidden, no usage: the pty runner's console-mode probe (see
-		// internal/child/coninj_windows.go), not a user command.
-		child.InjectConsoleInput(rest)
-		return ExitOK
+		// Hidden, no usage: the pty runner's console-input injector (see
+		// internal/child/coninj_windows.go), not a user command. Its exit
+		// code is the delivery verdict the answer door reads.
+		return child.InjectConsoleInput(rest)
 	case "status":
 		err = cmdStatus(rest, stdout, stderr)
 	case "watch":
@@ -119,6 +121,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdConfig(rest, stdout, stderr)
 	case "kill":
 		err = cmdKill(rest, stdout, stderr)
+	case "answer":
+		err = cmdAnswer(rest, stdout, stderr)
 	case "attach":
 		err = cmdAttach(rest, stdout, stderr)
 	case "force-release":

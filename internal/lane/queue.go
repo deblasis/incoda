@@ -503,6 +503,7 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 			// lockless Release removed meanwhile is not logged as reaped.
 			removed := os.Remove(path) == nil
 			_ = os.Remove(path + killExt)
+			_ = os.Remove(path + AnswerExt)
 			if removed {
 				q.Logf("queue=%s event=reaped pid=%d", q.Key, ord.pid)
 			}
@@ -878,6 +879,7 @@ func (e *Enrollment) Release(rc int) {
 	_ = e.lock.Close()
 	_ = os.Remove(e.path)
 	_ = os.Remove(e.path + killExt)
+	_ = os.Remove(e.path + AnswerExt)
 	if locked {
 		_ = e.q.registry.Unlock()
 	}

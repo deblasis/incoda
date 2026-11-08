@@ -8,5 +8,6 @@ package child
 // does nothing.
 const ConinjCommand = "__coninj"
 
-// InjectConsoleInput is a no-op off Windows.
-func InjectConsoleInput(args []string) {}
+// InjectConsoleInput is a no-op off Windows: nothing could be written, so
+// the verdict is the failure one.
+func InjectConsoleInput(args []string) int { return 1 }

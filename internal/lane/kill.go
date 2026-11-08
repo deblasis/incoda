@@ -147,10 +147,10 @@ func (q *Queue) WaitGone(pid int, wait, poll time.Duration) (bool, error) {
 // died before reading it or was reaped by someone else's scan.
 func (q *Queue) reapKillFiles(names []os.DirEntry) {
 	for _, de := range names {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), killExt) {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), killExt) && !strings.HasSuffix(de.Name(), AnswerExt) {
 			continue
 		}
-		ticket := strings.TrimSuffix(de.Name(), killExt)
+		ticket := strings.TrimSuffix(strings.TrimSuffix(de.Name(), killExt), AnswerExt)
 		if _, err := os.Stat(filepath.Join(q.Dir, ticket)); errors.Is(err, os.ErrNotExist) {
 			_ = os.Remove(filepath.Join(q.Dir, de.Name()))
 		}

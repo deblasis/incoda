@@ -1,4 +1,8 @@
-package osc7501
+// Package jobstatus follows a job's log and keeps the OSC 7501 record set
+// the job wrote to it. It lives apart from the protocol package so the
+// lane layer can name a Record without inheriting the log machinery: the
+// protocol stays a pure parser, and this package is the one that reads.
+package jobstatus
 
 import (
 	"bytes"
@@ -7,6 +11,7 @@ import (
 	"time"
 
 	"github.com/deblasis/incoda/internal/joblog"
+	"github.com/deblasis/incoda/internal/osc7501"
 )
 
 // firstLook is how much of a log a first Read looks at: a log is capped at
@@ -29,8 +34,8 @@ type LogStatus struct {
 	path   string
 	off    int64
 	mod    time.Time
-	sc     Scanner
-	set    Set
+	sc     osc7501.Scanner
+	set    osc7501.Set
 	tail   []byte
 	nread  int64
 	capped bool
@@ -46,13 +51,13 @@ func (l *LogStatus) BytesRead() int64 { return l.nread }
 // log, no reports, or a log that stopped recording (its last line is an
 // incoda marker, so the status before it is frozen and may be stale) gives
 // false.
-func (l *LogStatus) Read(path string) (Record, bool) {
+func (l *LogStatus) Read(path string) (osc7501.Record, bool) {
 	if path != l.path {
 		*l = LogStatus{path: path, nread: l.nread, whole: l.whole}
 	}
 	fi, err := os.Stat(path)
 	if err != nil || !fi.Mode().IsRegular() {
-		return Record{}, false
+		return osc7501.Record{}, false
 	}
 	size := fi.Size()
 	if size < l.off || size == l.off && !fi.ModTime().Equal(l.mod) && l.off > 0 {
@@ -71,7 +76,7 @@ func (l *LogStatus) Read(path string) (Record, bool) {
 	}
 	l.mod = fi.ModTime()
 	if l.capped {
-		return Record{}, false
+		return osc7501.Record{}, false
 	}
 	return l.set.Root()
 }
@@ -80,7 +85,7 @@ func (l *LogStatus) Read(path string) (Record, bool) {
 // read from its start (bounded by the per-job log cap), so a record
 // however deep under later output still speaks for the job. A viewer that
 // polls uses Read instead, where only appended bytes are read.
-func (l *LogStatus) ReadWhole(path string) (Record, bool) {
+func (l *LogStatus) ReadWhole(path string) (osc7501.Record, bool) {
 	l.whole = true
 	return l.Read(path)
 }
@@ -93,7 +98,7 @@ func (l *LogStatus) pull(path string, size int64) {
 	}
 	if size-from > look {
 		from = size - look
-		l.sc = Scanner{} // skipped bytes: whatever was half-read is gone
+		l.sc = osc7501.Scanner{} // skipped bytes: whatever was half-read is gone
 		l.tail = l.tail[:0]
 	}
 	f, err := os.Open(path)

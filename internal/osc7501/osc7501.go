@@ -56,13 +56,13 @@ var (
 // Record is one status report. Progress is nil when the program sent none
 // (or sent one the state does not carry).
 type Record struct {
-	ID       string
-	State    string
-	Kind     string
-	Progress *int
-	App      string
-	Title    string
-	Msg      string
+	ID       string `json:"id,omitempty"`
+	State    string `json:"state"`
+	Kind     string `json:"kind,omitempty"`
+	Progress *int   `json:"progress,omitempty"`
+	App      string `json:"app,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Msg      string `json:"msg,omitempty"`
 }
 
 // SupportReply is what a terminal answers to a query, ending in ST.
@@ -454,7 +454,12 @@ func cellWidth(s string) int { return runewidth.StringWidth(s) }
 
 // Head is "[state p%]": the part of the display line that is never cut.
 func (r Record) Head() string {
+	// A blocked row says what it is waiting for: the kind is the part a
+	// human needs before deciding whether to answer, so it leads.
 	head := r.State
+	if r.Kind != "" {
+		head += ":" + r.Kind
+	}
 	if r.Progress != nil {
 		head += " " + strconv.Itoa(*r.Progress) + "%"
 	}

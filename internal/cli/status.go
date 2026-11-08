@@ -10,6 +10,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/joblog"
+	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
@@ -45,12 +46,52 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		printBanner(stderr, rep.Banner)
 	}
 	if *asJSON {
+		// The record is part of the machine-readable report for the job's
+		// own owner alone - the same gate the plain line applies - so a
+		// script must speak as the owner (--owner / $INCODA_OWNER) to see
+		// it, exactly like a human viewer.
+		fillProgramStatus(rep, *owner)
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
 	renderReport(stdout, paletteFor(stdout, *noColor), rep, *owner, nil)
 	return nil
+}
+
+// fillProgramStatus reads each pty participant's job log once and attaches
+// its OSC 7501 root record to the JSON entry, behind the owner gate. One
+// log, one read: the JSON report is a snapshot, not a follower.
+func fillProgramStatus(rep *Report, owner string) {
+	for qi := range rep.Queues {
+		q := &rep.Queues[qi]
+		if !q.Exists {
+			continue
+		}
+		for i := range q.Holders {
+			fillEntryProgramStatus(&q.Holders[i], q.Dir, owner)
+		}
+		for i := range q.Waiting {
+			fillEntryProgramStatus(&q.Waiting[i], q.Dir, owner)
+		}
+	}
+}
+
+func fillEntryProgramStatus(e *lane.Entry, laneDir, owner string) {
+	if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, owner) != nil {
+		e.ProgramStatus = nil
+		return
+	}
+	path, err := joblog.Path(laneDir, e.File)
+	if err != nil {
+		e.ProgramStatus = nil
+		return
+	}
+	var ls jobstatus.LogStatus
+	e.ProgramStatus = nil
+	if r, ok := ls.ReadWhole(path); ok {
+		e.ProgramStatus = &r
+	}
 }
 
 // paletteFor resolves the palette for an output stream. --no-color wins over
@@ -139,19 +180,19 @@ func ptyTag(e lane.Entry) string {
 // only the bytes appended since its last look, the same way the TUI does.
 // A one-shot render passes nil instead and reads the whole log once.
 type statusFollowers struct {
-	logs map[string]*osc7501.LogStatus
+	logs map[string]*jobstatus.LogStatus
 }
 
 func newStatusFollowers() *statusFollowers {
-	return &statusFollowers{logs: map[string]*osc7501.LogStatus{}}
+	return &statusFollowers{logs: map[string]*jobstatus.LogStatus{}}
 }
 
 // follower returns the follower for one participant's log, following it.
-func (f *statusFollowers) follower(laneDir, file string) *osc7501.LogStatus {
+func (f *statusFollowers) follower(laneDir, file string) *jobstatus.LogStatus {
 	k := laneDir + "\x00" + file
 	ls := f.logs[k]
 	if ls == nil {
-		ls = &osc7501.LogStatus{}
+		ls = &jobstatus.LogStatus{}
 		f.logs[k] = ls
 	}
 	return ls
@@ -201,7 +242,7 @@ func programStatus(p colorize.Palette, laneDir string, e lane.Entry, owner strin
 	if follow != nil {
 		r, ok = follow.follower(laneDir, e.File).Read(path)
 	} else {
-		var ls osc7501.LogStatus
+		var ls jobstatus.LogStatus
 		r, ok = ls.ReadWhole(path)
 	}
 	if !ok {

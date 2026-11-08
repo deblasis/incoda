@@ -4,6 +4,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/deblasis/incoda/internal/joblog"
+	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
@@ -45,7 +46,7 @@ func (m *Model) refreshStatus(rep *report.Report) {
 					seen[k] = true
 					ls := m.logs[k]
 					if ls == nil {
-						ls = &osc7501.LogStatus{}
+						ls = &jobstatus.LogStatus{}
 						m.logs[k] = ls
 					}
 					if r, ok := ls.Read(path); ok {

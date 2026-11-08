@@ -149,7 +149,20 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// this serialWriter guards is the Ctrl-C path, and a reply written to
 	// it would either be swallowed as VT input or echoed by a cooked-mode
 	// reader into the job's own output.
-	replies := newReplier(consoleInjector{pid: sp.PID})
+	// One injector per console, shared by the replier and the answer
+	// door: each __coninj helper infers its verdict from the console's
+	// shared input buffer and flushes what it finds unread, so two
+	// concurrent helpers could flush each other's bytes and read the
+	// sibling's drain as their own consumption - one would report a
+	// delivered verdict for text the job never saw. The lock makes one
+	// helper at a time the whole story of that buffer.
+	inj := &lockedInjector{w: consoleInjector{pid: sp.PID}}
+	replies := newReplier(inj)
+	if opt.PTY.Answer != nil {
+		// Armed only now that the job's pid exists, stopped before the
+		// console goes away so no answer can land on a reused pid.
+		opt.PTY.Answer.setInjector(inj)
+	}
 	var tee io.Writer = io.Discard
 	if opt.PTY.Tee != nil {
 		tee = opt.PTY.Tee
@@ -229,6 +242,9 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// moving gets the whole grace window, and the cut says so in-band
 	// because those bytes die with it, in every sink at once.
 	replies.stop() // no reply may race the input handle closing below
+	if opt.PTY.Answer != nil {
+		opt.PTY.Answer.stop() // and no answer may outlive the console it addresses
+	}
 	go p.CloseConsole()
 	input.Close()  // the pump stops taking writes; its in-flight one is cancelled below
 	p.CloseInput() // the cancel unblocks a reply write parked on an unread input
