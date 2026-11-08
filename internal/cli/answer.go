@@ -22,8 +22,10 @@ const answerTextMax = 4096
 // blocked over OSC 7501. The gates run in the run process, against the
 // live ticket and the live record, because that is where the truth is: the
 // command's own checks are the fast refusals, and the run's are the real
-// ones. The ack is the request file's fate: removed once the reply was
-// typed and read, rewritten with a reason when the run refused.
+// ones. The ack carries the request's own id: a verdict is read from the
+// door file while it still exists, and from the lane's log - which
+// survives the file - once it does not, so no answer is ever reported
+// delivered on the strength of a file that something else removed.
 func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 	start := time.Now()
 	fs := newFlagSet("answer", stderr)
@@ -70,44 +72,136 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 		// same, one poll later.
 		return usagef("attach needs --owner or $INCODA_OWNER: answer is limited to the job's own owner")
 	}
-	entry, err := q.RequestAnswer(*pid, lane.AnswerRequest{By: me, ByPID: os.Getpid(), Text: *text})
+	req := lane.AnswerRequest{ID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), By: me, ByPID: os.Getpid(), Text: *text}
+	entry, err := q.RequestAnswer(*pid, req)
 	if err != nil {
 		return usagef("%v", err)
 	}
-	// The command's own gate mirrors the run's: refuse here and take the
+	// The command's own gates mirror the run's: refuse here and take the
 	// request back, so the run never handles a request it would only
 	// refuse. What gets past both gates is decided where the ticket lives.
+	takeBack := func() { _ = q.WithdrawAnswer(*pid, req.ID) }
+	if !entry.Ticket.PTY {
+		takeBack()
+		return usagef("job pid %d on queue %q is not a pty job: it reports no status, and the answer door needs a console to type into", *pid, key)
+	}
 	if err := validateEntryForAttach(key, &entry); err != nil {
-		_ = q.WithdrawAnswer(*pid)
+		takeBack()
 		return err
 	}
 	if err := lane.MayAttach(entry.Ticket, me); err != nil {
-		_ = q.WithdrawAnswer(*pid)
+		takeBack()
 		return usagef("%v", err)
 	}
 	fmt.Fprintf(stdout, "answer: pid %d on queue %q: %s\n", *pid, key,
 		textsafe.Escape(entry.Ticket.CommandString()))
 
 	answerPath := filepath.Join(q.Dir, entry.File+lane.AnswerExt)
+	logPath := lane.LogPath(q.Dir)
 	deadline := time.Now().Add(*wait)
+	// A verdict carries an id so only THIS answer's outcome can end this
+	// command, and the reason is escaped: the door file is writable by any
+	// local process, and its strings are data, never terminal chrome.
+	verdict, reason := pollAnswerVerdict(answerPath, logPath, req.ID, deadline)
+	switch verdict {
+	case "delivered":
+		fmt.Fprintf(stdout, "answer: delivered\n")
+		return nil
+	case "refused":
+		return usagef("answer refused: %s", textsafe.Escape(reason))
+	default:
+		return exitWith(ExitAnswerPending,
+			"answer pending: pid %d has not taken the reply after %s: it may not be reporting blocked, or its run is wedged. "+
+				"The request stays addressed to the ticket until the run acts on it", *pid, *wait)
+	}
+}
+
+// pollAnswerVerdict waits for THIS request's verdict: in the door file
+// while the file still exists, and in the lane's log once it is gone - the
+// log survives the file, so a verdict that landed an instant before the
+// ticket was swept is still read, and a file that vanished without any
+// verdict of ours is never mistaken for one.
+func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verdict, reason string) {
 	for {
-		b, err := os.ReadFile(answerPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Fprintf(stdout, "answer: delivered\n")
-				return nil
+		if b, err := os.ReadFile(answerPath); err == nil && len(b) <= lane.AnswerFileMax {
+			var req lane.AnswerRequest
+			if json.Unmarshal(b, &req) == nil {
+				if req.ID == id && req.Verdict == "delivered" {
+					return "delivered", ""
+				}
+				if req.ID == id && req.Verdict == "refused" {
+					return "refused", req.Refused
+				}
+				// A different request owns the file now: ours was
+				// superseded by a newer answer.
+				if req.ID != id {
+					return "refused", "a newer answer superseded this one"
+				}
 			}
-			return exitWith(ExitState, "cannot read the answer verdict: %v", err)
 		}
-		var req lane.AnswerRequest
-		if jsonErr := json.Unmarshal(b, &req); jsonErr == nil && req.Refused != "" {
-			return usagef("answer refused: %s", req.Refused)
+		if tail, err := readLogTail(logPath, 64<<10); err == nil {
+			for _, line := range strings.Split(tail, "\n") {
+				if !lineCarriesID(line, id) {
+					continue
+				}
+				switch {
+				case strings.Contains(line, "event=answer-delivered"):
+					return "delivered", ""
+				case strings.Contains(line, "event=answer-refused"):
+					return "refused", reasonFromLogLine(line)
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			return exitWith(ExitAnswerPending,
-				"answer pending: pid %d has not taken the reply after %s: it may not be reporting blocked, or its run is wedged. "+
-					"The request stays addressed to the ticket until the run acts on it", *pid, *wait)
+			return "", ""
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// reasonFromLogLine pulls the logged refusal reason out of a lane-log
+// line, best effort; the log line is the durable form of the verdict.
+func reasonFromLogLine(line string) string {
+	const mark = "reason="
+	i := strings.Index(line, mark)
+	if i < 0 {
+		return "the run refused the answer"
+	}
+	return line[i+len(mark):]
+}
+
+// lineCarriesID matches " id=<id>" as a whole field: an id that is a
+// prefix of another request's id must not claim that request's verdict.
+func lineCarriesID(line, id string) bool {
+	i := strings.Index(line, " id="+id)
+	if i < 0 {
+		return false
+	}
+	rest := i + len(" id=") + len(id)
+	return rest == len(line) || line[rest] == ' '
+}
+
+// readLogTail reads the last n bytes of a log file.
+func readLogTail(path string, n int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	var off int64
+	if fi.Size() > n {
+		off = fi.Size() - n
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return "", err
+	}
+	b := make([]byte, fi.Size()-off)
+	if _, err := f.Read(b); err != nil && len(b) == 0 {
+		return "", err
+	}
+	return string(b), nil
 }

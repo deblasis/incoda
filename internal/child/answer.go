@@ -12,6 +12,22 @@ import (
 // bound to the job's pid); everything else may hold the zero value, whose
 // Deliver refuses by name - a plain-pipe run has no console to type into.
 //
+
+// lockedInjector serializes every __coninj helper on one console: the
+// helper's verdict watches the console's shared input buffer and its
+// finish flushes whatever is unread, so two helpers at once could destroy
+// each other's payload and fabricate a read. Replies and answers share it.
+type lockedInjector struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedInjector) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(b)
+}
+
 // Deliveries serialize inside the door: one helper attaches, suppresses
 // echo, writes, waits and flushes at a time, so two answers can never
 // interleave their console-mode choreography on one console. The replier's

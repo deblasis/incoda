@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deblasis/incoda/internal/child"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
 )
@@ -25,12 +27,8 @@ func writeRegistry(t *testing.T, dir string) {
 	}
 }
 
-// The answer command is gated before anything reaches the run: an
-// answerer who is not the job's owner is refused with attach's own words
-// and the request is withdrawn, so the run never sees a request it would
-// only refuse. A missing identity, a job nobody owns, an unknown pid and a
-// non-pty job are each refused by name.
-func TestAnswerRefusesByGateBeforeTheRunSeesAnything(t *testing.T) {
+func answerFixture(t *testing.T) (*lane.Queue, *lane.Enrollment, string) {
+	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("INCODA_DIR", dir)
 	t.Setenv("INCODA_OWNER", "")
@@ -38,20 +36,31 @@ func TestAnswerRefusesByGateBeforeTheRunSeesAnything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.Close()
+	t.Cleanup(func() { q.Close() })
 	writeRegistry(t, dir)
 	en, err := q.Enroll(lane.Ticket{Command: []string{"zig", "build"}, PTY: true, Owner: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return q, en, dir
+}
+
+// The answer command is gated before anything reaches the run: an
+// answerer who is not the job's owner is refused with attach's own words
+// and the request is withdrawn, so the run never sees a request it would
+// only refuse. A missing identity, an unknown pid and a job with no
+// console are each refused by name.
+func TestAnswerRefusesByGateBeforeTheRunSeesAnything(t *testing.T) {
+	_, en, _ := answerFixture(t)
+	pid := itoa(en.Ticket().PID)
 
 	cases := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"not the owner", []string{"--queue", "unit", "--pid", itoa(en.Ticket().PID), "--text", "y", "--owner", "mallory"}, "attach refused"},
-		{"no identity", []string{"--queue", "unit", "--pid", itoa(en.Ticket().PID), "--text", "y"}, "attach needs --owner"},
+		{"not the owner", []string{"--queue", "unit", "--pid", pid, "--text", "y", "--owner", "mallory"}, "attach refused"},
+		{"no identity", []string{"--queue", "unit", "--pid", pid, "--text", "y"}, "attach needs --owner"},
 		{"unknown pid", []string{"--queue", "unit", "--pid", "999999", "--text", "y", "--owner", "alice"}, "no live participant"},
 	}
 	for _, c := range cases {
@@ -71,10 +80,10 @@ func TestAnswerRefusesByGateBeforeTheRunSeesAnything(t *testing.T) {
 	}
 }
 
-// A delivered answer is the file's deletion, and the command reports
-// success only once the holder has taken it; a holder that stays silent
-// past --wait is reported pending, never success.
-func TestAnswerWaitsForTheHoldersAck(t *testing.T) {
+// A job with no pseudo-console can never receive typed input, and the
+// command says so by name instead of letting the request ride to a run
+// that would only delete it on release.
+func TestAnswerRefusesNonPtyJobsByName(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("INCODA_DIR", dir)
 	t.Setenv("INCODA_OWNER", "")
@@ -84,22 +93,88 @@ func TestAnswerWaitsForTheHoldersAck(t *testing.T) {
 	}
 	defer q.Close()
 	writeRegistry(t, dir)
-	en, err := q.Enroll(lane.Ticket{Command: []string{"zig", "build"}, PTY: true, Owner: "alice"})
+	en, err := q.Enroll(lane.Ticket{Command: []string{"zig", "build"}, Owner: "alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var out, errb bytes.Buffer
+	err = cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
+		"--text", "y", "--owner", "alice", "--wait", "300ms"}, &out, &errb)
+	if err == nil || !strings.Contains(err.Error(), "not a pty job") {
+		t.Fatalf("want the named pty refusal, got %v (%s)", err, errb.String())
+	}
+	if _, ok := en.AnswerRequested(); ok {
+		t.Fatal("the refused request must be withdrawn")
+	}
+}
 
-	// The holder acks while the command polls.
+// The completing CR is the CLI's default and --raw is its opt-out; the
+// request the holder receives is the contract.
+func TestAnswerTextCarriesTheCompletingCR(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"cr by default", nil, "yes\r"},
+		{"raw sends exactly", []string{"--raw"}, "yes"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, en, _ := answerFixture(t)
+			acked := make(chan lane.AnswerRequest, 1)
+			go func() {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if req, ok := en.AnswerRequested(); ok {
+						acked <- req
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}()
+			args := append([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
+				"--text", "yes", "--owner", "alice", "--wait", "4s"}, c.args...)
+			var out, errb bytes.Buffer
+			// The command ends pending - the verdict never comes - but the
+			// request on disk is what this test reads.
+			_ = cmdAnswer(args, &out, &errb)
+			select {
+			case req := <-acked:
+				if req.Text != c.want {
+					t.Fatalf("request text = %q, want %q", req.Text, c.want)
+				}
+			default:
+				t.Fatal("no request was ever written")
+			}
+			_ = en.AnswerDelivered(req2id(t, en))
+		})
+	}
+}
+
+func req2id(t *testing.T, en *lane.Enrollment) string {
+	t.Helper()
+	req, ok := en.AnswerRequested()
+	if !ok {
+		t.Fatal("no request to clean up")
+	}
+	return req.ID
+}
+
+// A delivered verdict ends the command with success, but only the one
+// carrying THIS request's id; a holder that stays silent past --wait is
+// reported pending, never success.
+func TestAnswerWaitsForTheHoldersAck(t *testing.T) {
+	_, en, _ := answerFixture(t)
 	acked := make(chan struct{})
 	go func() {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, ok := en.AnswerRequested(); ok {
-				_ = en.AnswerDelivered()
+			if req, ok := en.AnswerRequested(); ok {
+				_ = en.AnswerDelivered(req.ID)
 				close(acked)
 				return
 			}
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 	var out, errb bytes.Buffer
@@ -113,9 +188,8 @@ func TestAnswerWaitsForTheHoldersAck(t *testing.T) {
 		t.Fatal("success without the holder's ack")
 	}
 
-	// Nobody acks this one: the command must end pending, with the
-	// request still addressed to the ticket.
-	err = cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
+	// Nobody acks this one: the command must end pending.
+	err := cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
 		"--text", "yes", "--owner", "alice", "--wait", "300ms"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("an unacknowledged answer must not report success")
@@ -123,59 +197,115 @@ func TestAnswerWaitsForTheHoldersAck(t *testing.T) {
 	if !strings.Contains(err.Error(), "pending") {
 		t.Fatalf("want a pending verdict, got %v", err)
 	}
-	if _, ok := en.AnswerRequested(); !ok {
-		t.Fatal("a pending answer must stay addressed to the ticket")
+	if req, ok := en.AnswerRequested(); !ok || req.Verdict != "" {
+		t.Fatal("a pending answer must stay addressed to the ticket, un-answered")
 	}
-	_ = en.AnswerDelivered()
+	_ = en.AnswerDelivered(req2id(t, en))
 }
 
-// A holder that refuses rewrites the door file with its reason, and the
-// answerer reads that verdict back: the command fails with the holder's
-// own words, not a timeout.
+// A refusal comes back with the holder's own words.
 func TestAnswerReportsTheHoldersRefusal(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("INCODA_DIR", dir)
-	t.Setenv("INCODA_OWNER", "")
-	q, err := lane.Open(dir, "unit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	writeRegistry(t, dir)
-	en, err := q.Enroll(lane.Ticket{Command: []string{"zig", "build"}, PTY: true, Owner: "alice"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := make(chan struct{})
+	_, en, _ := answerFixture(t)
 	go func() {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			if req, ok := en.AnswerRequested(); ok {
-				if req.Refused == "" {
-					_ = en.AnswerRefused("job pid %d is not reporting blocked")
-					close(refused)
-					return
-				}
+				_ = en.AnswerRefused(req.ID, "job pid 1 is not reporting blocked")
+				return
 			}
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 	var out, errb bytes.Buffer
-	err = cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
+	err := cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
 		"--text", "yes", "--owner", "alice", "--wait", "4s"}, &out, &errb)
 	if err == nil || !strings.Contains(err.Error(), "not reporting blocked") {
 		t.Fatalf("want the holder's refusal, got %v (%s)", err, errb.String())
 	}
-	select {
-	case <-refused:
-	default:
-		t.Fatal("the verdict did not come from the refusal rewrite")
-	}
 }
+
+// A request superseded by a newer answer is reported as superseded, never
+// as delivered: the newer request owns the door file now.
+func TestAnswerReportsSupersededRequests(t *testing.T) {
+	q, en, _ := answerFixture(t)
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, ok := en.AnswerRequested(); ok {
+				// A second answerer replaces the request mid-flight.
+				if _, err := q.RequestAnswer(en.Ticket().PID, lane.AnswerRequest{ID: "later", By: "alice", Text: "mine"}); err == nil {
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	var out, errb bytes.Buffer
+	err := cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
+		"--text", "yes", "--owner", "alice", "--wait", "4s"}, &out, &errb)
+	if err == nil || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("want the superseded verdict, got %v (%s)", err, errb.String())
+	}
+	_ = en.AnswerDelivered("later")
+}
+
+// A closed console is a refusal, not a delivered-with-audit: whether the
+// dying job read the answer cannot be known, and exit 0 must never be
+// claimed for an unverifiable delivery.
+func TestDeliverAnswerRefusesOnConsoleClose(t *testing.T) {
+	_, en, dir := answerFixture(t)
+	laneDir := filepath.Join(dir, "lanes", "unit")
+	jobs := filepath.Join(laneDir, "jobs")
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msg := base64.StdEncoding.EncodeToString([]byte("proceed?"))
+	log := "\x1b]7501;state=blocked:kind=question:id=ask:msg=" + msg + "\x07"
+	if err := os.WriteFile(filepath.Join(jobs, stripTicket(en.Name())+".out"), []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := laneQueue(t, dir)
+	pt := &lanePart{key: "unit", q: q, en: en}
+	stub := &stubDoor{err: child.ErrConsoleClosedAnswer}
+	req := lane.AnswerRequest{ID: "cc", By: "alice", Text: "yes\r"}
+	if _, err := q.RequestAnswer(en.Ticket().PID, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := deliverAnswer(pt, req, stub); !errors.Is(err, child.ErrConsoleClosedAnswer) {
+		t.Fatalf("a closed console must refuse, got %v", err)
+	}
+	_ = en.AnswerRefused("cc", child.ErrConsoleClosedAnswer.Error())
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func stripTicket(name string) string {
+	return strings.TrimSuffix(name, ".ticket")
+}
+
+func laneQueue(t *testing.T, dir string) *lane.Queue {
+	t.Helper()
+	q, err := lane.OpenIn(lane.LanesDir(dir), "unit", lane.Existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	return q
+}
+
+type stubDoor struct{ err error }
+
+func (s *stubDoor) Deliver(string) error { return s.err }
 
 // fillProgramStatus is the --json half of the owner gate: the record
 // reaches the report for the owner of a pty job whose log carries one,
-// and nobody else gets so much as an absent field rendered.
+// a pipe job and a broken payload never get one, and nobody else gets so
+// much as an absent field rendered.
 func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 	laneDir := t.TempDir()
 	jobs := filepath.Join(laneDir, "jobs")
@@ -192,6 +322,8 @@ func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 		Key: "builds", Exists: true, Dir: laneDir,
 		Holders: []lane.Entry{
 			{Holding: true, File: withLog, Ticket: lane.Ticket{PID: 111, PTY: true, Owner: "alice", Command: []string{"just", "merge"}}},
+			{Holding: true, File: "01794028541589289102-161900.ticket", Ticket: lane.Ticket{PID: 333, Owner: "alice", Command: []string{"pipe", "job"}}},
+			{Holding: true, File: "01794028541589289103-162000.ticket", PayloadError: "parse: boom", Ticket: lane.Ticket{PID: 444, PTY: true, Owner: "alice"}},
 		},
 		Waiting: []lane.Entry{
 			{File: "01794028541589289101-161700.ticket", Ticket: lane.Ticket{PID: 222, PTY: true, Owner: "bob", Command: []string{"zig", "build"}}},
@@ -203,12 +335,16 @@ func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 	if h.ProgramStatus == nil || h.ProgramStatus.State != "blocked" || h.ProgramStatus.Kind != "question" || h.ProgramStatus.Msg != "ship it?" {
 		t.Fatalf("the owner's record must be filled, got %+v", h.ProgramStatus)
 	}
+	if pipe := rep.Queues[0].Holders[1]; pipe.ProgramStatus != nil {
+		t.Fatalf("a pipe job must carry no record, got %+v", pipe.ProgramStatus)
+	}
+	if broken := rep.Queues[0].Holders[2]; broken.ProgramStatus != nil {
+		t.Fatalf("a broken payload must carry no record, got %+v", broken.ProgramStatus)
+	}
 	if w := rep.Queues[0].Waiting[0]; w.ProgramStatus != nil {
 		t.Fatalf("another owner's participant must carry no record, got %+v", w.ProgramStatus)
 	}
 
-	// A non-owner caller sees nothing, a pipe job sees nothing, and the
-	// schema field is additive: the report still says schema 1.
 	fillProgramStatus(rep, "mallory")
 	if h := rep.Queues[0].Holders[0]; h.ProgramStatus != nil {
 		t.Fatalf("a non-owner must get no record, got %+v", h.ProgramStatus)

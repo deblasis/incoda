@@ -124,7 +124,7 @@ func TestAnswerClosesTheLoopOnABlockedJob(t *testing.T) {
 	out, errb, code := ptyRunIncoda(t, env, "answer",
 		"--queue", "pty-ans", "--pid", itoa(pid), "--text", "yes", "--owner", "alice", "--wait", "30s")
 	if code != 0 {
-		t.Fatalf("answer exited %d:\n%s\n%s", code, out, errb)
+		t.Fatalf("answer exited %d:\n%s\n%s\nrun so far:\n%s\n%s", code, out, errb, runOut.String(), runErr.String())
 	}
 	done := make(chan error)
 	go func() { done <- run.Wait() }()
@@ -170,4 +170,85 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(d)
+}
+
+// The run's own gates, not the CLI's, are the ones that make the answer
+// channel safe to leave open: a job that never reported blocked cannot be
+// typed into, and a job with no console at all is refused by name rather
+// than left to swallow the request silently at release.
+func TestAnswerRefusedWhenTheJobIsNotBlocked(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH for the answer fixture")
+	}
+	bin, _ := ptyBinaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, bin, state, "pty-ans2")
+	script := filepath.Join(t.TempDir(), "busy.py")
+	src := "\nimport sys, time\nsys.stdout.write(\"\\x1b]7501;state=working:id=e2e/busy:progress=10\\x07\"); sys.stdout.flush()\ntime.sleep(30)\n"
+	if err := os.WriteFile(script, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := ownerEnv(state, "alice")
+	run := exec.Command(bin, "run", "--queue", "pty-ans2", "--owner", "alice",
+		"--reason", "test", "--pty", "--", py, script)
+	run.Env = env
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
+	pid := waitForHolder(t, env, "pty-ans2")
+	_, errb, code := ptyRunIncoda(t, env, "answer", "--queue", "pty-ans2",
+		"--pid", itoa(pid), "--text", "yes", "--owner", "alice", "--wait", "15s")
+	if code == 0 || !strings.Contains(errb, "not reporting blocked") {
+		t.Fatalf("a working job must be refused by name, got exit %d:\n%s", code, errb)
+	}
+}
+
+func TestAnswerRefusedForNonPtyJobs(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH for the answer fixture")
+	}
+	bin, _ := ptyBinaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, bin, state, "pty-ans3")
+	script := filepath.Join(t.TempDir(), "sleep.py")
+	if err := os.WriteFile(script, []byte("import time\ntime.sleep(30)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := ownerEnv(state, "alice")
+	run := exec.Command(bin, "run", "--queue", "pty-ans3", "--owner", "alice",
+		"--reason", "test", "--", py, script)
+	run.Env = env
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
+	pid := waitForHolder(t, env, "pty-ans3")
+	_, errb, code := ptyRunIncoda(t, env, "answer", "--queue", "pty-ans3",
+		"--pid", itoa(pid), "--text", "yes", "--owner", "alice", "--wait", "15s")
+	if code == 0 || !strings.Contains(errb, "not a pty job") {
+		t.Fatalf("a pipe job must be refused by name, got exit %d:\n%s", code, errb)
+	}
+}
+
+// waitForHolder polls status --json for the queue's holder pid.
+func waitForHolder(t *testing.T, env []string, key string) int {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+		var rep statusJSONShape
+		if json.Unmarshal([]byte(out), &rep) == nil {
+			for _, q := range rep.Queues {
+				for _, h := range q.Holders {
+					return h.Tick.PID
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("the job never appeared")
+	return 0
 }

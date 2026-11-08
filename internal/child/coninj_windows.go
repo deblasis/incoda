@@ -188,7 +188,19 @@ func InjectConsoleInput(args []string) int {
 	var last, n uint32
 	k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&n)))
 	last = n
+	pollGap := 100 * time.Microsecond
 	for n > 0 && time.Now().Before(wait) {
+		// Any consumption is the verdict: leave now. A cooked line read
+		// can leave the completing key's up-event behind, so waiting for
+		// emptiness would park this helper on a straggler for the whole
+		// settle window - and a job that finishes on the answer kills its
+		// console milliseconds after reading it, which is a race the
+		// helper loses whenever it lingers. Only a count that never moved
+		// means nobody was listening, and that is what the settle window
+		// is for.
+		if n < written {
+			break
+		}
 		if n != last {
 			last = n
 			settledAt = time.Now()
@@ -196,11 +208,14 @@ func InjectConsoleInput(args []string) int {
 		if time.Since(settledAt) > coninjSettle {
 			break
 		}
-		time.Sleep(2 * time.Millisecond)
-		k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&n)))
-		if n == 0 {
-			break
+		// A reader blocked in its read consumes the events within
+		// microseconds, so the first polls are micro-polls and the
+		// cadence backs off to 2ms once the read is clearly not imminent.
+		time.Sleep(pollGap)
+		if pollGap < 2*time.Millisecond {
+			pollGap *= 2
 		}
+		k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&n)))
 	}
 	consumed := n == 0 || n < written
 	if n > 0 {

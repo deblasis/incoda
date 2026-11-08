@@ -149,13 +149,19 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// this serialWriter guards is the Ctrl-C path, and a reply written to
 	// it would either be swallowed as VT input or echoed by a cooked-mode
 	// reader into the job's own output.
-	replies := newReplier(consoleInjector{pid: sp.PID})
+	// One injector per console, shared by the replier and the answer
+	// door: each __coninj helper infers its verdict from the console's
+	// shared input buffer and flushes what it finds unread, so two
+	// concurrent helpers could flush each other's bytes and read the
+	// sibling's drain as their own consumption - one would report a
+	// delivered verdict for text the job never saw. The lock makes one
+	// helper at a time the whole story of that buffer.
+	inj := &lockedInjector{w: consoleInjector{pid: sp.PID}}
+	replies := newReplier(inj)
 	if opt.PTY.Answer != nil {
-		// The owner's typed replies ride the same injector the support
-		// replies do, under the answer door's own serialization; armed
-		// only now that the job's pid exists, stopped before the console
-		// goes away so no answer can land on a reused pid.
-		opt.PTY.Answer.setInjector(consoleInjector{pid: sp.PID})
+		// Armed only now that the job's pid exists, stopped before the
+		// console goes away so no answer can land on a reused pid.
+		opt.PTY.Answer.setInjector(inj)
 	}
 	var tee io.Writer = io.Discard
 	if opt.PTY.Tee != nil {
