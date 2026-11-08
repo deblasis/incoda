@@ -253,3 +253,41 @@ func TestLine(t *testing.T) {
 		}
 	}
 }
+
+func TestBadge(t *testing.T) {
+	cases := []struct {
+		r    Record
+		want string
+	}{
+		{Record{State: "working", Progress: new(40)}, "🔄 40%"},
+		{Record{State: "working"}, "🔄"},
+		{Record{State: "done"}, "✅"},
+		{Record{State: "error"}, "❌"},
+		{Record{State: "blocked", Kind: "question"}, "🛑"},
+		{Record{State: "idle"}, "💤"},
+		{Record{State: "surprise"}, ""},
+	}
+	for _, c := range cases {
+		if got := c.r.Badge(); got != c.want {
+			t.Errorf("Badge(%+v) = %q, want %q", c.r, got, c.want)
+		}
+	}
+}
+
+func TestText(t *testing.T) {
+	cases := []struct {
+		r    Record
+		max  int
+		want string
+	}{
+		{Record{Msg: "compiling"}, 40, "compiling"},
+		{Record{State: "done"}, 40, ""},
+		{Record{Msg: "abcdefghij"}, 5, "abcd…"},
+		{Record{Msg: "a\x1bb"}, 40, `a\x1bb`},
+	}
+	for _, c := range cases {
+		if got := c.r.Text(c.max); got != c.want {
+			t.Errorf("Text(%+v,%d) = %q, want %q", c.r, c.max, got, c.want)
+		}
+	}
+}

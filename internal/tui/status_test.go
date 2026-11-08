@@ -41,11 +41,25 @@ func TestWatchShowsProgramStatus(t *testing.T) {
 	m.screen = screenQueue
 	mm, _ := m.Update(reportMsg{rep: rep})
 	v := view(mm.(Model))
-	if !strings.Contains(v, "[working 55%] linking") {
-		t.Fatalf("holder with records must show its status, got:\n%s", v)
+	if !strings.Contains(v, "🖥️ 🔄 55%") {
+		t.Fatalf("holder with records must badge the mark with its progress, got:\n%s", v)
 	}
-	if strings.Count(v, "[working") != 1 {
+	if !strings.Contains(v, "linking") {
+		t.Fatalf("the record's msg must still end the line, got:\n%s", v)
+	}
+	if strings.Count(v, "🔄") != 1 {
 		t.Fatalf("the waiter has no log and must show nothing, got:\n%s", v)
+	}
+}
+
+// The overview's one-line summary badges its marks the same way, so the
+// "and what is it doing" reads without drilling in.
+func TestWatchSummaryBadgesPtyMarks(t *testing.T) {
+	m := statusModel(t, "linking")
+	m.screen = screenOverview
+	v := view(m)
+	if !strings.Contains(v, "🖥️ 🔄 55% alice") {
+		t.Fatalf("the summary must badge the holder's mark with its progress, got:\n%s", v)
 	}
 }
 
@@ -94,8 +108,8 @@ func TestViewDoesNotReadTheLog(t *testing.T) {
 }
 
 // At a narrow terminal the line never exceeds the width (a wrapped line
-// shifts every row below it and breaks click hit-testing) and the status
-// head is not cut: the msg gives way first, then the whole status.
+// shifts every row below it and breaks click hit-testing): the msg gives
+// way first, then the whole status; the badge beside the mark stays.
 func TestWatchStatusFitsNarrowWidths(t *testing.T) {
 	for _, w := range []int{40, 44, 50, 60, 80} {
 		m := statusModel(t, "compiling a long thing")

@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
@@ -269,7 +270,15 @@ func (m Model) renderQueueSummary(q *report.Queue, w int) string {
 			who = "pid " + fmt.Sprint(e.Ticket.PID)
 		}
 		if e.Ticket.PTY {
-			who = "🖥️ " + who
+			mark := "🖥️"
+			// the state glyph rides beside the mark here too, so the
+			// summary answers "and what is it doing" at the same glance
+			if r, ok := m.status[statusKey(q.Key, e.File)]; ok {
+				if b := r.Badge(); b != "" {
+					mark += " " + b
+				}
+			}
+			who = mark + " " + who
 		}
 		parts = append(parts, fmt.Sprintf("%s %s", st.bold.Render(who), st.dim.Render(trunc(e.Ticket.CommandString(), 40))))
 	}
@@ -384,9 +393,41 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	if !p.holding {
 		when = "waited " + fmtSeconds(p.entry.WaitingSeconds)
 	}
-	first := fmt.Sprintf("  pid %-7d %-16s", t.PID, when)
+	idpart := fmt.Sprintf("  pid %-7d %-16s", t.PID, when)
+	rec, hasRec := m.programStatus(p, w)
+	// The job's own status reads at the same glance as the mark: its
+	// state is a glyph beside the mark, progress beside the glyph.
+	mark := ""
 	if t.PTY {
-		first += " 🖥️"
+		mark = "🖥️"
+		if hasRec {
+			if b := rec.Badge(); b != "" {
+				mark += " " + b
+			}
+		}
+	}
+	// The record's msg claims the end of the line; the identity part gives
+	// up the room for it, not the other way round - and the mark with its
+	// badge is never the part that gives, so the cut lands in the owner,
+	// reason or when, never in the glyphs. When even that would not fit,
+	// the msg is the one that goes.
+	status := ""
+	if hasRec {
+		status = statusMsg(rec, w)
+	}
+	floor := identityFloor + lipgloss.Width(mark) + 1
+	budget := w
+	if status != "" {
+		budget = max(w-lipgloss.Width(status)-2, floor)
+		if budget == floor {
+			status = ""
+		}
+	}
+	var first string
+	if mark == "" {
+		first = trunc(idpart, budget)
+	} else {
+		first = trunc(idpart, budget-lipgloss.Width(mark)-1) + " " + mark
 	}
 	if t.Exclusive {
 		first += " EXCLUSIVE"
@@ -397,15 +438,7 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	if t.Reason != "" {
 		first += "  " + t.Reason
 	}
-	// The job's own status, from the tail of its log, claims the end of the
-	// line; the identity part gives up the room for it, not the other way
-	// round. No record, no change.
-	status, statusState := m.programStatus(p, w)
-	if status != "" {
-		first = trunc(first, max(w-lipgloss.Width(status)-2, identityFloor))
-	} else {
-		first = trunc(first, w)
-	}
+	first = trunc(first, budget)
 	if selected {
 		if status != "" {
 			first += "  " + status
@@ -416,8 +449,8 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 			first = strings.Replace(first, "EXCLUSIVE", st.badgeExcl.Render("EXCLUSIVE"), 1)
 		}
 		first = strings.Replace(first, fmt.Sprintf("pid %-7d", t.PID), st.bold.Render(fmt.Sprintf("pid %-7d", t.PID)), 1)
-		if status != "" {
-			first += "  " + m.statusStyle(statusState).Render(status)
+		if status != "" && hasRec {
+			first += "  " + m.statusStyle(rec.State).Render(status)
 		}
 	}
 	second := st.dim.Render("    " + trunc(t.CommandString(), w-4))
@@ -658,15 +691,13 @@ func orUnknown(s string) string {
 
 // trunc cuts plain text to n cells with an ellipsis. It runs before any
 // style is applied, so a byte count of runes is the right measure.
+// trunc cuts s to n cells (an emoji mark is two), the same width the
+// renderer pads by, so a row built from trunc can never overflow its line.
 func trunc(s string, n int) string {
 	if n <= 1 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
+	return ansi.Truncate(s, n, "…")
 }
 
 func padRight(s string, w int) string {

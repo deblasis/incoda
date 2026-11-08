@@ -79,20 +79,23 @@ func TestStatusShowsProgramStatusFromJobLog(t *testing.T) {
 	var buf bytes.Buffer
 	renderQueue(&buf, colorize.Plain, qr, nil)
 	out := buf.String()
-	if !strings.Contains(out, "[working 55%] linking") {
-		t.Fatalf("holder with records must show the root record, got:\n%s", out)
+	if !strings.Contains(out, "🖥️ 🔄 55%") {
+		t.Fatalf("a working record must badge the mark with its progress, got:\n%s", out)
 	}
-	if strings.Contains(out, "[done]") || strings.Contains(out, "sub") {
-		t.Fatalf("a nested record must not speak for the job, got:\n%s", out)
+	if !strings.Contains(out, "linking") {
+		t.Fatalf("the record's msg must still end the line, got:\n%s", out)
 	}
-	if strings.Count(out, "[") != 1 {
-		t.Fatalf("only the participant with records gets a status, got:\n%s", out)
+	if strings.Contains(out, "[") || strings.Contains(out, "sub") {
+		t.Fatalf("no bracketed head and no nested record must appear, got:\n%s", out)
+	}
+	if strings.Count(out, "🔄") != 1 {
+		t.Fatalf("only the participant with records gets a badge, got:\n%s", out)
 	}
 	// Pipe-mode job: no status even with a log file that holds records.
 	qr.Holders[0].Ticket.PTY = false
 	buf.Reset()
 	renderQueue(&buf, colorize.Plain, qr, nil)
-	if strings.Contains(buf.String(), "[working") {
+	if strings.Contains(buf.String(), "🔄") {
 		t.Fatalf("a non-pty job shows no status, got:\n%s", buf.String())
 	}
 }
@@ -126,7 +129,7 @@ func plainStatus(t *testing.T, filler int) (string, *string) {
 // much ordinary output was written after it.
 func TestPlainStatusKeepsADeeplyBuriedRecord(t *testing.T) {
 	out, _ := plainStatus(t, 600<<10)
-	if !strings.Contains(out, "[working 10%] early record") {
+	if !strings.Contains(out, "🔄 10%") || !strings.Contains(out, "early record") {
 		t.Fatalf("the record fell out of the plain line:\n%s", out)
 	}
 }
@@ -144,7 +147,7 @@ func TestPlainStatusPollReadsOnlyAppendedBytes(t *testing.T) {
 	follow := newStatusFollowers()
 	var buf bytes.Buffer
 	renderQueue(&buf, colorize.Plain, qr, follow)
-	if !strings.Contains(buf.String(), "[working 10%] early record") {
+	if !strings.Contains(buf.String(), "🔄 10%") || !strings.Contains(buf.String(), "early record") {
 		t.Fatalf("the follower lost the record:\n%s", buf.String())
 	}
 	ls := follow.logs[laneDir+"\x00"+"01794028541589289100-161600.ticket"]
@@ -185,7 +188,7 @@ func TestForgedMarkerDoesNotFreezeTheStatus(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	renderQueue(&buf, colorize.Plain, qr, nil)
-	if !strings.Contains(buf.String(), "[working] still going") {
+	if !strings.Contains(buf.String(), "🔄") || !strings.Contains(buf.String(), "still going") {
 		t.Fatalf("a forged marker froze the status row:\n%s", buf.String())
 	}
 }

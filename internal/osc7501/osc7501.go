@@ -473,6 +473,42 @@ func (r Record) Line(maxMsg int) string {
 	return JoinMsg(r.Head(), textsafe.Escape(r.Msg), maxMsg)
 }
 
+// Badge is the record's state as one glyph, with its progress beside it
+// when the job reported one: it sits next to the pty mark on a row, so a
+// glance reads "console, and this is what it is doing" without a word.
+// A state with no glyph gives "" and the row shows the mark alone.
+func (r Record) Badge() string {
+	b, ok := badges[r.State]
+	if !ok {
+		return ""
+	}
+	if r.Progress != nil {
+		return b + " " + strconv.Itoa(*r.Progress) + "%"
+	}
+	return b
+}
+
+var badges = map[string]string{
+	"idle":    "💤",
+	"working": "🔄",
+	"done":    "✅",
+	"blocked": "🛑",
+	"error":   "❌",
+}
+
+// Text is the record's msg escaped and cut to maxMsg cells, for painting
+// beside a Badge (which already said the state); no msg gives "".
+func (r Record) Text(maxMsg int) string {
+	msg := textsafe.Escape(r.Msg)
+	if msg == "" || maxMsg < 1 {
+		return ""
+	}
+	if cellWidth(msg) > maxMsg {
+		msg = runewidth.Truncate(msg, maxMsg, "…")
+	}
+	return msg
+}
+
 // JoinMsg is head, a space and msg cut to maxMsg cells; no msg, or no room
 // for one, gives head alone.
 func JoinMsg(head, msg string, maxMsg int) string {

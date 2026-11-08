@@ -166,11 +166,19 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report, follow *statusFo
 // alike, so a glance tells which jobs carry a live captured stream.
 const ptyMark = " 🖥️"
 
-func ptyTag(e lane.Entry) string {
-	if e.Ticket.PTY {
-		return ptyMark
+// ptyTag is the mark, plus the job's own status badge beside it when its
+// log carries one: the state and its progress read at the same glance as
+// the mark itself. A record without a glyph keeps the mark alone.
+func ptyTag(e lane.Entry, r *osc7501.Record) string {
+	if !e.Ticket.PTY {
+		return ""
 	}
-	return ""
+	if r != nil {
+		if b := r.Badge(); b != "" {
+			return ptyMark + " " + b
+		}
+	}
+	return ptyMark
 }
 
 // statusFollowers is the plain renderer's per-process log cache: a viewer
@@ -219,33 +227,37 @@ func (f *statusFollowers) sweep(rep *Report) {
 	}
 }
 
-// programStatus is the participant's OSC 7501 status for the end of its
-// line: the root record of its job log, painted by state. Only a pty job
-// has a log that can carry records, and anyone watching sees what it wrote;
-// everything else, and a log with no records, gives "" and the line is what
-// it always was. A polling viewer (follow) reads only appended bytes; a
-// one-shot render reads the whole log, so a record survives however much
-// output was written after it.
-func programStatus(p colorize.Palette, laneDir string, e lane.Entry, follow *statusFollowers) string {
+// programStatus is the participant's OSC 7501 status for its row: the
+// record's badge joins the pty mark next to HOLDER/WAITING, and its msg
+// is painted at the end of the line by state. Only a pty job has a log
+// that can carry records, and anyone watching sees what it wrote;
+// everything else, and a log with no records, gives no record and the
+// line is what it always was. A polling viewer (follow) reads only
+// appended bytes; a one-shot render reads the whole log, so a record
+// survives however much output was written after it.
+func programStatus(laneDir string, e lane.Entry, follow *statusFollowers) (osc7501.Record, bool) {
 	if !e.Ticket.PTY || e.PayloadError != "" {
-		return ""
+		return osc7501.Record{}, false
 	}
 	path, err := joblog.Path(laneDir, e.File)
 	if err != nil {
-		return ""
+		return osc7501.Record{}, false
 	}
-	var r osc7501.Record
-	var ok bool
 	if follow != nil {
-		r, ok = follow.follower(laneDir, e.File).Read(path)
-	} else {
-		var ls jobstatus.LogStatus
-		r, ok = ls.ReadWhole(path)
+		return follow.follower(laneDir, e.File).Read(path)
 	}
-	if !ok {
+	var ls jobstatus.LogStatus
+	return ls.ReadWhole(path)
+}
+
+// statusSuffix paints a record's msg at the end of a participant line;
+// the state itself is the badge beside the pty mark, so only the text
+// remains here, and a record with no msg claims nothing.
+func statusSuffix(p colorize.Palette, r osc7501.Record) string {
+	line := r.Text(statusMsgWidth)
+	if line == "" {
 		return ""
 	}
-	line := r.Line(statusMsgWidth)
 	switch r.State {
 	case "working":
 		// yellow is the plain palette's amber: the accent working is
@@ -290,8 +302,13 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 		fmt.Fprintf(w, "  %s\n", p.Red("config unreadable: "+qr.ConfigError))
 	}
 	for _, e := range qr.Holders {
+		rec, has := programStatus(qr.Dir, e, follow)
+		var rp *osc7501.Record
+		if has {
+			rp = &rec
+		}
 		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, follow))
+			p.BoldCyan("HOLDER"), ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), statusSuffix(p, rec))
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -311,8 +328,13 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 	} else {
 		fmt.Fprintf(w, "  %s\n", p.BoldYellow("WAITING (arrival order):"))
 		for n, e := range qr.Waiting {
+			rec, has := programStatus(qr.Dir, e, follow)
+			var rp *osc7501.Record
+			if has {
+				rp = &rec
+			}
 			fmt.Fprintf(w, "    %s%s pid %s waited %s %s%s%s\n",
-				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, follow))
+				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), statusSuffix(p, rec))
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 			if e.Ticket.Owner != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)

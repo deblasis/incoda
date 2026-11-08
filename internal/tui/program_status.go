@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"charm.land/lipgloss/v2"
-
 	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
@@ -63,20 +61,23 @@ func (m *Model) refreshStatus(rep *report.Report) {
 	m.status = next
 }
 
-// programStatus is the participant's status for the end of its line: the
-// root record's "[state p%] msg" and its state, "" when there is none.
-// The state and progress head is always kept whole; the msg gives up room
-// first, and when even the head would crowd the identity part below its
-// floor the status is left off the line.
-func (m Model) programStatus(p participant, w int) (string, string) {
+// programStatus is the participant's record from the status cache, for the
+// badge beside the pty mark and the msg at the end of its line; ok=false
+// when the log carries none. The msg is cut to what the line has room
+// for; the badge (a glyph, plus a percent) always fits.
+func (m Model) programStatus(p participant, w int) (osc7501.Record, bool) {
 	r, ok := m.status[statusKey(m.key, p.entry.File)]
 	if !ok {
-		return "", ""
+		return osc7501.Record{}, false
 	}
-	room := w - identityFloor - 2
-	head := r.Head()
-	if lipgloss.Width(head) > room {
-		return "", ""
+	if room := w - identityFloor - 2; room < 10 {
+		return osc7501.Record{}, false
 	}
-	return r.Line(min(room-lipgloss.Width(head)-1, max(w/3, 10), 60)), r.State
+	return r, true
+}
+
+// statusMsg is the record's msg for the end of a participant line, cut to
+// what the line can spare once the identity part keeps its floor.
+func statusMsg(r osc7501.Record, w int) string {
+	return r.Text(min(max(w/3, 10), 60))
 }

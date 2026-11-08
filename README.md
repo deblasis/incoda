@@ -122,7 +122,7 @@ Linux) and nothing is ever resolved from the working directory.
 |---|---|
 | `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
-| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job, and a job's own OSC 7501 status shows at the end of its line for anyone watching. `--json` is a stable, versioned schema for scripts. |
+| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live, read-only, ending by itself when the job does — viewing is open to everyone. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
@@ -236,9 +236,11 @@ to move selection.
 
 Programs that report what they are doing over the OSC 7501 program-status
 protocol (`ESC ] 7501 ; state=working:id=build:progress=40:msg=<base64> BEL`)
-show it in `watch` and plain `status`, at the end of the job's line:
-`[working 40%] compiling`, colored by state (working in the accent, done
-green, error red, blocked yellow, idle and clear dim). Two parts make that
+show it in `watch` and plain `status` beside the job's `🖥️` mark: the state
+as a glyph (🔄 working, ✅ done, ❌ error, 🛑 blocked, 💤 idle) with its
+progress beside it when the job reported one (`🖥️ 🔄 40%`), and the record's
+message at the end of the line, colored by state (working in the accent,
+done green, error red, blocked yellow, idle dim). Two parts make that
 work, and both need `--pty`:
 
 - A job under `incoda run --pty` that asks its terminal whether OSC 7501 is
@@ -260,14 +262,11 @@ work, and both need `--pty`:
   that stopped recording — it hit its size cap, its writer failed, or the
   run's output was cut — shows no status: the last record in it may be
   stale, and only the runner's own note saying so counts, not a line the
-  job printed. The status carries text the job wrote, so like the capture
-  view it is for the job's own owner alone (`--owner` / `$INCODA_OWNER` on
-  `watch` and `status`); anyone else sees the line without it. `status
-  --json` carries the record too, as an additive `program_status` object
-  on the pty participant (schema stays 1, fields are only ever added),
-  behind the same owner gate: a script must speak as the owner to see
-  state, kind, progress, app, id, title and msg, and any other caller
-  gets the participant without it.
+  job printed. The status carries text the job wrote, and like the capture
+  view it is open to anyone watching. `status --json` carries the record
+  too, as an additive `program_status` object on the pty participant
+  (schema stays 1, fields are only ever added), for every caller alike:
+  state, kind, progress, app, id, title and msg.
 
   A job that reports `state=blocked` with a kind (`question`,
   `permission`, `auth`) can be answered: `incoda answer --queue KEY --pid
