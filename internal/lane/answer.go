@@ -4,10 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/deblasis/incoda/internal/textsafe"
 )
+
+// answerIDShape is the one shape a request id may take: the minted
+// "<pid>-<nanotime>". The door file is writable by any local process, and
+// a planted id could otherwise smuggle log-shaped bytes past the CLI's
+// verdict matcher; an id that is not this shape is not a request at all.
+var answerIDShape = regexp.MustCompile(`^[0-9]+-[0-9]+$`)
 
 // AnswerExt is the companion file an answer request leaves beside a
 // ticket, the same door a kill request uses: a file next to the ticket is
@@ -44,6 +51,9 @@ type AnswerRequest struct {
 func (q *Queue) RequestAnswer(pid int, req AnswerRequest) (Entry, error) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	if !answerIDShape.MatchString(req.ID) {
+		return Entry{}, fmt.Errorf("answer id %q is not the minted <pid>-<nanotime> shape", textsafe.Escape(req.ID))
 	}
 	var found Entry
 	err := q.withRegistry(func() error {
@@ -117,6 +127,9 @@ func readAnswer(path string) (AnswerRequest, bool) {
 	}
 	var r AnswerRequest
 	if err := json.Unmarshal(b, &r); err != nil {
+		return AnswerRequest{}, false
+	}
+	if !answerIDShape.MatchString(r.ID) {
 		return AnswerRequest{}, false
 	}
 	return r, true

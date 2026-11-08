@@ -29,7 +29,7 @@ func TestAnswerRequestReachesTheTicket(t *testing.T) {
 		t.Fatal("a fresh ticket has no answer request")
 	}
 
-	req := AnswerRequest{ID: "req-1", By: "alice", ByPID: 77, Text: "yes, ship it"}
+	req := AnswerRequest{ID: "111-1", By: "alice", ByPID: 77, Text: "yes, ship it"}
 	entry, err := q.RequestAnswer(os.Getpid(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestAnswerRequestReachesTheTicket(t *testing.T) {
 	if !ok {
 		t.Fatal("the holder must see its answer request")
 	}
-	if got.By != req.By || got.Text != req.Text || got.ByPID != req.ByPID || got.At == "" || got.ID != "req-1" {
+	if got.By != req.By || got.Text != req.Text || got.ByPID != req.ByPID || got.At == "" || got.ID != "111-1" {
 		t.Fatalf("request did not round-trip: %+v", got)
 	}
 	if line := lastLog(t, q); !strings.Contains(line, "event=answer-request") {
@@ -50,11 +50,11 @@ func TestAnswerRequestReachesTheTicket(t *testing.T) {
 
 	// Delivered: the verdict rewrites the file, scoped to the request's
 	// id, and never deletes it - absence must not be readable as an ack.
-	if err := en.AnswerDelivered("req-1"); err != nil {
+	if err := en.AnswerDelivered("111-1"); err != nil {
 		t.Fatal(err)
 	}
 	got, ok = en.AnswerRequested()
-	if !ok || got.Verdict != "delivered" || got.ID != "req-1" {
+	if !ok || got.Verdict != "delivered" || got.ID != "111-1" {
 		t.Fatalf("a delivered verdict must carry its id, got %+v ok=%v", got, ok)
 	}
 	if got.Text != "" {
@@ -62,10 +62,10 @@ func TestAnswerRequestReachesTheTicket(t *testing.T) {
 	}
 
 	// Refused: same shape, with the reason.
-	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "req-2", By: "alice", Text: "again"}); err != nil {
+	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "111-2", By: "alice", Text: "again"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := en.AnswerRefused("req-2", "job pid %d is not reporting blocked"); err != nil {
+	if err := en.AnswerRefused("111-2", "job pid %d is not reporting blocked"); err != nil {
 		t.Fatal(err)
 	}
 	got, ok = en.AnswerRequested()
@@ -98,25 +98,25 @@ func TestAnswerAcksAreScopedToTheirRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "a", By: "alice", Text: "first"}); err != nil {
+	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "111-3", By: "alice", Text: "first"}); err != nil {
 		t.Fatal(err)
 	}
 	// B lands while A's delivery is in flight.
-	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "b", By: "alice", Text: "second"}); err != nil {
+	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "222-4", By: "alice", Text: "second"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := en.AnswerDelivered("a"); err != nil {
+	if err := en.AnswerDelivered("111-3"); err != nil {
 		t.Fatal(err)
 	}
 	got, ok := en.AnswerRequested()
-	if !ok || got.ID != "b" || got.Verdict != "" || got.Text != "second" {
+	if !ok || got.ID != "222-4" || got.Verdict != "" || got.Text != "second" {
 		t.Fatalf("A's ack destroyed B's pending request: %+v ok=%v", got, ok)
 	}
 	// A withdrawal scoped to A leaves B alone too.
-	if err := q.WithdrawAnswer(os.Getpid(), "a"); err != nil {
+	if err := q.WithdrawAnswer(os.Getpid(), "111-3"); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := en.AnswerRequested(); !ok || got.ID != "b" {
+	if got, ok := en.AnswerRequested(); !ok || got.ID != "222-4" {
 		t.Fatalf("a scoped withdrawal must not take a foreign request: %+v ok=%v", got, ok)
 	}
 }
@@ -145,10 +145,10 @@ func TestWithdrawAnswerRemovesTheRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "w1", By: "alice", Text: "take me back"}); err != nil {
+	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "111-5", By: "alice", Text: "take me back"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.WithdrawAnswer(os.Getpid(), "w1"); err != nil {
+	if err := q.WithdrawAnswer(os.Getpid(), "111-5"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := en.AnswerRequested(); ok {
@@ -200,7 +200,7 @@ func TestAnswerFileReapedWithGoneTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "r1", By: "alice", Text: "y"}); err != nil {
+	if _, err := q.RequestAnswer(os.Getpid(), AnswerRequest{ID: "111-6", By: "alice", Text: "y"}); err != nil {
 		t.Fatal(err)
 	}
 	en.Release(0)

@@ -234,7 +234,7 @@ func TestAnswerReportsSupersededRequests(t *testing.T) {
 		for time.Now().Before(deadline) {
 			if _, ok := en.AnswerRequested(); ok {
 				// A second answerer replaces the request mid-flight.
-				if _, err := q.RequestAnswer(en.Ticket().PID, lane.AnswerRequest{ID: "later", By: "alice", Text: "mine"}); err == nil {
+				if _, err := q.RequestAnswer(en.Ticket().PID, lane.AnswerRequest{ID: "222-8", By: "alice", Text: "111-7"}); err == nil {
 					return
 				}
 			}
@@ -247,7 +247,7 @@ func TestAnswerReportsSupersededRequests(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "superseded") {
 		t.Fatalf("want the superseded verdict, got %v (%s)", err, errb.String())
 	}
-	_ = en.AnswerDelivered("later")
+	_ = en.AnswerDelivered("222-8")
 }
 
 // A closed console is a refusal, not a delivered-with-audit: whether the
@@ -268,14 +268,14 @@ func TestDeliverAnswerRefusesOnConsoleClose(t *testing.T) {
 	q := laneQueue(t, dir)
 	pt := &lanePart{key: "unit", q: q, en: en}
 	stub := &stubDoor{err: child.ErrConsoleClosedAnswer}
-	req := lane.AnswerRequest{ID: "cc", By: "alice", Text: "yes\r"}
+	req := lane.AnswerRequest{ID: "111-9", By: "alice", Text: "yes\r"}
 	if _, err := q.RequestAnswer(en.Ticket().PID, req); err != nil {
 		t.Fatal(err)
 	}
 	if err := deliverAnswer(pt, req, stub); !errors.Is(err, child.ErrConsoleClosedAnswer) {
 		t.Fatalf("a closed console must refuse, got %v", err)
 	}
-	_ = en.AnswerRefused("cc", child.ErrConsoleClosedAnswer.Error())
+	_ = en.AnswerRefused("111-9", child.ErrConsoleClosedAnswer.Error())
 }
 
 // The log is the durable verdict: a delivered answer whose verdict file
@@ -285,24 +285,24 @@ func TestDeliverAnswerRefusesOnConsoleClose(t *testing.T) {
 func TestDeliveredVerdictSurvivesSuperseding(t *testing.T) {
 	q, en, _ := answerFixture(t)
 	pid := en.Ticket().PID
-	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "mine", By: "alice", Text: "yes\r"}); err != nil {
+	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "111-7", By: "alice", Text: "yes\r"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := en.AnswerDelivered("mine"); err != nil {
+	if err := en.AnswerDelivered("111-7"); err != nil {
 		t.Fatal(err)
 	}
-	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "mine")
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "111-7")
 	// A newer answerer renames over the verdict file before our poll.
-	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "later", By: "alice", Text: "no\r"}); err != nil {
+	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "222-8", By: "alice", Text: "no\r"}); err != nil {
 		t.Fatal(err)
 	}
 	got, reason := pollAnswerVerdict(
 		filepath.Join(q.Dir, "no-such-ticket"+lane.AnswerExt),
-		lane.LogPath(q.Dir), "mine", time.Now().Add(2*time.Second))
+		lane.LogPath(q.Dir), "111-7", time.Now().Add(2*time.Second))
 	if got != "delivered" || reason != "" {
 		t.Fatalf("a logged delivered verdict must survive the file being renamed over: got %q/%q", got, reason)
 	}
-	_ = en.AnswerDelivered("later")
+	_ = en.AnswerDelivered("222-8")
 }
 
 // The CLI's verdict contract, pinned where it lives: the lane log is the
@@ -331,8 +331,8 @@ func TestPollAnswerVerdictContract(t *testing.T) {
 		t.Fatalf("absence must not be an ack, got %q", v)
 	}
 	// An id that is a prefix of another request's id claims nothing.
-	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "1-23")
-	if v, _ := pollAnswerVerdict(answerPath, logPath, "1-2", time.Now().Add(200*time.Millisecond)); v != "" {
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "111-23")
+	if v, _ := pollAnswerVerdict(answerPath, logPath, "111-2", time.Now().Add(200*time.Millisecond)); v != "" {
 		t.Fatalf("a prefix id must not claim a verdict, got %q", v)
 	}
 }

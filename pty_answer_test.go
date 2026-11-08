@@ -281,7 +281,7 @@ func TestPlantedAnswerOnPipeRunIsRefused(t *testing.T) {
 	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
 	file := waitForHolderFile(t, env, "pty-ans4")
 	answerPath := filepath.Join(state, "lanes", "pty-ans4", file+".answer")
-	plant := `{"id":"planted","by":"alice","text":"yes\r"}`
+	plant := `{"id":"333-1","by":"alice","text":"yes\r"}`
 	if err := os.WriteFile(answerPath, []byte(plant), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestPendingAnswerRefusedAtRunEnd(t *testing.T) {
 	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
 	file := waitForHolderFile(t, env, "pty-ans5")
 	answerPath := filepath.Join(state, "lanes", "pty-ans5", file+".answer")
-	plant := `{"id":"pending","by":"alice","text":"yes\r"}`
+	plant := `{"id":"333-2","by":"alice","text":"yes\r"}`
 	if err := os.WriteFile(answerPath, []byte(plant), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestPendingAnswerRefusedAtRunEnd(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		tail, err := readLaneLog(t, filepath.Join(state, "lanes", "pty-ans5", "lane.log"))
-		if err == nil && strings.Contains(tail, " id=pending ") && strings.Contains(tail, "event=answer-refused") {
+		if err == nil && strings.Contains(tail, " id=333-2 ") && strings.Contains(tail, "event=answer-refused") {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
