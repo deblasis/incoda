@@ -227,3 +227,33 @@ time.sleep(0.5)
 		t.Fatalf("the read never completed:\n%q", out)
 	}
 }
+
+// The pty runner must hand the answer door the SAME locked injector the
+// replier writes through: the class-B guarantee is one __coninj helper
+// per console, and a regression that wires the door to its own bare
+// consoleInjector leaves every other test green while reopening the
+// sibling-flush hole. The door's injector is only visible in-package, so
+// the pin lives here: whatever runPTY armed the door with, it is the
+// locked kind.
+func TestThePtyRunnerArmsTheDoorWithTheLockedInjector(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH")
+	}
+	script := filepath.Join(t.TempDir(), "exit.py")
+	if err := os.WriteFile(script, []byte("import sys\nsys.exit(0)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var tee lockedBuffer
+	door := &AnswerDoor{}
+	if _, err := Run([]string{py, script}, nil, nil, nil, nil,
+		Options{PTY: &PTYOptions{Tee: &tee, Answer: door}}); err != nil {
+		t.Fatal(err)
+	}
+	door.mu.Lock()
+	_, ok := door.inj.(*lockedInjector)
+	door.mu.Unlock()
+	if !ok {
+		t.Fatal("the answer door was armed with something other than the shared locked injector")
+	}
+}

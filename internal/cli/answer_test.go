@@ -243,7 +243,7 @@ func TestAnswerReportsSupersededRequests(t *testing.T) {
 	}()
 	var out, errb bytes.Buffer
 	err := cmdAnswer([]string{"--queue", "unit", "--pid", itoa(en.Ticket().PID),
-		"--text", "yes", "--owner", "alice", "--wait", "4s"}, &out, &errb)
+		"--text", "yes", "--owner", "alice", "--wait", "1s"}, &out, &errb)
 	if err == nil || !strings.Contains(err.Error(), "superseded") {
 		t.Fatalf("want the superseded verdict, got %v (%s)", err, errb.String())
 	}

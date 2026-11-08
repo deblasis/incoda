@@ -123,6 +123,7 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 // ticket was swept is still read, and a file that vanished without any
 // verdict of ours is never mistaken for one.
 func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verdict, reason string) {
+	superseded := false
 	for {
 		// The log is the durable form of a verdict: consult it before any
 		// conclusion drawn from the file, because the file can be renamed
@@ -156,15 +157,21 @@ func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verd
 					if req.ID == id && req.Verdict == "refused" {
 						return "refused", req.Refused
 					}
-					// A different request owns the file now and the log
-					// holds no verdict of ours: superseded.
+					// A different request owns the file now. This is not
+					// yet a verdict: a newer answer can rename the file
+					// over ours mid-delivery, moments before our own
+					// delivered verdict lands in the log. Superseded is
+					// what absence says at the deadline, never before.
 					if req.ID != id {
-						return "refused", "a newer answer superseded this one"
+						superseded = true
 					}
 				}
 			}
 		}
 		if time.Now().After(deadline) {
+			if superseded {
+				return "refused", "a newer answer superseded this one"
+			}
 			return "", ""
 		}
 		time.Sleep(100 * time.Millisecond)
