@@ -2,10 +2,8 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,48 +11,69 @@ import (
 	"github.com/deblasis/incoda/internal/lane"
 )
 
-// TestConfigPtyFlagRoundTrip: --pty sets the queue default, config shows it,
-// --pty=false clears it, and the file says "pty": true only while set.
-func TestConfigPtyFlagRoundTrip(t *testing.T) {
+// TestConfigPtyFlagIsRetired: the lane-config pty default is gone from
+// the surface (consoles are the run default, --pty=false the per-job
+// override), so config rejects --pty outright and its display never
+// claims a pty default.
+func TestConfigPtyFlagIsRetired(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("INCODA_DIR", dir)
 	if code := Main([]string{"config", "seed"}, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("migrate: %d", code)
 	}
 	var out bytes.Buffer
-	if code := Main([]string{"config", "seed", "--pty"}, &out, io.Discard); code != 0 {
-		t.Fatalf("config --pty: %d", code)
-	}
-	if !strings.Contains(out.String(), "pty default: yes") {
-		t.Fatalf("config display should say pty default: yes:\n%s", out.String())
-	}
-	b, err := os.ReadFile(filepath.Join(lane.LaneDir(dir, "seed"), "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatal(err)
-	}
-	if string(raw["pty"]) != "true" {
-		t.Fatalf("config.json should carry pty:true, got %s", b)
+	var errb bytes.Buffer
+	if code := Main([]string{"config", "seed", "--pty"}, &out, &errb); code != ExitUsage {
+		t.Fatalf("config --pty should be a usage error now, got %d:\n%s", code, errb.String())
 	}
 	out.Reset()
-	if code := Main([]string{"config", "seed", "--pty=false"}, &out, io.Discard); code != 0 {
-		t.Fatalf("config --pty=false: %d", code)
+	if code := Main([]string{"config", "seed"}, &out, io.Discard); code != 0 {
+		t.Fatalf("config seed: %d", code)
 	}
-	if !strings.Contains(out.String(), "pty default: no") {
-		t.Fatalf("config display should say pty default: no:\n%s", out.String())
-	}
-	cfg, err := lane.ReadConfig(lane.LaneDir(dir, "seed"))
-	if err != nil || cfg.PTY {
-		t.Fatalf("after --pty=false the config should be off: %+v %v", cfg, err)
+	if strings.Contains(out.String(), "pty default") {
+		t.Fatalf("config display must not claim a pty default anymore:\n%s", out.String())
 	}
 }
 
-// TestRunPtyRefusesOffWindows: a queue or flag asking for pty mode on a
-// system without ConPTY is refused with a named reason before any ticket is
-// taken.
+// TestRunPtyDefaultMatchesPlatform: without a flag, a run takes a console
+// on Windows and pipes elsewhere; --pty=false forces pipes per job.
+func TestRunPtyDefaultMatchesPlatform(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("INCODA_DIR", dir)
+	if code := Main([]string{"config", "seed"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate: %d", code)
+	}
+	relink(t, dir, "seed", "tests")
+	run := func(extra ...string) string {
+		args := append([]string{"run", "--queue", "seed", "--reason", "pty default"}, extra...)
+		if runtime.GOOS == "windows" {
+			args = append(args, "--", "cmd", "/c", "exit", "0")
+		} else {
+			args = append(args, "--", "true")
+		}
+		if code := Main(args, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("run %v: %d", extra, code)
+		}
+		b, err := os.ReadFile(lane.LogPath(lane.LaneDir(dir, "seed")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	logDefault := run()
+	want := map[bool]int{true: 1, false: 0}[runtime.GOOS == "windows"]
+	if got := strings.Count(logDefault, "pty=true"); got != want {
+		t.Fatalf("default run should enqueue pty=true only on Windows; log:\n%s", logDefault)
+	}
+	logPipes := run("--pty=false")
+	if strings.Contains(logPipes[len(logDefault):], "pty=true") {
+		t.Fatalf("--pty=false must keep the job on pipes:\n%s", logPipes)
+	}
+}
+
+// TestRunPtyRefusesOffWindows: an explicit --pty on a system without
+// ConPTY is refused with a named reason before any ticket is taken (the
+// platform default there is pipes, so only the flag can ask).
 func TestRunPtyRefusesOffWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the refusal is the non-Windows behavior")

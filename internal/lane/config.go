@@ -41,13 +41,10 @@ type Config struct {
 	Pools []string `json:"pools,omitempty"`
 	// QuietMachine makes every run on this project lane take quiet-machine.
 	QuietMachine bool `json:"quiet_machine,omitempty"`
-	// PTY makes runs on this queue default to pseudo-console mode: a run
-	// without an explicit --pty/--pty=false gets a ConPTY pair around its
-	// job. Off is the default, because a TTY changes what jobs do (colors,
-	// progress bars, prompts).
-	PTY bool `json:"pty,omitempty"`
 	// Schema is the file format version; a file without it is schema 1 and
-	// is upgraded on its next write.
+	// is upgraded on its next write. (The retired "pty" key of schema 2
+	// configs is preserved as an unknown field and ignored: consoles are
+	// the run default now, --pty=false the per-job override.)
 	Schema int `json:"schema,omitempty"`
 
 	// extra holds fields this binary does not know, so a rewrite by an older
@@ -73,7 +70,7 @@ func (e *NewerSchemaError) Error() string {
 // configKnown lists the JSON names Config owns; everything else is extra.
 var configKnown = map[string]bool{
 	"slots": true, "description": true, "require_reason": true, "closed": true,
-	"pools": true, "quiet_machine": true, "pty": true, "schema": true,
+	"pools": true, "quiet_machine": true, "schema": true,
 }
 
 type configJSON struct {
@@ -83,7 +80,6 @@ type configJSON struct {
 	Closed        string   `json:"closed,omitempty"`
 	Pools         []string `json:"pools,omitempty"`
 	QuietMachine  bool     `json:"quiet_machine,omitempty"`
-	PTY           bool     `json:"pty,omitempty"`
 	Schema        int      `json:"schema,omitempty"`
 }
 
@@ -100,7 +96,7 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	*c = Config{
 		Slots: known.Slots, Description: known.Description, RequireReason: known.RequireReason,
 		Closed: known.Closed, Pools: known.Pools, QuietMachine: known.QuietMachine,
-		PTY: known.PTY, Schema: known.Schema,
+		Schema: known.Schema,
 	}
 	for k, v := range all {
 		if !configKnown[k] {
@@ -118,7 +114,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	b, err := json.Marshal(configJSON{
 		Slots: c.Slots, Description: c.Description, RequireReason: c.RequireReason,
 		Closed: c.Closed, Pools: c.Pools, QuietMachine: c.QuietMachine,
-		PTY: c.PTY, Schema: c.Schema,
+		Schema: c.Schema,
 	})
 	if err != nil || len(c.extra) == 0 {
 		return b, err
@@ -142,7 +138,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 // Schema directly.
 func EqualConfig(a, b Config) bool {
 	if a.Slots != b.Slots || a.Description != b.Description || a.RequireReason != b.RequireReason ||
-		a.Closed != b.Closed || a.QuietMachine != b.QuietMachine || a.PTY != b.PTY ||
+		a.Closed != b.Closed || a.QuietMachine != b.QuietMachine ||
 		len(a.Pools) != len(b.Pools) {
 		return false
 	}

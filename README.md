@@ -120,7 +120,7 @@ Linux) and nothing is ever resolved from the working directory.
 
 | Command | What it does |
 |---|---|
-| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty` runs the job inside a Windows pseudo-console; see [PTY jobs](#pty-jobs). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
+| `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, and the link to the machine-wide pools the key's jobs take. |
 | `incoda status [--queue KEY] [--all] [--json] [--owner WHO]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job, and a job's own OSC 7501 status shows at the end of its line for its owner (`--owner` / `$INCODA_OWNER`). `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain] [--owner WHO]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live, read-only, ending by itself when the job does — the same owner gate as `attach` (`--owner` / `$INCODA_OWNER`). Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
@@ -151,14 +151,14 @@ of `incoda` can orphan it (see [limits](#known-limits)).
 
 ### PTY jobs
 
-`run --pty` starts the job inside a Windows pseudo-console (ConPTY) instead of
-a pipe, and `incoda config KEY --pty` makes it the queue's default (an explicit
-`--pty=false` wins over the config). The job sees a real TTY, so it may color
-its output, draw progress bars, or wait on a prompt where the pipe path would
-have failed fast; if a job behaves differently under a TTY, keep the flag off.
-Bytes are never interpreted on the way through: escape and OSC sequences reach
-the output exactly as the job wrote them. On other systems `--pty` is refused
-with exit `120`.
+On Windows a run starts its job inside a pseudo-console (ConPTY) by default,
+and `--pty=false` is the per-job opt-out back to pipes. The job sees a real
+TTY, so it may color its output, draw progress bars, or wait on a prompt
+where the pipe path would have failed fast; if a job behaves differently
+under a TTY, keep that job on `--pty=false`. Bytes are never interpreted on
+the way through: escape and OSC sequences reach the output exactly as the
+job wrote them. On other systems jobs run on pipes, and an explicit `--pty`
+is refused with exit `120`.
 
 Every byte the job writes still reaches the run's own stdout, and is also
 teed to one job file per lane the run holds (`jobs/TICKET.out` under each;

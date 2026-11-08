@@ -481,25 +481,31 @@ func TestExclusiveTicketForcesOneSlot(t *testing.T) {
 	b.Release(0)
 }
 
-// TestConfigPTYRoundTripAndEnqueueLog: the pty default survives a
-// save/load cycle, participates in equality (a plan re-verify must see a
-// change of it), and a pty ticket says so on its enqueue line.
-func TestConfigPTYRoundTripAndEnqueueLog(t *testing.T) {
+// TestConfigRetiredPTYKeySurvivesRewrites: "pty" is retired from the
+// config surface (consoles are the run default, --pty=false the per-job
+// override), but a schema-2 file written by an older incoda still carries
+// the key, and a rewrite by this binary must preserve it for that older
+// binary to read back, not drop it. A pty ticket still says so on its
+// enqueue line.
+func TestConfigRetiredPTYKeySurvivesRewrites(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, configName), []byte(`{"pty":true,"schema":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	q, err := Open(dir, "unit")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := q.SaveConfig(Config{PTY: true}); err != nil {
+	if err := q.SaveConfig(Config{Slots: 2}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := q.LoadConfig()
-	if err != nil || !got.PTY {
-		t.Fatalf("pty default did not round-trip: %+v %v", got, err)
+	b, err := os.ReadFile(filepath.Join(dir, configName))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if EqualConfig(Config{PTY: true}, Config{}) {
-		t.Fatal("EqualConfig ignores pty, so a config change would go unnoticed")
+	if !strings.Contains(string(b), `"pty":true`) {
+		t.Fatalf("a rewrite dropped the retired pty key an older incoda still reads: %s", b)
 	}
 	en, err := q.Enroll(Ticket{Command: []string{"x"}, Reason: "r", PTY: true})
 	if err != nil {

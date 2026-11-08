@@ -60,10 +60,11 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	pool := &poolsValue{}
 	fs.Var(pool, "pool", "take only these of each named project key's linked pools (comma-separated); on an unlinked key, a set equal to its suggestion becomes its first link")
 	fs.Var(pool, "pools", "alias of --pool")
-	pty := fs.Bool("pty", false,
-		"run the job inside a Windows pseudo-console (ConPTY): the job sees a TTY, so it may colour its output, draw progress bars, or wait on a prompt where the pipe path would have failed fast; its merged output is teed to a per-job file readable live with `incoda attach --queue KEY --pid N` (Windows only; without the flag, the first --queue key's configured pty setting decides)")
+	pty := fs.Bool("pty", runtime.GOOS == "windows",
+		"run the job inside a Windows pseudo-console (ConPTY): the job sees a TTY, so it may colour its output, draw progress bars, or wait on a prompt where the pipe path would have failed fast; its merged output is teed to a per-job file readable live with `incoda attach --queue KEY --pid N`. Default ON on Windows; --pty=false runs the job on pipes")
+
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty] [--] <cmd...>\n\n")
+		fmt.Fprintf(stderr, "usage: incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] [--] <cmd...>\n\n")
 		fmt.Fprintf(stderr, "Runs without --max-cpu bypass the load gate entirely; a gated run shares its --wait budget between queueing and waiting for idle (expiry exits 121).\n\n")
 		fs.PrintDefaults()
 	}
@@ -129,37 +130,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 		return err
 	}
 
-	// PTY mode: an explicit --pty/--pty=false wins; without one, the config
-	// of the first key as the user named it decides (resolveKeys returns the
-	// plan order, which is sorted). One mode for the whole run: there is one
-	// spawn path, so every held lane gets the same ticket flag and the same
-	// per-job file.
-	ptyGiven := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "pty" {
-			ptyGiven = true
-		}
-	})
-	firstKey := *queue
-	if strings.TrimSpace(firstKey) == "" {
-		firstKey = os.Getenv("INCODA_QUEUE")
-	}
-	if k := strings.Split(firstKey, ",")[0]; strings.TrimSpace(k) != "" {
-		firstKey = strings.TrimSpace(k)
-	}
+	// PTY mode: the default is a console (ConPTY) on Windows and pipes
+	// elsewhere, and --pty/--pty=false is the per-job override. One mode
+	// for the whole run: there is one spawn path, so every held lane gets
+	// the same ticket flag and the same per-job file.
 	ptyOn := *pty
-	if !ptyGiven {
-		if cfg, cfgErr := lane.ReadConfig(lane.LaneDir(dir, firstKey)); cfgErr == nil {
-			ptyOn = cfg.PTY
-		} else if !errors.Is(cfgErr, os.ErrNotExist) {
-			// No fallback is promised here: the same unreadable config
-			// refuses the plan below (122), so the note only states what
-			// was decided about the pty flag, never what the run will do.
-			fmt.Fprintf(stderr, "incoda: reading the pty default for queue %q failed (%v); --pty not given, so no pseudo-console for this queue\n", firstKey, cfgErr)
-		}
-	}
 	if ptyOn && runtime.GOOS != "windows" {
-		return usagef("pty mode is not implemented on %s (Windows ConPTY only); unset --pty, or clear it with `incoda config %s --pty=false`", runtime.GOOS, firstKey)
+		return usagef("pty mode is not implemented on %s (Windows ConPTY only); pass --pty=false", runtime.GOOS)
 	}
 
 	// The plan (runplan) is the lane set in its total order, with every
