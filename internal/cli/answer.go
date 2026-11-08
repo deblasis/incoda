@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,22 +124,11 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 // verdict of ours is never mistaken for one.
 func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verdict, reason string) {
 	for {
-		if b, err := os.ReadFile(answerPath); err == nil && len(b) <= lane.AnswerFileMax {
-			var req lane.AnswerRequest
-			if json.Unmarshal(b, &req) == nil {
-				if req.ID == id && req.Verdict == "delivered" {
-					return "delivered", ""
-				}
-				if req.ID == id && req.Verdict == "refused" {
-					return "refused", req.Refused
-				}
-				// A different request owns the file now: ours was
-				// superseded by a newer answer.
-				if req.ID != id {
-					return "refused", "a newer answer superseded this one"
-				}
-			}
-		}
+		// The log is the durable form of a verdict: consult it before any
+		// conclusion drawn from the file, because the file can be renamed
+		// over by a newer answer the instant our own verdict was written
+		// into it - the verdict survives in the log, and reading the file
+		// first would misreport a delivered answer as superseded.
 		if tail, err := readLogTail(logPath, 64<<10); err == nil {
 			for _, line := range strings.Split(tail, "\n") {
 				if !lineCarriesID(line, id) {
@@ -152,6 +142,28 @@ func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verd
 				}
 			}
 		}
+		// The door file carries the same verdict one poll earlier, and it
+		// is the only place a verdict exists before the holder logs it:
+		// stat-bounded like the holder's own read, because the file is
+		// writable by any local process.
+		if fi, err := os.Stat(answerPath); err == nil && fi.Mode().IsRegular() && fi.Size() <= lane.AnswerFileMax {
+			if b, err := os.ReadFile(answerPath); err == nil {
+				var req lane.AnswerRequest
+				if json.Unmarshal(b, &req) == nil {
+					if req.ID == id && req.Verdict == "delivered" {
+						return "delivered", ""
+					}
+					if req.ID == id && req.Verdict == "refused" {
+						return "refused", req.Refused
+					}
+					// A different request owns the file now and the log
+					// holds no verdict of ours: superseded.
+					if req.ID != id {
+						return "refused", "a newer answer superseded this one"
+					}
+				}
+			}
+		}
 		if time.Now().After(deadline) {
 			return "", ""
 		}
@@ -161,13 +173,21 @@ func pollAnswerVerdict(answerPath, logPath, id string, deadline time.Time) (verd
 
 // reasonFromLogLine pulls the logged refusal reason out of a lane-log
 // line, best effort; the log line is the durable form of the verdict.
+// The logged value is textsafe.LogValue output - quoted when the reason
+// carries anything unsafe - so a quoted form is unquoted for display.
 func reasonFromLogLine(line string) string {
 	const mark = "reason="
 	i := strings.Index(line, mark)
 	if i < 0 {
 		return "the run refused the answer"
 	}
-	return line[i+len(mark):]
+	v := strings.TrimSpace(line[i+len(mark):])
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		if u, err := strconv.Unquote(v); err == nil {
+			return u
+		}
+	}
+	return v
 }
 
 // lineCarriesID matches " id=<id>" as a whole field: an id that is a
@@ -178,7 +198,7 @@ func lineCarriesID(line, id string) bool {
 		return false
 	}
 	rest := i + len(" id=") + len(id)
-	return rest == len(line) || line[rest] == ' '
+	return rest == len(line) || line[rest] == ' ' || line[rest] == '\n'
 }
 
 // readLogTail reads the last n bytes of a log file.
@@ -200,7 +220,7 @@ func readLogTail(path string, n int64) (string, error) {
 		return "", err
 	}
 	b := make([]byte, fi.Size()-off)
-	if _, err := f.Read(b); err != nil && len(b) == 0 {
+	if _, err := io.ReadFull(f, b); err != nil {
 		return "", err
 	}
 	return string(b), nil

@@ -169,7 +169,7 @@ func TestAnswerReadIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	big := strings.Repeat("x", AnswerFileMax+1)
+	big := `{"id":"big","text":"` + strings.Repeat("x", AnswerFileMax) + `"}`
 	path := filepath.Join(q.Dir, en.name+AnswerExt)
 	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
 		t.Fatal(err)

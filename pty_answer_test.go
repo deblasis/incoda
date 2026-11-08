@@ -252,3 +252,135 @@ func waitForHolder(t *testing.T, env []string, key string) int {
 	t.Fatal("the job never appeared")
 	return 0
 }
+
+// A request planted straight onto the door file - no CLI, no gates - is
+// answered by the run itself: a pipe run refuses it by name (it has no
+// console to type into), and a request still pending when a run is
+// killed is answered with the run-ended refusal, never swept into
+// silence. The run-side gates are the ones that make the channel safe to
+// leave open; these plant the file the way a foreign process would.
+func TestPlantedAnswerOnPipeRunIsRefused(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH for the answer fixture")
+	}
+	bin, _ := ptyBinaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, bin, state, "pty-ans4")
+	script := filepath.Join(t.TempDir(), "sleep4.py")
+	if err := os.WriteFile(script, []byte("import time\ntime.sleep(30)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := ownerEnv(state, "alice")
+	run := exec.Command(bin, "run", "--queue", "pty-ans4", "--owner", "alice",
+		"--reason", "test", "--", py, script)
+	run.Env = env
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
+	file := waitForHolderFile(t, env, "pty-ans4")
+	answerPath := filepath.Join(state, "lanes", "pty-ans4", file+".answer")
+	plant := `{"id":"planted","by":"alice","text":"yes\r"}`
+	if err := os.WriteFile(answerPath, []byte(plant), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(answerPath)
+		if err == nil && strings.Contains(string(b), `"verdict":"refused"`) && strings.Contains(string(b), "not a pty job") {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(answerPath)
+	t.Fatalf("the pipe run never refused the planted answer; door: %q", b)
+}
+
+func TestPendingAnswerRefusedAtRunEnd(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH for the answer fixture")
+	}
+	bin, _ := ptyBinaries(t)
+	state := t.TempDir()
+	linkTestKeys(t, bin, state, "pty-ans5")
+	script := filepath.Join(t.TempDir(), "blocked5.py")
+	src := "\nimport base64, sys, time\nsys.stdout.write(\"\\x1b]7501;state=blocked:kind=question:id=e2e/ask:msg=\" + base64.b64encode(b\"q?\").decode() + \"\\x07\"); sys.stdout.flush()\ntime.sleep(30)\n"
+	if err := os.WriteFile(script, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := ownerEnv(state, "alice")
+	run := exec.Command(bin, "run", "--queue", "pty-ans5", "--owner", "alice",
+		"--reason", "test", "--pty", "--", py, script)
+	run.Env = env
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Process.Kill(); _, _ = run.Process.Wait() }()
+	file := waitForHolderFile(t, env, "pty-ans5")
+	answerPath := filepath.Join(state, "lanes", "pty-ans5", file+".answer")
+	plant := `{"id":"pending","by":"alice","text":"yes\r"}`
+	if err := os.WriteFile(answerPath, []byte(plant), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Kill the run with the request pending: the run must answer it.
+	_, errb, code := ptyRunIncoda(t, env, "kill", "--queue", "pty-ans5",
+		"--pid", holderPid(t, env, "pty-ans5"), "--reason", "test end", "--wait", "60s")
+	if code != 0 {
+		t.Fatalf("kill exited %d: %s", code, errb)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		tail, err := readLaneLog(t, filepath.Join(state, "lanes", "pty-ans5", "lane.log"))
+		if err == nil && strings.Contains(tail, " id=pending ") && strings.Contains(tail, "event=answer-refused") {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	tail, _ := readLaneLog(t, filepath.Join(state, "lanes", "pty-ans5", "lane.log"))
+	t.Fatalf("the run never refused the pending answer at its end; log tail:\n%s", tail)
+}
+
+func waitForHolderFile(t *testing.T, env []string, key string) string {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+		var rep statusJSONShape
+		if json.Unmarshal([]byte(out), &rep) == nil {
+			for _, q := range rep.Queues {
+				for _, h := range q.Holders {
+					if h.File != "" {
+						return h.File
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("no holder file ever appeared")
+	return ""
+}
+
+func holderPid(t *testing.T, env []string, key string) string {
+	t.Helper()
+	out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+	var rep statusJSONShape
+	if json.Unmarshal([]byte(out), &rep) != nil {
+		t.Fatal("status parse")
+	}
+	for _, q := range rep.Queues {
+		for _, h := range q.Holders {
+			return itoa(h.Tick.PID)
+		}
+	}
+	t.Fatal("no holder")
+	return ""
+}
+
+func readLaneLog(t *testing.T, path string) (string, error) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	return string(b), err
+}

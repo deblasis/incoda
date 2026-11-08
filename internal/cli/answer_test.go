@@ -14,6 +14,7 @@ import (
 	"github.com/deblasis/incoda/internal/child"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
+	"github.com/deblasis/incoda/internal/textsafe"
 )
 
 // writeRegistry gives a freshly built lane state the machine.json a real
@@ -277,6 +278,81 @@ func TestDeliverAnswerRefusesOnConsoleClose(t *testing.T) {
 	_ = en.AnswerRefused("cc", child.ErrConsoleClosedAnswer.Error())
 }
 
+// The log is the durable verdict: a delivered answer whose verdict file
+// was renamed over by a newer request must still be reported delivered -
+// the file saying "foreign id" is superseded only when the log holds no
+// verdict of ours.
+func TestDeliveredVerdictSurvivesSuperseding(t *testing.T) {
+	q, en, _ := answerFixture(t)
+	pid := en.Ticket().PID
+	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "mine", By: "alice", Text: "yes\r"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := en.AnswerDelivered("mine"); err != nil {
+		t.Fatal(err)
+	}
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "mine")
+	// A newer answerer renames over the verdict file before our poll.
+	if _, err := q.RequestAnswer(pid, lane.AnswerRequest{ID: "later", By: "alice", Text: "no\r"}); err != nil {
+		t.Fatal(err)
+	}
+	got, reason := pollAnswerVerdict(
+		filepath.Join(q.Dir, "no-such-ticket"+lane.AnswerExt),
+		lane.LogPath(q.Dir), "mine", time.Now().Add(2*time.Second))
+	if got != "delivered" || reason != "" {
+		t.Fatalf("a logged delivered verdict must survive the file being renamed over: got %q/%q", got, reason)
+	}
+	_ = en.AnswerDelivered("later")
+}
+
+// The CLI's verdict contract, pinned where it lives: the lane log is the
+// durable verdict (a swept file cannot un-deliver an answer), a vanished
+// file with no verdict anywhere is pending (never delivered), and an id
+// only matches as a whole field.
+func TestPollAnswerVerdictContract(t *testing.T) {
+	q, en, _ := answerFixture(t)
+	pid := en.Ticket().PID
+	logPath := lane.LogPath(q.Dir)
+	answerPath := filepath.Join(q.Dir, "gone"+lane.AnswerExt)
+
+	// Log verdict, file gone: delivered.
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "logdel")
+	if v, r := pollAnswerVerdict(answerPath, logPath, "logdel", time.Now().Add(1*time.Second)); v != "delivered" || r != "" {
+		t.Fatalf("log verdict: got %q/%q", v, r)
+	}
+	// Log refusal with a quoted reason: refused, unquoted for display.
+	q.Logf(`queue=unit event=answer-refused pid=%d id=%s reason="the job: did not read"`, pid, "logref")
+	v, r := pollAnswerVerdict(answerPath, logPath, "logref", time.Now().Add(1*time.Second))
+	if v != "refused" || r != "the job: did not read" {
+		t.Fatalf("log refusal: got %q/%q", v, r)
+	}
+	// No verdict anywhere: pending, never delivered.
+	if v, _ := pollAnswerVerdict(answerPath, logPath, "nobody", time.Now().Add(200*time.Millisecond)); v != "" {
+		t.Fatalf("absence must not be an ack, got %q", v)
+	}
+	// An id that is a prefix of another request's id claims nothing.
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", pid, "1-23")
+	if v, _ := pollAnswerVerdict(answerPath, logPath, "1-2", time.Now().Add(200*time.Millisecond)); v != "" {
+		t.Fatalf("a prefix id must not claim a verdict, got %q", v)
+	}
+}
+
+// The log-line shape is a cross-package contract: the run writes
+// `id=<id>` through textsafe.LogValue (unquoted for our minted ids) and
+// the CLI matches it as a whole field. Pin the pair together.
+func TestAnswerVerdictLogLineShape(t *testing.T) {
+	q, en, _ := answerFixture(t)
+	id := "17000-1234567890"
+	q.Logf("queue=unit event=answer-delivered pid=%d id=%s", en.Ticket().PID, textsafe.LogValue(id))
+	if !lineCarriesID("queue=unit event=answer-delivered pid=1 id="+id, id) {
+		t.Fatal("a minted id must match its logged form")
+	}
+	tail, err := readLogTail(lane.LogPath(q.Dir), 64<<10)
+	if err != nil || !lineCarriesID(tail, id) {
+		t.Fatalf("the written line must satisfy the CLI's matcher: %v %q", err, tail)
+	}
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""
@@ -314,8 +390,10 @@ func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 	}
 	msg := base64.StdEncoding.EncodeToString([]byte("ship it?"))
 	log := "\x1b]7501;state=blocked:kind=question:id=build:msg=" + msg + "\x07"
-	if err := os.WriteFile(filepath.Join(jobs, "01794028541589289100-161600.out"), []byte(log), 0o600); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"01794028541589289100-161600", "01794028541589289102-161900", "01794028541589289103-162000", "01794028541589289101-161700"} {
+		if err := os.WriteFile(filepath.Join(jobs, name+".out"), []byte(log), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	const withLog = "01794028541589289100-161600.ticket"
 	rep := &report.Report{Schema: 1, Queues: []report.Queue{{

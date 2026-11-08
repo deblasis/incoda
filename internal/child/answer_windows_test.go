@@ -84,6 +84,9 @@ time.sleep(1)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	if !strings.Contains(string(tee.Bytes()), "PROMPT>") {
+		t.Fatalf("the job never showed its prompt; tee: %q", tee.Bytes())
+	}
 	if err := door.Deliver("yes\r"); err != nil {
 		t.Fatalf("deliver: %v\ntee so far: %q", err, tee.Bytes())
 	}
@@ -157,3 +160,70 @@ func TestAnswerDoorSerializesDeliveries(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+// A per-key reader - a raw-mode line editor, any question prompt that
+// echoes and thinks between keys - consumes the injected events across
+// reads with gaps far past any poll cadence. The delivery verdict must
+// wait for the WHOLE payload to drain: breaking on partial movement
+// flushes the unread remainder under the reader and calls it delivered.
+func TestAnswerDeliversWholePayloadToAPerKeyReader(t *testing.T) {
+	py, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("no python on PATH")
+	}
+	script := filepath.Join(t.TempDir(), "perkey.py")
+	src := `
+import msvcrt, sys, threading, os, time
+def wd():
+    time.sleep(20); os._exit(9)
+threading.Thread(target=wd, daemon=True).start()
+sys.stdout.write("PROMPT> "); sys.stdout.flush()
+got = ""
+while len(got) < 4:
+    if msvcrt.kbhit():
+        got += msvcrt.getwch()
+    time.sleep(0.01)
+sys.stdout.write("\r\nREAD<" + repr(got) + ">END\r\n"); sys.stdout.flush()
+time.sleep(0.5)
+`
+	if err := os.WriteFile(script, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var tee lockedBuffer
+	door := &AnswerDoor{}
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		_, runErr = Run([]string{py, script}, nil, nil, nil, nil,
+			Options{PTY: &PTYOptions{Tee: &tee, Answer: door}})
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(string(tee.Bytes()), "PROMPT>") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(string(tee.Bytes()), "PROMPT>") {
+		t.Fatalf("the job never showed its prompt; tee: %q", tee.Bytes())
+	}
+	if err := door.Deliver("yes\r"); err != nil {
+		t.Fatalf("deliver: %v\ntee so far: %q", err, tee.Bytes())
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the per-key reader never finished; tee: %q", tee.Bytes())
+	}
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	out := string(tee.Bytes())
+	if !strings.Contains(out, "READ<'yes") {
+		t.Fatalf("the reader got a truncated payload:\n%q", out)
+	}
+	if !strings.Contains(out, ">END") {
+		t.Fatalf("the read never completed:\n%q", out)
+	}
+}

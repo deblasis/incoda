@@ -61,15 +61,7 @@ func (c consoleInjector) Write(b []byte) (int, error) {
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			switch ee.ExitCode() {
-			case 3:
-				return 0, errors.New("the job did not read what was typed at its console")
-			case 0xC000013A:
-				// STATUS_CONTROL_C_EXIT: the console closed underneath the
-				// helper - the job ended in the same instant the answer
-				// was typed. The bytes were written before the close.
-				return 0, ErrConsoleClosedAnswer
-			}
+			return 0, verdictError(ee.ExitCode())
 		}
 		return 0, fmt.Errorf("console input injection failed: %w", err)
 	}
@@ -166,6 +158,11 @@ func InjectConsoleInput(args []string) int {
 		}
 	}
 	defer restore()
+	// base is the buffer's count BEFORE this write: everything above it
+	// (save one) is this payload, whatever else the buffer held. The
+	// verdict is decided against it, never against movement alone.
+	var base uint32
+	k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&base)))
 	recs := keyEvents(b)
 	var written uint32
 	r1, _, _ := k32.NewProc("WriteConsoleInputW").Call(
@@ -173,34 +170,28 @@ func InjectConsoleInput(args []string) int {
 	if r1 == 0 || written == 0 {
 		return 1
 	}
-	// Watch the input buffer drain. A blocked reader consumes the events
-	// within microseconds of the write, so the loop polls before it
-	// sleeps: an answer often ends the job that read it, and every
-	// millisecond spent attached to a console that is about to close is a
-	// window for the close to kill this helper before its verdict leaves.
+	// Watch the payload drain. Delivered means everything this helper
+	// wrote was consumed: the count fell back to base (plus one, for the
+	// up-event a cooked line read can leave behind). Partial movement is
+	// NOT delivery - a raw per-key reader (a line editor, the
+	// terminal-reply loop itself) drains across reads with gaps far past
+	// any poll cadence, and breaking early there would flush the unread
+	// remainder under a reader that is still reading and call it
+	// delivered. The settle window bounds the wait for exactly that
+	// reader; a reader that never comes leaves the payload past base at
+	// settle, which is the honest nobody-listened refusal.
 	//
-	// Consumption, not emptiness, is the read signal: a cooked line read
-	// can leave the completing key's up-event behind, so a buffer that
-	// settles at one straggler was still read from. Only a count that
-	// never moved means nobody was listening.
+	// A blocked reader consumes within microseconds of the write, so the
+	// first polls are micro-polls (backing off to a few milliseconds): a
+	// job that finishes on its answer kills its console milliseconds
+	// later, and the delivered verdict must leave before the close can.
 	wait := time.Now().Add(coninjWait)
 	settledAt := time.Now()
 	var last, n uint32
 	k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&n)))
 	last = n
 	pollGap := 100 * time.Microsecond
-	for n > 0 && time.Now().Before(wait) {
-		// Any consumption is the verdict: leave now. A cooked line read
-		// can leave the completing key's up-event behind, so waiting for
-		// emptiness would park this helper on a straggler for the whole
-		// settle window - and a job that finishes on the answer kills its
-		// console milliseconds after reading it, which is a race the
-		// helper loses whenever it lingers. Only a count that never moved
-		// means nobody was listening, and that is what the settle window
-		// is for.
-		if n < written {
-			break
-		}
+	for n > base+1 && time.Now().Before(wait) {
 		if n != last {
 			last = n
 			settledAt = time.Now()
@@ -208,17 +199,14 @@ func InjectConsoleInput(args []string) int {
 		if time.Since(settledAt) > coninjSettle {
 			break
 		}
-		// A reader blocked in its read consumes the events within
-		// microseconds, so the first polls are micro-polls and the
-		// cadence backs off to 2ms once the read is clearly not imminent.
 		time.Sleep(pollGap)
 		if pollGap < 2*time.Millisecond {
 			pollGap *= 2
 		}
 		k32.NewProc("GetNumberOfConsoleInputEvents").Call(uintptr(h), uintptr(unsafe.Pointer(&n)))
 	}
-	consumed := n == 0 || n < written
-	if n > 0 {
+	consumed := n <= base+1
+	if n > base {
 		k32.NewProc("FlushConsoleInputBuffer").Call(uintptr(h))
 	}
 	// Delivered: restore the echo and leave the console NOW, inline — the
@@ -226,7 +214,7 @@ func InjectConsoleInput(args []string) int {
 	restore()
 	k32.NewProc("FreeConsole").Call()
 	if consumed {
-		return 0 // the job read from its console: it was listening
+		return 0 // the job read everything that was typed: it was listening
 	}
 	return 3
 }

@@ -847,7 +847,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				for _, pt := range toTake {
 					if req, ok := pt.en.AnswerRequested(); ok && req.Verdict == "" {
 						_ = pt.en.AnswerRefused(req.ID, "the run ended before the answer was delivered")
-						pt.q.Logf("queue=%s event=answer-refused pid=%d id=%s reason=run-ended", pt.key, os.Getpid(), req.ID)
+						pt.q.Logf("queue=%s event=answer-refused pid=%d id=%s reason=run-ended", pt.key, os.Getpid(), textsafe.LogValue(req.ID))
 					}
 				}
 				return
@@ -859,10 +859,10 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					}
 					if err := deliverAnswer(pt, req, answerDoor); err != nil {
 						_ = pt.en.AnswerRefused(req.ID, err.Error())
-						pt.q.Logf("queue=%s event=answer-refused pid=%d id=%s reason=%s", pt.key, os.Getpid(), req.ID, textsafe.LogValue(err.Error()))
+						pt.q.Logf("queue=%s event=answer-refused pid=%d id=%s reason=%s", pt.key, os.Getpid(), textsafe.LogValue(req.ID), textsafe.LogValue(err.Error()))
 					} else {
 						_ = pt.en.AnswerDelivered(req.ID)
-						pt.q.Logf("queue=%s event=answer-delivered pid=%d id=%s", pt.key, os.Getpid(), req.ID)
+						pt.q.Logf("queue=%s event=answer-delivered pid=%d id=%s", pt.key, os.Getpid(), textsafe.LogValue(req.ID))
 					}
 				}
 			}

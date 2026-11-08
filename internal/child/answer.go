@@ -2,6 +2,7 @@ package child
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -28,11 +29,10 @@ func (l *lockedInjector) Write(b []byte) (int, error) {
 	return l.w.Write(b)
 }
 
-// Deliveries serialize inside the door: one helper attaches, suppresses
-// echo, writes, waits and flushes at a time, so two answers can never
-// interleave their console-mode choreography on one console. The replier's
-// own path is untouched and stays independent: replies are a terminal's
-// answer, not an owner's, and their discipline is the replier's own.
+// Deliveries serialize inside the door, and - through the shared
+// lockedInjector the pty runner hands both writers - against the
+// replier's helpers too: one __coninj at a time is the whole story of a
+// console's input buffer, whoever asked for the typing.
 //
 // stop never waits for an in-flight delivery (its helper caps itself): the
 // door goes dead instantly at teardown, and a delivery still running fails
@@ -47,10 +47,10 @@ type AnswerDoor struct {
 var ErrNoPtyAnswer = errors.New("answer needs a pty job: plain-pipe runs have no console to type into")
 
 // ErrConsoleClosedAnswer is what a helper reports when the job's console
-// closed while it was delivering: the bytes were written to a console
-// whose job had passed the blocked gate moments before, and the close
-// means the job ended in the same instant. Whether it read the answer is
-// the job's own exit to say, so this is delivered-with-audit, not refused.
+// closed while it was delivering: the write's fate is unknowable from
+// outside, so this is a refusal - the job's own outcome is where the
+// answerer looks next, and exit 0 is never claimed for a delivery that
+// cannot be verified.
 var ErrConsoleClosedAnswer = errors.New("the job's console closed while the answer was being delivered")
 
 // setInjector arms the door. Called by the pty runner once the job's pid
@@ -79,4 +79,20 @@ func (d *AnswerDoor) Deliver(text string) error {
 	}
 	_, err := d.inj.Write([]byte(text))
 	return err
+}
+
+// verdictError maps the injector helper's exit code to the error an
+// answerer reads: 3, written but never read (the honest
+// nobody-was-listening); STATUS_CONTROL_C_EXIT (0xC000013A), the console
+// closed under the helper - a refusal, because the write's fate is
+// unknowable; anything else, the generic failure.
+func verdictError(exitCode int) error {
+	switch exitCode {
+	case 3:
+		return errors.New("the job did not read what was typed at its console")
+	case 0xC000013A:
+		return ErrConsoleClosedAnswer
+	default:
+		return fmt.Errorf("console input injection failed: exit status %d", exitCode)
+	}
 }
