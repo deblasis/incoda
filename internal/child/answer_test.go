@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
 // The helper's exit code is the delivery verdict, and the door turns it
 // into the error an answerer reads. A swap of the cases would flip a
 // truncated delivery into a success and a closed console into a generic

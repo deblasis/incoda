@@ -7,3 +7,4 @@ incoda.exe
 # go test scratch
 *.test
 *.exe~
+.claude/

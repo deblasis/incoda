@@ -157,10 +157,6 @@ func TestAnswerDoorSerializesDeliveries(t *testing.T) {
 	t.Fatalf("deliveries never completed in order: %v", calls)
 }
 
-type writerFunc func([]byte) (int, error)
-
-func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
-
 // A per-key reader - a raw-mode line editor, any question prompt that
 // echoes and thinks between keys - consumes the injected events across
 // reads with gaps far past any poll cadence. The delivery verdict must
