@@ -59,7 +59,8 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 				return usagef("invalid queue key: %v", err)
 			}
 		}
-		if err := tui.Run(tui.Options{Dir: dir, Version: Version, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor, Owner: *owner}); err != nil {
+		v, _, _ := versionInfo()
+		if err := tui.Run(tui.Options{Dir: dir, Version: v, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor, Owner: *owner}); err != nil {
 			return exitWith(ExitState, "watch: %v", err)
 		}
 		return nil

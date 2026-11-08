@@ -117,7 +117,8 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 		}
 		keys = []string{key}
 	}
-	rep, err := report.Build(dir, Version, keys, all, events)
+	v, _, _ := versionInfo()
+	rep, err := report.Build(dir, v, keys, all, events)
 	if err != nil {
 		return nil, machineExit(err)
 	}
