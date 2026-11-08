@@ -24,9 +24,8 @@ func statusKey(queue, file string) string { return queue + "\x00" + file }
 // and a participant that left the report drops its cache entry, so the
 // screen paints from memory however often it redraws.
 //
-// Only a pty job the viewer owns gets a status. The status carries text the
-// job wrote, and the capture view hands a job's output to its owner alone
-// (lane.MayAttach); the row must not be a way around that.
+// Any pty job gets a status. The status carries text the job wrote, and
+// the capture view is open to everyone, so the row hides nothing.
 func (m *Model) refreshStatus(rep *report.Report) {
 	seen := map[string]bool{}
 	next := map[string]osc7501.Record{}
@@ -35,7 +34,7 @@ func (m *Model) refreshStatus(rep *report.Report) {
 			laneDir := lane.LaneDir(m.opt.Dir, q.Key)
 			for _, group := range [][]lane.Entry{q.Holders, q.Waiting} {
 				for _, e := range group {
-					if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, m.opt.Owner) != nil {
+					if !e.Ticket.PTY || e.PayloadError != "" {
 						continue
 					}
 					path, err := joblog.Path(laneDir, e.File)

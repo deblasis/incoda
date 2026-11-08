@@ -83,7 +83,7 @@ func TestAnswerClosesTheLoopOnABlockedJob(t *testing.T) {
 	pid := 0
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		out, errb, code := ptyRunIncoda(t, env, "status", "--queue", "pty-ans", "--json", "--owner", "alice")
+		out, errb, code := ptyRunIncoda(t, env, "status", "--queue", "pty-ans", "--json")
 		if code != 0 {
 			t.Fatalf("status --json exited %d:\n%s\n%s", code, out, errb)
 		}
@@ -115,7 +115,7 @@ func TestAnswerClosesTheLoopOnABlockedJob(t *testing.T) {
 	// never reaches the job.
 	_, errb, code := ptyRunIncoda(t, ownerEnv(state, "mallory"), "answer",
 		"--queue", "pty-ans", "--pid", itoa(pid), "--text", "no", "--wait", "2s")
-	if code == 0 || !strings.Contains(errb, "attach refused") {
+	if code == 0 || !strings.Contains(errb, "answer refused") {
 		t.Fatalf("a stranger's answer must be refused by name, got exit %d:\n%s", code, errb)
 	}
 
@@ -238,7 +238,7 @@ func waitForHolder(t *testing.T, env []string, key string) int {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json")
 		var rep statusJSONShape
 		if json.Unmarshal([]byte(out), &rep) == nil {
 			for _, q := range rep.Queues {
@@ -346,7 +346,7 @@ func waitForHolderFile(t *testing.T, env []string, key string) string {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+		out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json")
 		var rep statusJSONShape
 		if json.Unmarshal([]byte(out), &rep) == nil {
 			for _, q := range rep.Queues {
@@ -365,7 +365,7 @@ func waitForHolderFile(t *testing.T, env []string, key string) string {
 
 func holderPid(t *testing.T, env []string, key string) string {
 	t.Helper()
-	out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json", "--owner", "alice")
+	out, _, _ := ptyRunIncoda(t, env, "status", "--queue", key, "--json")
 	var rep statusJSONShape
 	if json.Unmarshal([]byte(out), &rep) != nil {
 		t.Fatal("status parse")

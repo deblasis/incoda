@@ -33,7 +33,7 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 	queue := fs.String("queue", "", "queue key (defaults to $INCODA_QUEUE)")
 	pid := fs.Int("pid", 0, "pid of the blocked pty holder, as status shows it")
 	text := fs.String("text", "", "the reply to type at the job's console input; a carriage return completes it unless --raw")
-	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity that may answer (the job's own owner; --owner / $INCODA_OWNER, the same as attach)")
+	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity that may answer (the job's own owner; --owner / $INCODA_OWNER)")
 	raw := fs.Bool("raw", false, "type the text exactly as given, with no completing carriage return")
 	wait := fs.Duration("wait", 10*time.Second, "how long to wait for the run to deliver the reply or refuse it")
 	fs.Usage = func() {
@@ -71,7 +71,7 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 	if me == "" {
 		// The fast refusal for a missing identity: the run would say the
 		// same, one poll later.
-		return usagef("attach needs --owner or $INCODA_OWNER: answer is limited to the job's own owner")
+		return usagef("answer needs --owner or $INCODA_OWNER: answer is limited to the job's own owner")
 	}
 	req := lane.AnswerRequest{ID: fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()), By: me, ByPID: os.Getpid(), Text: *text}
 	entry, err := q.RequestAnswer(*pid, req)
@@ -90,7 +90,7 @@ func cmdAnswer(args []string, stdout, stderr io.Writer) error {
 		takeBack()
 		return err
 	}
-	if err := lane.MayAttach(entry.Ticket, me); err != nil {
+	if err := lane.MayInteract(entry.Ticket, me); err != nil {
 		takeBack()
 		return usagef("%v", err)
 	}

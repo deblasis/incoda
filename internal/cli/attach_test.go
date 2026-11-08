@@ -187,7 +187,7 @@ func TestAttachRefusesMangledTicketWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	code := Main([]string{"attach", "--queue", "seed", "--pid", "4243", "--owner", "alice"}, io.Discard, &stderr)
+	code := Main([]string{"attach", "--queue", "seed", "--pid", "4243"}, io.Discard, &stderr)
 	if code != ExitUsage {
 		t.Fatalf("a name/pid mismatch must refuse with 120, got %d:\n%s", code, stderr.String())
 	}

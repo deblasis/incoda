@@ -363,22 +363,12 @@ func TestPTYAttachGateStreamKillCleanup(t *testing.T) {
 		t.Fatalf("ticket should say pty by alice, got %+v", h.Tick)
 	}
 
-	// Another owner is refused, and the refusal names both sides.
-	out, errb, code := ptyRunIncoda(t, ownerEnv(state, "bob"),
-		"attach", "--queue", "pty-live", "--pid", fmt.Sprint(h.Tick.PID))
-	if code != 120 {
-		t.Fatalf("wrong owner attach: want exit 120, got %d\n%s\n%s", code, out, errb)
-	}
-	for _, want := range []string{"belongs to owner \"alice\"", "you are \"bob\"", "Only the job's owner may attach"} {
-		if !strings.Contains(errb, want) && !strings.Contains(out, want) {
-			t.Fatalf("refusal missing %q:\n%s%s", want, out, errb)
-		}
-	}
-
-	// The right owner attaches and sees the stream LIVE, not a replay: pin
-	// the highest marker index the file holds right now, and require the
-	// attach stream to move strictly past it. A from-start replay contains
-	// those same indices, so only following the file clears this.
+	// Anyone may attach - viewing is open - and the stream arrives LIVE,
+	// not as a replay: pin the highest marker index the file holds right
+	// now, and require the attach stream to move strictly past it. A
+	// from-start replay contains those same indices, so only following
+	// the file clears this. The attacher below runs as bob, who is not
+	// the owner: the capture view checks nothing about who is asking.
 	preAttach := -1
 	if files, _ := filepath.Glob(filepath.Join(state, "lanes", "pty-live", "jobs", "*.out")); len(files) == 1 {
 		if b, rerr := os.ReadFile(files[0]); rerr == nil {
@@ -390,7 +380,7 @@ func TestPTYAttachGateStreamKillCleanup(t *testing.T) {
 		}
 	}
 	attach := exec.Command(bin, "attach", "--queue", "pty-live", "--pid", fmt.Sprint(h.Tick.PID))
-	attach.Env = ownerEnv(state, "alice")
+	attach.Env = ownerEnv(state, "bob")
 	attachErr := &bytes.Buffer{}
 	attach.Stderr = attachErr
 	pipe, err := attach.StdoutPipe()

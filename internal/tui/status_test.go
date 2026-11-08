@@ -34,7 +34,6 @@ func TestWatchShowsProgramStatus(t *testing.T) {
 		Load:     func() (*report.Report, error) { return rep, nil },
 		Now:      func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) },
 		Dir:      state,
-		Owner:    "alice",
 		PtyAlive: func(int) bool { return true },
 	})
 	m.width, m.height = 120, 40
@@ -50,7 +49,7 @@ func TestWatchShowsProgramStatus(t *testing.T) {
 	}
 }
 
-func statusModel(t *testing.T, owner, msg string) Model {
+func statusModel(t *testing.T, msg string) Model {
 	t.Helper()
 	state := t.TempDir()
 	jobs := filepath.Join(lane.LaneDir(state, "builds"), "jobs")
@@ -67,7 +66,6 @@ func statusModel(t *testing.T, owner, msg string) Model {
 		Load:     func() (*report.Report, error) { return rep, nil },
 		Now:      func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) },
 		Dir:      state,
-		Owner:    owner,
 		PtyAlive: func(int) bool { return true },
 	})
 	m.width, m.height = 120, 40
@@ -77,23 +75,10 @@ func statusModel(t *testing.T, owner, msg string) Model {
 	return mm.(Model)
 }
 
-// The capture view is the job's owner's; the status row carries text from
-// the same log and follows the same rule.
-func TestWatchStatusHonoursTheOwnerGate(t *testing.T) {
-	for _, owner := range []string{"bob", ""} {
-		if v := view(statusModel(t, owner, "SECRET-TOKEN")); strings.Contains(v, "SECRET-TOKEN") || strings.Contains(v, "[working") {
-			t.Errorf("owner %q is not alice and must not see her job's status:\n%s", owner, v)
-		}
-	}
-	if v := view(statusModel(t, "alice", "visible")); !strings.Contains(v, "[working 55%] visible") {
-		t.Errorf("the owner sees the status:\n%s", v)
-	}
-}
-
 // Painting never touches the log: the status was read when the report
 // arrived, so a redraw (mouse motion, resize) costs no file access.
 func TestViewDoesNotReadTheLog(t *testing.T) {
-	m := statusModel(t, "alice", "linking")
+	m := statusModel(t, "linking")
 	for _, ls := range m.logs {
 		before := ls.BytesRead()
 		for range 20 {
@@ -113,7 +98,7 @@ func TestViewDoesNotReadTheLog(t *testing.T) {
 // head is not cut: the msg gives way first, then the whole status.
 func TestWatchStatusFitsNarrowWidths(t *testing.T) {
 	for _, w := range []int{40, 44, 50, 60, 80} {
-		m := statusModel(t, "alice", "compiling a long thing")
+		m := statusModel(t, "compiling a long thing")
 		m.width = w
 		rows := 0
 		for _, line := range strings.Split(view(m), "\n") {

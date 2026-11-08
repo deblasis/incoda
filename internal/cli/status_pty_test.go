@@ -29,7 +29,7 @@ func TestStatusMarksPtyParticipants(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	out := buf.String()
 	if !strings.Contains(out, "HOLDER 🖥️") {
 		t.Fatalf("a pty holder must carry the mark next to it, got:\n%s", out)
@@ -41,7 +41,7 @@ func TestStatusMarksPtyParticipants(t *testing.T) {
 	qr.Holders[0].Ticket.PTY = false
 	qr.Waiting[0].Ticket.PTY = false
 	buf.Reset()
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	if strings.Contains(buf.String(), "🖥️") {
 		t.Fatalf("pipe-mode participants must carry no mark, got:\n%s", buf.String())
 	}
@@ -77,7 +77,7 @@ func TestStatusShowsProgramStatusFromJobLog(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	out := buf.String()
 	if !strings.Contains(out, "[working 55%] linking") {
 		t.Fatalf("holder with records must show the root record, got:\n%s", out)
@@ -91,7 +91,7 @@ func TestStatusShowsProgramStatusFromJobLog(t *testing.T) {
 	// Pipe-mode job: no status even with a log file that holds records.
 	qr.Holders[0].Ticket.PTY = false
 	buf.Reset()
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	if strings.Contains(buf.String(), "[working") {
 		t.Fatalf("a non-pty job shows no status, got:\n%s", buf.String())
 	}
@@ -118,7 +118,7 @@ func plainStatus(t *testing.T, filler int) (string, *string) {
 			Ticket: lane.Ticket{PID: 111, PTY: true, Owner: "alice", Command: []string{"zig", "build"}}}},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	return buf.String(), &path
 }
 
@@ -143,7 +143,7 @@ func TestPlainStatusPollReadsOnlyAppendedBytes(t *testing.T) {
 	}
 	follow := newStatusFollowers()
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr, "alice", follow)
+	renderQueue(&buf, colorize.Plain, qr, follow)
 	if !strings.Contains(buf.String(), "[working 10%] early record") {
 		t.Fatalf("the follower lost the record:\n%s", buf.String())
 	}
@@ -159,7 +159,7 @@ func TestPlainStatusPollReadsOnlyAppendedBytes(t *testing.T) {
 	f.WriteString("another filler line\r\n")
 	f.Close()
 	buf.Reset()
-	renderQueue(&buf, colorize.Plain, qr, "alice", follow)
+	renderQueue(&buf, colorize.Plain, qr, follow)
 	if grew := ls.BytesRead() - before; grew > 4<<10 {
 		t.Fatalf("a poll with 19 appended bytes read %d bytes", grew)
 	}
@@ -184,7 +184,7 @@ func TestForgedMarkerDoesNotFreezeTheStatus(t *testing.T) {
 			Ticket: lane.Ticket{PID: 111, PTY: true, Owner: "alice", Command: []string{"zig", "build"}}}},
 	}
 	var buf bytes.Buffer
-	renderQueue(&buf, colorize.Plain, qr, "alice", nil)
+	renderQueue(&buf, colorize.Plain, qr, nil)
 	if !strings.Contains(buf.String(), "[working] still going") {
 		t.Fatalf("a forged marker froze the status row:\n%s", buf.String())
 	}

@@ -920,7 +920,7 @@ func deliverAnswer(pt *lanePart, req lane.AnswerRequest, door answerDoor) error 
 	if !tick.PTY {
 		return fmt.Errorf("job pid %d on queue %q is not a pty job: it reports no status, and the answer door needs a console to type into", tick.PID, pt.key)
 	}
-	if err := lane.MayAttach(tick, req.By); err != nil {
+	if err := lane.MayInteract(tick, req.By); err != nil {
 		return err
 	}
 	path, err := joblog.Path(pt.q.Dir, pt.en.Name())

@@ -47,7 +47,7 @@ func answerFixture(t *testing.T) (*lane.Queue, *lane.Enrollment, string) {
 }
 
 // The answer command is gated before anything reaches the run: an
-// answerer who is not the job's owner is refused with attach's own words
+// answerer who is not the job's owner is refused by name
 // and the request is withdrawn, so the run never sees a request it would
 // only refuse. A missing identity, an unknown pid and a job with no
 // console are each refused by name.
@@ -60,8 +60,8 @@ func TestAnswerRefusesByGateBeforeTheRunSeesAnything(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"not the owner", []string{"--queue", "unit", "--pid", pid, "--text", "y", "--owner", "mallory"}, "attach refused"},
-		{"no identity", []string{"--queue", "unit", "--pid", pid, "--text", "y"}, "attach needs --owner"},
+		{"not the owner", []string{"--queue", "unit", "--pid", pid, "--text", "y", "--owner", "mallory"}, "answer refused"},
+		{"no identity", []string{"--queue", "unit", "--pid", pid, "--text", "y"}, "answer needs --owner"},
 		{"unknown pid", []string{"--queue", "unit", "--pid", "999999", "--text", "y", "--owner", "alice"}, "no live participant"},
 	}
 	for _, c := range cases {
@@ -408,7 +408,7 @@ func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 		},
 	}}}
 
-	fillProgramStatus(rep, "alice")
+	fillProgramStatus(rep)
 	h := rep.Queues[0].Holders[0]
 	if h.ProgramStatus == nil || h.ProgramStatus.State != "blocked" || h.ProgramStatus.Kind != "question" || h.ProgramStatus.Msg != "ship it?" {
 		t.Fatalf("the owner's record must be filled, got %+v", h.ProgramStatus)
@@ -419,14 +419,7 @@ func TestFillProgramStatusIsOwnerGatedAndAdditive(t *testing.T) {
 	if broken := rep.Queues[0].Holders[2]; broken.ProgramStatus != nil {
 		t.Fatalf("a broken payload must carry no record, got %+v", broken.ProgramStatus)
 	}
-	if w := rep.Queues[0].Waiting[0]; w.ProgramStatus != nil {
-		t.Fatalf("another owner's participant must carry no record, got %+v", w.ProgramStatus)
-	}
 
-	fillProgramStatus(rep, "mallory")
-	if h := rep.Queues[0].Holders[0]; h.ProgramStatus != nil {
-		t.Fatalf("a non-owner must get no record, got %+v", h.ProgramStatus)
-	}
 	if rep.Schema != 1 {
 		t.Fatalf("the schema version must stay 1, got %d", rep.Schema)
 	}

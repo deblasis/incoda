@@ -18,20 +18,19 @@ import (
 // terminal: the job file from its start, then follows it until the job's run
 // process is gone. Read-only: nothing typed here reaches the job.
 //
-// Only the job's owner may attach. The owner identity is the same string the
-// run put on its ticket (--owner / $INCODA_OWNER), so on a shared machine one
-// session cannot watch another's job without saying whose it is. Like kill's
-// owner rule this is lane etiquette between cooperating sessions, not a
-// security boundary: the job file sits in the state directory next to
-// everything else that is already per-user.
+// Anyone may watch - the capture is a view, and on a shared machine one
+// session can follow another's job without asking whose it is. Typing at
+// the job is the answer door's business, and that one stays limited to the
+// job's own owner. Like kill's owner rule this is lane etiquette between
+// cooperating sessions, not a security boundary: the job file sits in the
+// state directory next to everything else that is already per-user.
 func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	start := time.Now()
 	fs := newFlagSet("attach", stderr)
 	queue := fs.String("queue", "", "queue key (defaults to $INCODA_QUEUE)")
 	pid := fs.Int("pid", 0, "pid of the pty-mode job's run process, as status shows it")
-	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "the identity to attach as; must match the job's owner (defaults to $INCODA_OWNER)")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: incoda attach --queue KEY --pid N [--owner WHO]\n\n")
+		fmt.Fprintf(stderr, "usage: incoda attach --queue KEY --pid N\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -71,7 +70,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if entry == nil {
 		return usagef("queue %q has no live participant with pid %d: %v", key, *pid, lane.ErrNoParticipant)
 	}
-	if err := authorizeAttach(key, entry, *owner); err != nil {
+	if err := authorizeAttach(key, entry); err != nil {
 		return err
 	}
 	if !entry.Ticket.PTY {
@@ -108,26 +107,21 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 
 // authorizeAttach is every gate that decides whether this entry may be
 // streamed at all, ahead of any file being opened: the ticket must be fully
-// readable and self-consistent (validateEntryForAttach), and only its owner
-// may watch (lane.MayAttach). One function so the wiring has one name to
+// readable and self-consistent (validateEntryForAttach). Viewing is open to
+// everyone, so there is no owner gate here - typing at the job is answer's
+// door, and that one checks. One function so the wiring has one name to
 // guard: attach that skipped any of it would stream on the strength of a
-// mangled or foreign ticket.
-func authorizeAttach(key string, entry *lane.Entry, me string) error {
-	if err := validateEntryForAttach(key, entry); err != nil {
-		return err
-	}
-	if err := lane.MayAttach(entry.Ticket, me); err != nil {
-		return usagef("%v", err)
-	}
-	return nil
+// mangled ticket.
+func authorizeAttach(key string, entry *lane.Entry) error {
+	return validateEntryForAttach(key, entry)
 }
 
-// validateEntryForAttach refuses entries the owner gate alone must not
-// clear. A payload that could not be fully parsed can carry a wrong owner
+// validateEntryForAttach refuses entries a lazy viewer alone must not
+// stream. A payload that could not be fully parsed can carry a wrong owner
 // field, so authorizing on it would stream on the strength of a half-read
 // ticket. A file name and payload that disagree about the pid is a planted
 // or mangled ticket: the file name is what findEntry matched on, the
-// payload is what the gate reads, and attach must not act where the two
+// payload is what the viewer reads, and attach must not act where the two
 // disagree.
 func validateEntryForAttach(key string, entry *lane.Entry) error {
 	if entry.PayloadError != "" {

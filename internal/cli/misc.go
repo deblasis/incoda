@@ -36,7 +36,6 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 	plain := fs.Bool("plain", false, "repaint the plain status text instead of the interactive screen; implied by --once or a non-terminal stdout")
 	events := fs.Int("events", 5, "how many recent log events to show")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
-	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity the pty viewer checks against a job's ticket (--owner / $INCODA_OWNER, the same as attach)")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for watch"}
 	}
@@ -60,7 +59,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		v, _, _ := versionInfo()
-		if err := tui.Run(tui.Options{Dir: dir, Version: v, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor, Owner: *owner}); err != nil {
+		if err := tui.Run(tui.Options{Dir: dir, Version: v, Key: key, Interval: *interval, Events: max(*events, 8), NoColor: *noColor}); err != nil {
 			return exitWith(ExitState, "watch: %v", err)
 		}
 		return nil
@@ -89,7 +88,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		if rep.Banner != "" {
 			fmt.Fprintf(stdout, "%s\n\n", p.Yellow("incoda: "+rep.Banner))
 		}
-		renderReport(stdout, p, rep, *owner, follow)
+		renderReport(stdout, p, rep, follow)
 		if *once {
 			return nil
 		}

@@ -55,9 +55,7 @@ type Options struct {
 	Killer   Killer
 	Load     func() (*report.Report, error)
 	Now      func() time.Time
-	// Owner is the identity the pty viewer checks against a job's ticket
-	// (the same --owner / $INCODA_OWNER attach checks).
-	Owner string
+
 	// PtyRead drains the job file past offset to its end; the default
 	// reads the real capture. PtyAlive says whether the run process is
 	// still there. Both are seams so the streaming screen is testable
@@ -545,10 +543,6 @@ func (m Model) openPty(p *participant) (tea.Model, tea.Cmd) {
 	}
 	if !p.holding {
 		m.say(fmt.Sprintf("pid %d is still waiting for the lane; open it again once it holds and the job starts", t.PID), true)
-		return m, nil
-	}
-	if err := lane.MayAttach(t, m.opt.Owner); err != nil {
-		m.say(err.Error(), true)
 		return m, nil
 	}
 	path, err := joblog.Path(lane.LaneDir(m.opt.Dir, m.key), p.entry.File)

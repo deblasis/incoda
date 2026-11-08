@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestMayAttachGate(t *testing.T) {
+func TestMayInteractGate(t *testing.T) {
 	job := Ticket{PID: 4242, Queue: "builds", Owner: "alice"}
 	cases := []struct {
 		name    string
@@ -34,7 +34,7 @@ func TestMayAttachGate(t *testing.T) {
 		{
 			name:    "another owner",
 			me:      "bob",
-			wantMsg: []string{"belongs to owner \"alice\"", "you are \"bob\"", "Only the job's owner may attach"},
+			wantMsg: []string{"belongs to owner \"alice\"", "you are \"bob\"", "Only the job's owner may type at it"},
 		},
 		{
 			name:    "ticket without owner",
@@ -49,10 +49,10 @@ func TestMayAttachGate(t *testing.T) {
 			if tk.Owner == "" && tc.ticket.PID == 0 {
 				tk = job
 			}
-			err := MayAttach(tk, tc.me)
+			err := MayInteract(tk, tc.me)
 			if tc.wantOK {
 				if err != nil {
-					t.Fatalf("owner %q should attach, got %v", tc.me, err)
+					t.Fatalf("owner %q should pass, got %v", tc.me, err)
 				}
 				return
 			}

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -34,7 +33,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	asJSON := fs.Bool("json", false, "emit the stable JSON report")
 	events := fs.Int("events", 5, "how many recent log events to show")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
-	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity that may see a pty job's program status (--owner / $INCODA_OWNER, the same as attach)")
+
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for status"}
 	}
@@ -46,39 +45,37 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		printBanner(stderr, rep.Banner)
 	}
 	if *asJSON {
-		// The record is part of the machine-readable report for the job's
-		// own owner alone - the same gate the plain line applies - so a
-		// script must speak as the owner (--owner / $INCODA_OWNER) to see
-		// it, exactly like a human viewer.
-		fillProgramStatus(rep, *owner)
+		// The record is part of the machine-readable report for anyone
+		// who asks - the same open view a human reader gets.
+		fillProgramStatus(rep)
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
-	renderReport(stdout, paletteFor(stdout, *noColor), rep, *owner, nil)
+	renderReport(stdout, paletteFor(stdout, *noColor), rep, nil)
 	return nil
 }
 
 // fillProgramStatus reads each pty participant's job log once and attaches
-// its OSC 7501 root record to the JSON entry, behind the owner gate. One
-// log, one read: the JSON report is a snapshot, not a follower.
-func fillProgramStatus(rep *Report, owner string) {
+// its OSC 7501 root record to the JSON entry. One log, one read: the JSON
+// report is a snapshot, not a follower.
+func fillProgramStatus(rep *Report) {
 	for qi := range rep.Queues {
 		q := &rep.Queues[qi]
 		if !q.Exists {
 			continue
 		}
 		for i := range q.Holders {
-			fillEntryProgramStatus(&q.Holders[i], q.Dir, owner)
+			fillEntryProgramStatus(&q.Holders[i], q.Dir)
 		}
 		for i := range q.Waiting {
-			fillEntryProgramStatus(&q.Waiting[i], q.Dir, owner)
+			fillEntryProgramStatus(&q.Waiting[i], q.Dir)
 		}
 	}
 }
 
-func fillEntryProgramStatus(e *lane.Entry, laneDir, owner string) {
-	if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, owner) != nil {
+func fillEntryProgramStatus(e *lane.Entry, laneDir string) {
+	if !e.Ticket.PTY || e.PayloadError != "" {
 		e.ProgramStatus = nil
 		return
 	}
@@ -143,7 +140,7 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 // output is byte-for-byte what the uncolored renderer always produced, so
 // scripts that scrape it keep working.
 
-func renderReport(w io.Writer, p colorize.Palette, rep *Report, owner string, follow *statusFollowers) {
+func renderReport(w io.Writer, p colorize.Palette, rep *Report, follow *statusFollowers) {
 	fmt.Fprintf(w, "%s %s  %s\n", p.Dim("state dir:"), rep.StateDir, p.Dim("("+rep.StateDirSource+")"))
 	if len(rep.Queues) == 0 {
 		fmt.Fprintln(w, p.Dim("no queues have state on this machine"))
@@ -152,7 +149,7 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report, owner string, fo
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		renderQueue(w, p, qr, owner, follow)
+		renderQueue(w, p, qr, follow)
 	}
 	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
 	// Warnings go after every existing line, so scrapers of the lines
@@ -224,14 +221,13 @@ func (f *statusFollowers) sweep(rep *Report) {
 
 // programStatus is the participant's OSC 7501 status for the end of its
 // line: the root record of its job log, painted by state. Only a pty job
-// has a log that can carry records, and only its owner sees what it wrote
-// (the same rule attach and the watch capture view apply, lane.MayAttach);
+// has a log that can carry records, and anyone watching sees what it wrote;
 // everything else, and a log with no records, gives "" and the line is what
 // it always was. A polling viewer (follow) reads only appended bytes; a
 // one-shot render reads the whole log, so a record survives however much
 // output was written after it.
-func programStatus(p colorize.Palette, laneDir string, e lane.Entry, owner string, follow *statusFollowers) string {
-	if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, owner) != nil {
+func programStatus(p colorize.Palette, laneDir string, e lane.Entry, follow *statusFollowers) string {
+	if !e.Ticket.PTY || e.PayloadError != "" {
 		return ""
 	}
 	path, err := joblog.Path(laneDir, e.File)
@@ -270,7 +266,7 @@ func programStatus(p colorize.Palette, laneDir string, e lane.Entry, owner strin
 // statusMsgWidth is how much of a record's msg the participant line keeps.
 const statusMsgWidth = 40
 
-func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, owner string, follow *statusFollowers) {
+func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *statusFollowers) {
 	if !qr.Exists {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
 		return
@@ -295,7 +291,7 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, owner string, 
 	}
 	for _, e := range qr.Holders {
 		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, owner, follow))
+			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, follow))
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -316,7 +312,7 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, owner string, 
 		fmt.Fprintf(w, "  %s\n", p.BoldYellow("WAITING (arrival order):"))
 		for n, e := range qr.Waiting {
 			fmt.Fprintf(w, "    %s%s pid %s waited %s %s%s%s\n",
-				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, owner, follow))
+				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, follow))
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 			if e.Ticket.Owner != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
