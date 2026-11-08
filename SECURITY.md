@@ -25,6 +25,13 @@ The security boundary is the OS user. What is in scope:
   that do not enforce locks.
 - Anything that would make a *less* privileged process able to influence a
   *more* privileged one through the state directory.
+- The answer channel typing at a job it should not reach: `incoda answer`
+  writes into a pty job's console input, so it is double-gated — the
+  owner gate attach shares (`lane.MayAttach`, checked by the command and
+  again by the run against the live ticket) and a blocked gate (the run
+  delivers only while the job's own OSC 7501 record says `blocked` with a
+  kind). The typed text never echoes into the job's log, and a refusal
+  carries its reason back through the same request file.
 
 Out of scope: denial of service by a local user against their own machine
 (they have `kill`), and multi-user isolation on a shared host. State is

@@ -150,6 +150,13 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// it would either be swallowed as VT input or echoed by a cooked-mode
 	// reader into the job's own output.
 	replies := newReplier(consoleInjector{pid: sp.PID})
+	if opt.PTY.Answer != nil {
+		// The owner's typed replies ride the same injector the support
+		// replies do, under the answer door's own serialization; armed
+		// only now that the job's pid exists, stopped before the console
+		// goes away so no answer can land on a reused pid.
+		opt.PTY.Answer.setInjector(consoleInjector{pid: sp.PID})
+	}
 	var tee io.Writer = io.Discard
 	if opt.PTY.Tee != nil {
 		tee = opt.PTY.Tee
@@ -229,6 +236,9 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// moving gets the whole grace window, and the cut says so in-band
 	// because those bytes die with it, in every sink at once.
 	replies.stop() // no reply may race the input handle closing below
+	if opt.PTY.Answer != nil {
+		opt.PTY.Answer.stop() // and no answer may outlive the console it addresses
+	}
 	go p.CloseConsole()
 	input.Close()  // the pump stops taking writes; its in-flight one is cancelled below
 	p.CloseInput() // the cancel unblocks a reply write parked on an unread input

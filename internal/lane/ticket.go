@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -145,6 +146,11 @@ type Entry struct {
 	// queue -- but it must be visible, because a silently unreadable payload
 	// once made every queue look like a one-slot queue.
 	PayloadError string `json:"payload_error,omitempty"`
+	// ProgramStatus is the participant's OSC 7501 root record, filled by
+	// the status command for the job's own owner alone (the same rule
+	// attach and the capture view apply). A scan never fills it: reading
+	// job logs belongs to the reporting layer, not the lane.
+	ProgramStatus *osc7501.Record `json:"program_status,omitempty"`
 
 	order ticketOrder
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/deblasis/incoda/internal/fixline"
 	"github.com/deblasis/incoda/internal/held"
 	"github.com/deblasis/incoda/internal/joblog"
+	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -563,7 +564,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
-				PTY:      ptyOptions(ptyOn, os.Stdout, nil),
+				PTY:      ptyOptions(ptyOn, os.Stdout, nil, nil),
 			})
 			if runErr != nil {
 				return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
@@ -820,6 +821,40 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			}
 		}
 	}()
+
+	// Answers ride their own goroutine, never the kill poll's: a console
+	// that is slow to read what was typed must not delay a kill. The gates
+	// run here, where the ticket and the job's live record are the truth:
+	// the owner check is the attach gate, and the blocked check reads the
+	// job's own log, because the answer door types at a job only while
+	// that job says it is waiting on its user.
+	answerDoor := &child.AnswerDoor{}
+	answersDone := make(chan struct{})
+	if ptyOn {
+		go func() {
+			defer close(answersDone)
+			t := time.NewTicker(*poll)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopWatch:
+					return
+				case <-t.C:
+					for _, pt := range toTake {
+						req, ok := pt.en.AnswerRequested()
+						if !ok || req.Refused != "" {
+							continue
+						}
+						if err := deliverAnswer(pt, req, answerDoor); err != nil {
+							_ = pt.en.AnswerRefused(err.Error())
+						} else {
+							_ = pt.en.AnswerDelivered()
+						}
+					}
+				}
+			}
+		}()
+	}
 	// The held keys reach a nested incoda through the child's environment
 	// only. Setting them on this process would make every later decision
 	// that reads the environment see the child's value.
@@ -833,10 +868,13 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
 		Env:      childEnv(startEnv, held.Format(held.Merge(inherited.L, own))),
 		OwnGroup: len(inherited.L) == 0,
-		PTY:      ptyOptions(ptyOn, tee, jobClosers),
+		PTY:      ptyOptions(ptyOn, tee, jobClosers, answerDoor),
 	})
 	close(stopWatch)
 	<-watchDone
+	if ptyOn {
+		<-answersDone
+	}
 	if runErr != nil {
 		rc = ExitSpawn
 		return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
@@ -866,7 +904,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 // what everything that never asked for a pseudo-console must get. Tee
 // receives the job's merged output verbatim; sizes fall back to the pty
 // package defaults.
-func ptyOptions(on bool, tee io.Writer, jobClosers []*joblog.Writer) *child.PTYOptions {
+func ptyOptions(on bool, tee io.Writer, jobClosers []*joblog.Writer, answer *child.AnswerDoor) *child.PTYOptions {
 	if !on {
 		return nil
 	}
@@ -880,7 +918,41 @@ func ptyOptions(on bool, tee io.Writer, jobClosers []*joblog.Writer) *child.PTYO
 				jl.MarkCapped()
 			}
 		},
+		Answer: answer,
 	}
+}
+
+// deliverAnswer runs the gates that decide whether an owner's typed reply
+// reaches the job: the attach gate against the ticket, then the blocked
+// gate against the job's own record - the door types at a job only while
+// that job reports itself waiting on its user - and finally the delivery
+// itself, whose failure is the verdict the answerer reads back.
+func deliverAnswer(pt *lanePart, req lane.AnswerRequest, door *child.AnswerDoor) error {
+	tick := pt.en.Ticket()
+	if err := lane.MayAttach(tick, req.By); err != nil {
+		return err
+	}
+	path, err := joblog.Path(pt.q.Dir, pt.en.Name())
+	if err != nil {
+		return fmt.Errorf("the job's log cannot be read to check its state: %v", err)
+	}
+	var ls jobstatus.LogStatus
+	r, ok := ls.ReadWhole(path)
+	if !ok || r.State != "blocked" || r.Kind == "" {
+		return fmt.Errorf("job pid %d on queue %q is not reporting blocked over OSC 7501; the answer door only types at a job that asked", tick.PID, pt.key)
+	}
+	if err := door.Deliver(req.Text); err != nil {
+		if errors.Is(err, child.ErrConsoleClosedAnswer) {
+			// The job ended as the answer landed: its own exit is the
+			// answerer's verdict, so the ack is delivered, with the
+			// close on the record for the lane's history.
+			pt.q.Logf("queue=%s event=answer-delivered-console-closed pid=%d by=%s", pt.key, tick.PID, textsafe.LogValue(req.By))
+			return nil
+		}
+		return err
+	}
+	pt.q.Logf("queue=%s event=answer-delivered pid=%d by=%s", pt.key, tick.PID, textsafe.LogValue(req.By))
+	return nil
 }
 
 // planWithFirstLinks plans the run and, when its --pool set equals an

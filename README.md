@@ -127,7 +127,7 @@ Linux) and nothing is ever resolved from the working directory.
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda attach --queue KEY --pid N [--owner WHO]` | Stream a pty job's output live, from its start, read-only, until the job's run process is gone. Only the job's own owner may attach; anyone else is refused with a named error. |
-| `incoda force-release --queue KEY [--live]` | Delete a queue's tickets. Refuses while live participants exist unless `--live`. You almost never need this. |
+| `incoda answer --queue KEY --pid N --text TEXT [--owner WHO] [--raw] [--wait 10s]` | Type a reply at a pty job that reported itself `blocked` over OSC 7501 (kind `question`, `permission` or `auth`): the text is delivered to the job's console input, echo-free, and a carriage return completes it unless `--raw`. Only the job's own owner may answer (the attach gate), and only while the job's own record says blocked — the run enforces both against the live ticket and refuses with a named reason. Delivered exits `0`, a refusal `120`, an answer no run took in time `126`. The job's log never shows what was typed. |
 | `incoda pool add NAME [--slots N] [--description TEXT] [--wait DUR]` | Register one new machine-wide pool and say what changed. Takes `machine.lock`, writes `machine.json` by temp file and rename, and touches no other pool or lane (the generation counter goes up by one). Refuses a name that is invalid or already a pool (`pool-exists`, exit `120`), and a lane of that name that links pools or has a live job (`kind-busy`). `--slots` and `--description` set the pool's `config.json` first, so a crash in between leaves a plain lane and the same command can be rerun. Logs `event=pool-add` to the pool's `lane.log`. |
 | `incoda doctor [--rebuild-registry POOL,POOL... [--wait DUR]]` | State directory, `INCODA_DIR` warning, writability, and a real locking probe that fails loudly on filesystems that do not enforce locks. `--rebuild-registry` rewrites the machine registry after one was lost or damaged, holding every lane still while it checks. |
 
@@ -135,7 +135,8 @@ Linux) and nothing is ever resolved from the working directory.
 use a separate band, documented and stable: `120` usage, `121` wait elapsed
 while still queued or waiting for idle,
 `122` state unusable, `123` spawn failure, `124` killed through the lane,
-`125` a kill that was not acknowledged, `130` interrupted while queueing.
+`125` a kill that was not acknowledged, `126` an answer no run took in
+time, `130` interrupted while queueing.
 
 Output is colored on a terminal and plain everywhere else. The standard
 opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and
@@ -261,8 +262,18 @@ work, and both need `--pty`:
   job printed. The status carries text the job wrote, so like the capture
   view it is for the job's own owner alone (`--owner` / `$INCODA_OWNER` on
   `watch` and `status`); anyone else sees the line without it. `status
-  --json` does not carry the status text: the JSON schema is for scripts
-  and stays as it was.
+  --json` carries the record too, as an additive `program_status` object
+  on the pty participant (schema stays 1, fields are only ever added),
+  behind the same owner gate: a script must speak as the owner to see
+  state, kind, progress, app, id, title and msg, and any other caller
+  gets the participant without it.
+
+  A job that reports `state=blocked` with a kind (`question`,
+  `permission`, `auth`) can be answered: `incoda answer --queue KEY --pid
+  N --text TEXT` types the owner's reply at the job's console input —
+  echo-free, never reaching the job's log — which is the loop an agent
+  driving the queue closes with `status --json` and a shell, and a human
+  closes from anywhere the lane is visible.
 
 In the plain text renderer the accent family has only ANSI yellow, so
 `working` is yellow there and amber in the TUI — the same hue, two palettes.

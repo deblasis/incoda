@@ -4,6 +4,7 @@ package child
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,8 +75,14 @@ sys.stdin.readline()
 // in the real binary.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == ConinjCommand {
-		InjectConsoleInput(os.Args[2:])
-		os.Exit(0)
+		// The exit code is the delivery verdict the answer door reads;
+		// swallowing it here would make every test injection a success.
+		verdict := InjectConsoleInput(os.Args[2:])
+		if tf, err := os.OpenFile("C:/Users/Alessandro/AppData/Local/Temp/coninj-trace.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(tf, "testmain verdict=%d\n", verdict)
+			tf.Close()
+		}
+		os.Exit(verdict)
 	}
 	os.Exit(m.Run())
 }

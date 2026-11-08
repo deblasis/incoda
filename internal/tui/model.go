@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/deblasis/incoda/internal/joblog"
+	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/procinfo"
@@ -178,7 +179,7 @@ type Model struct {
 
 	// logs follow each owned pty participant's job log; status is the root
 	// record they gave at the last report (see refreshStatus).
-	logs   map[string]*osc7501.LogStatus
+	logs   map[string]*jobstatus.LogStatus
 	status map[string]osc7501.Record
 }
 
@@ -216,7 +217,7 @@ func New(opt Options) Model {
 	in.Prompt = "reason: "
 	in.Placeholder = "why this job should stop (its owner will read this)"
 	in.CharLimit = 200
-	m := Model{opt: opt, st: newStyles(true), input: in, width: 100, height: 30, logs: map[string]*osc7501.LogStatus{}}
+	m := Model{opt: opt, st: newStyles(true), input: in, width: 100, height: 30, logs: map[string]*jobstatus.LogStatus{}}
 	if opt.Key != "" {
 		m.single = true
 		m.key = opt.Key
