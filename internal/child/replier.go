@@ -100,13 +100,6 @@ func (s *serialWriter) Close() {
 // writes, never drops the queries behind them (the owed queue below).
 const replyGap = 100 * time.Millisecond
 
-// modeWait is how long a reply waits for the job's console to stop echoing
-// before it is dropped. A program that asks and then starts reading cooked
-// input (readline) never gets an answer from this terminal; one that asks
-// and then switches its console to raw input (every program that can parse
-// a reply has to) gets it within this window.
-const modeWait = 750 * time.Millisecond
-
 // maxOwedReplies bounds the replies owed to queries the writer has not
 // answered yet: one per complete query, but never an unbounded pile in
 // front of a job that will not read its input. Past the bound the query is

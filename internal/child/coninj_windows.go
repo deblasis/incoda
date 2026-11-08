@@ -92,7 +92,7 @@ var k32 = windows.NewLazySystemDLL("kernel32.dll")
 
 // InjectConsoleInput is the body of the hidden `__coninj <pid> <base64>`
 // entry: attach to pid's console, write the decoded bytes as key events
-// with echo suppressed, and leave the console exactly as it was found. It
+// with echo suppressed, and leave the console as its job owns it. It
 // is silent about every failure: it plays a terminal answering a query, and
 // a terminal that cannot answer just does not.
 func InjectConsoleInput(args []string) {
@@ -126,7 +126,17 @@ func InjectConsoleInput(args []string) {
 		if err := windows.SetConsoleMode(h, mode&^windows.ENABLE_ECHO_INPUT); err != nil {
 			return // cannot suppress the echo: no reply is better than a leaked one
 		}
-		defer windows.SetConsoleMode(h, mode)
+		// The restore is not a rewind: the job may rewrite its own console
+		// mode while the echo is off (going raw is what a program does the
+		// moment it hears a terminal answer), and that choice is the job's,
+		// not ours to revert. Only a console still exactly as we left it —
+		// echo off, nothing else moved — goes back to the mode we found.
+		defer func() {
+			var now uint32
+			if err := windows.GetConsoleMode(h, &now); err == nil && now == mode&^windows.ENABLE_ECHO_INPUT {
+				_ = windows.SetConsoleMode(h, mode)
+			}
+		}()
 	}
 	recs := keyEvents(b)
 	var written uint32
