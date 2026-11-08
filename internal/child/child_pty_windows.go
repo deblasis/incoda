@@ -262,6 +262,9 @@ drain:
 			if opt.PTY.Tee != nil {
 				_, _ = opt.PTY.Tee.Write([]byte(joblog.CutLine))
 			}
+			if opt.PTY.OnOutputCut != nil {
+				opt.PTY.OnOutputCut()
+			}
 			break drain
 		case <-quiesce.C:
 			// Silence with the job gone, and the pipe provably empty:

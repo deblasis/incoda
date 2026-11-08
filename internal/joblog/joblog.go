@@ -28,6 +28,10 @@ const (
 	// and the prefix match markTruncated, whose stream this is.
 	CutLine = "\r\nincoda: job output cut: the pseudo-console stopped draining; the tail after this line was lost\r\n"
 
+	// cappedExt is the sidecar that says a job log stopped recording, out
+	// of band, where the job itself cannot write one (see MarkCapped).
+	cappedExt = ".capped"
+
 	dirName = "jobs"
 	jobExt  = ".out"
 )
@@ -50,6 +54,7 @@ func Path(laneDir, ticket string) (string, error) {
 // broken job file must not cost the run its stdout bytes.
 type Writer struct {
 	f       *os.File
+	path    string
 	written int64
 	full    bool
 }
@@ -78,7 +83,7 @@ func Create(laneDir, ticket string) (*Writer, error) {
 		}
 		return nil, fmt.Errorf("joblog: %w", err)
 	}
-	return &Writer{f: f}, nil
+	return &Writer{f: f, path: path}, nil
 }
 
 // Write stores what fits. The first time the cap is hit (or a write error
@@ -116,6 +121,27 @@ func (w *Writer) Close() error {
 	return f.Close()
 }
 
+// stopMarkerPrefixes are the "why" texts of the one-line notes this package
+// writes when it stops recording (plus the pseudo-console cut note, which
+// goes through the tee with the same shape). IsStopMarker matches exactly
+// these, so a job's own "incoda: ..." line cannot freeze its status row.
+var stopMarkerPrefixes = []string{
+	"job output cut:",
+	"write error: ",
+	"job log truncated at ",
+}
+
+// IsStopMarker reports whether line (without its CRLF and the "incoda: "
+// prefix) is one of incoda's own stop-recording notes.
+func IsStopMarker(line string) bool {
+	for _, p := range stopMarkerPrefixes {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Writer) markTruncated(why string) {
 	if w.full || w.f == nil {
 		return
@@ -124,6 +150,32 @@ func (w *Writer) markTruncated(why string) {
 	line := "\r\nincoda: " + why + "\r\n"
 	_, _ = w.f.WriteString(line)
 	w.written += int64(len(line))
+	w.MarkCapped()
+}
+
+// MarkCapped notes out-of-band that this log stopped recording. The in-band
+// marker line alone is forgeable: a job can print the exact text and freeze
+// its own status row, so the reader also demands this sidecar, which only
+// the runner writes. Best-effort, like every other note.
+func (w *Writer) MarkCapped() {
+	MarkCapped(w.path)
+}
+
+// MarkCapped touches the capped sidecar of a job log path.
+func MarkCapped(logPath string) {
+	if logPath == "" {
+		return
+	}
+	f, err := os.OpenFile(logPath+cappedExt, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err == nil {
+		_ = f.Close()
+	}
+}
+
+// Capped notes whether a job log's runner said it stopped recording.
+func Capped(logPath string) bool {
+	_, err := os.Stat(logPath + cappedExt)
+	return err == nil
 }
 
 // sweep deletes the oldest job files so that at most keep-1 remain, by name:
@@ -151,6 +203,7 @@ func sweep(dir string) error {
 	}
 	for _, name := range names[KeepPerLane-1:] {
 		_ = os.Remove(name)
+		_ = os.Remove(name + cappedExt) // a swept log's sidecar goes with it
 	}
 	return nil
 }
