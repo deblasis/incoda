@@ -8,14 +8,22 @@ package lockfile
 import (
 	"errors"
 	"os"
+	"sync"
 )
 
 // File is an open file handle that can carry an exclusive whole-file lock.
 //
-// A File is not safe for concurrent use by multiple goroutines.
+// One File is shared by every goroutine that goes through a Queue's
+// registry (holder pollers, CLI calls, Close at teardown), so its methods
+// are safe for concurrent use: the bookkeeping and the handle itself are
+// serialized on mu. The kernel lock underneath is per open file
+// description, so a second Lock while this process already holds it
+// returns immediately; mu is what keeps two goroutines from interleaving
+// Unlock with Close on the same handle.
 type File struct {
 	f      *os.File
 	locked bool
+	mu     sync.Mutex
 }
 
 // Open opens (creating if absent) path in a mode that permits locking, and that
@@ -45,6 +53,8 @@ func OpenExisting(path string) (*File, error) {
 // TryLock attempts a non-blocking exclusive lock. It reports whether the lock
 // was taken. A false return with a nil error means somebody else holds it.
 func (l *File) TryLock() (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.locked {
 		return true, nil
 	}
@@ -57,6 +67,8 @@ func (l *File) TryLock() (bool, error) {
 
 // Lock blocks until the exclusive lock is acquired.
 func (l *File) Lock() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.locked {
 		return nil
 	}
@@ -70,6 +82,8 @@ func (l *File) Lock() error {
 
 // Unlock releases the lock but keeps the handle open.
 func (l *File) Unlock() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if !l.locked {
 		return nil
 	}
@@ -80,7 +94,12 @@ func (l *File) Unlock() error {
 
 // Close releases the lock (if held) and closes the handle.
 func (l *File) Close() error {
-	if l == nil || l.f == nil {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil {
 		return nil
 	}
 	if l.locked {
@@ -93,10 +112,19 @@ func (l *File) Close() error {
 }
 
 // Held reports whether this File currently holds the lock.
-func (l *File) Held() bool { return l != nil && l.locked }
+func (l *File) Held() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.locked
+}
 
 // Truncate replaces the file contents with b. The caller must hold the lock.
 func (l *File) Truncate(b []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if err := l.f.Truncate(0); err != nil {
 		return err
 	}
