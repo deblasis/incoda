@@ -5,6 +5,7 @@ package child
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -136,6 +137,24 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// reading kills the child through the broken pipe, and this is the same
 	// event. Every delivered read also publishes progress, which restarts
 	// the post-exit drain grace below.
+	//
+	// The tee is wrapped in a status tap: it hands the bytes on unchanged
+	// and only watches them for OSC 7501 support queries. The reply is
+	// injected by the replier's own goroutine, off this pipe entirely, so a
+	// job that never reads its input cannot stall this loop. input remains
+	// the one serialized door to the master input pipe: the supervisor's
+	// Ctrl-C path.
+	input := &serialWriter{w: p}
+	// Replies go in through the injector (see coninj_windows.go): the pipe
+	// this serialWriter guards is the Ctrl-C path, and a reply written to
+	// it would either be swallowed as VT input or echoed by a cooked-mode
+	// reader into the job's own output.
+	replies := newReplier(consoleInjector{pid: sp.PID})
+	var tee io.Writer = io.Discard
+	if opt.PTY.Tee != nil {
+		tee = opt.PTY.Tee
+	}
+	tap := newStatusTap(tee, replies)
 	readDone := make(chan struct{})
 	progress := make(chan struct{}, 1)
 	go func() {
@@ -144,12 +163,10 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		for {
 			n, err := p.Read(buf)
 			if n > 0 {
-				if opt.PTY.Tee != nil {
-					if _, werr := opt.PTY.Tee.Write(buf[:n]); werr != nil {
-						fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); killing the job\n", werr)
-						sup.killTree()
-						return
-					}
+				if _, werr := tap.Write(buf[:n]); werr != nil {
+					fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); killing the job\n", werr)
+					sup.killTree()
+					return
 				}
 				select {
 				case progress <- struct{}{}:
@@ -182,7 +199,7 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 					continue
 				}
 				escalate = true
-				_, _ = p.Write([]byte{0x03})
+				_, _ = input.Write([]byte{0x03})
 			case <-abort:
 				aborted = true
 				sup.killTree()
@@ -211,8 +228,10 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	// (or that its write end is gone, which is stronger). A stream still
 	// moving gets the whole grace window, and the cut says so in-band
 	// because those bytes die with it, in every sink at once.
+	replies.stop() // no reply may race the input handle closing below
 	go p.CloseConsole()
-	p.CloseInput()
+	input.Close()  // the pump stops taking writes; its in-flight one is cancelled below
+	p.CloseInput() // the cancel unblocks a reply write parked on an unread input
 	grace := time.NewTimer(drainGrace)
 	defer grace.Stop()
 	quiesce := time.NewTimer(quiesceWindow)
@@ -242,6 +261,9 @@ drain:
 			<-readDone
 			if opt.PTY.Tee != nil {
 				_, _ = opt.PTY.Tee.Write([]byte(joblog.CutLine))
+			}
+			if opt.PTY.OnOutputCut != nil {
+				opt.PTY.OnOutputCut()
 			}
 			break drain
 		case <-quiesce.C:

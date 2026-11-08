@@ -563,7 +563,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, nil, child.Options{
 				Env:      childEnv(startEnv, held.Format(inherited.L)),
 				OwnGroup: len(inherited.L) == 0,
-				PTY:      ptyOptions(ptyOn, os.Stdout),
+				PTY:      ptyOptions(ptyOn, os.Stdout, nil),
 			})
 			if runErr != nil {
 				return exitWith(ExitSpawn, "cannot run %q: %v", argv[0], runErr)
@@ -833,7 +833,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	res, runErr := child.Run(argv, os.Stdin, os.Stdout, os.Stderr, abort, child.Options{
 		Env:      childEnv(startEnv, held.Format(held.Merge(inherited.L, own))),
 		OwnGroup: len(inherited.L) == 0,
-		PTY:      ptyOptions(ptyOn, tee),
+		PTY:      ptyOptions(ptyOn, tee, jobClosers),
 	})
 	close(stopWatch)
 	<-watchDone
@@ -866,11 +866,21 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 // what everything that never asked for a pseudo-console must get. Tee
 // receives the job's merged output verbatim; sizes fall back to the pty
 // package defaults.
-func ptyOptions(on bool, tee io.Writer) *child.PTYOptions {
+func ptyOptions(on bool, tee io.Writer, jobClosers []*joblog.Writer) *child.PTYOptions {
 	if !on {
 		return nil
 	}
-	return &child.PTYOptions{Tee: tee}
+	return &child.PTYOptions{
+		Tee: tee,
+		// The drain cut ends every job log mid-stream; the runner notes it
+		// out-of-band so a job cannot forge the in-band line (see
+		// joblog.MarkCapped).
+		OnOutputCut: func() {
+			for _, jl := range jobClosers {
+				jl.MarkCapped()
+			}
+		},
+	}
 }
 
 // planWithFirstLinks plans the run and, when its --pool set equals an

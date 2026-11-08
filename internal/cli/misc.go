@@ -70,6 +70,12 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		*all = true
 	}
 	p := paletteFor(stdout, *noColor)
+	// A polling viewer follows each job log incrementally (only appended
+	// bytes per poll); the one-shot render reads each log whole, once.
+	var follow *statusFollowers
+	if !*once {
+		follow = newStatusFollowers()
+	}
 	for {
 		rep, err := buildReport(*queue, *all, *events)
 		if err != nil {
@@ -82,10 +88,11 @@ func cmdWatch(args []string, stdout, stderr io.Writer) error {
 		if rep.Banner != "" {
 			fmt.Fprintf(stdout, "%s\n\n", p.Yellow("incoda: "+rep.Banner))
 		}
-		renderReport(stdout, p, rep)
+		renderReport(stdout, p, rep, *owner, follow)
 		if *once {
 			return nil
 		}
+		follow.sweep(rep)
 		time.Sleep(*interval)
 	}
 }

@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/deblasis/incoda/internal/colorize"
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -30,6 +33,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	asJSON := fs.Bool("json", false, "emit the stable JSON report")
 	events := fs.Int("events", 5, "how many recent log events to show")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
+	owner := fs.String("owner", os.Getenv("INCODA_OWNER"), "identity that may see a pty job's program status (--owner / $INCODA_OWNER, the same as attach)")
 	if err := fs.Parse(args); err != nil {
 		return &usageError{msg: "bad flags for status"}
 	}
@@ -45,7 +49,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
-	renderReport(stdout, paletteFor(stdout, *noColor), rep)
+	renderReport(stdout, paletteFor(stdout, *noColor), rep, *owner, nil)
 	return nil
 }
 
@@ -97,7 +101,7 @@ func buildReport(queueFlag string, all bool, events int) (*Report, error) {
 // output is byte-for-byte what the uncolored renderer always produced, so
 // scripts that scrape it keep working.
 
-func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
+func renderReport(w io.Writer, p colorize.Palette, rep *Report, owner string, follow *statusFollowers) {
 	fmt.Fprintf(w, "%s %s  %s\n", p.Dim("state dir:"), rep.StateDir, p.Dim("("+rep.StateDirSource+")"))
 	if len(rep.Queues) == 0 {
 		fmt.Fprintln(w, p.Dim("no queues have state on this machine"))
@@ -106,7 +110,7 @@ func renderReport(w io.Writer, p colorize.Palette, rep *Report) {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		renderQueue(w, p, qr)
+		renderQueue(w, p, qr, owner, follow)
 	}
 	fmt.Fprintf(w, "\n%s\n", p.Dim(sysinfo.MachineLine(rep.Memory, rep.CPU)))
 	// Warnings go after every existing line, so scrapers of the lines
@@ -130,7 +134,101 @@ func ptyTag(e lane.Entry) string {
 	return ""
 }
 
-func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
+// statusFollowers is the plain renderer's per-process log cache: a viewer
+// that polls (watch --plain) follows each job log incrementally, reading
+// only the bytes appended since its last look, the same way the TUI does.
+// A one-shot render passes nil instead and reads the whole log once.
+type statusFollowers struct {
+	logs map[string]*osc7501.LogStatus
+}
+
+func newStatusFollowers() *statusFollowers {
+	return &statusFollowers{logs: map[string]*osc7501.LogStatus{}}
+}
+
+// follower returns the follower for one participant's log, following it.
+func (f *statusFollowers) follower(laneDir, file string) *osc7501.LogStatus {
+	k := laneDir + "\x00" + file
+	ls := f.logs[k]
+	if ls == nil {
+		ls = &osc7501.LogStatus{}
+		f.logs[k] = ls
+	}
+	return ls
+}
+
+// sweep drops the followers of participants the report no longer carries,
+// so a viewer's memory does not grow with the jobs it has watched go by.
+func (f *statusFollowers) sweep(rep *Report) {
+	if f == nil || rep == nil {
+		return
+	}
+	keep := map[string]bool{}
+	for _, q := range rep.Queues {
+		for _, group := range [][]lane.Entry{q.Holders, q.Waiting} {
+			for _, e := range group {
+				if e.Ticket.PTY {
+					keep[q.Dir+"\x00"+e.File] = true
+				}
+			}
+		}
+	}
+	for k := range f.logs {
+		if !keep[k] {
+			delete(f.logs, k)
+		}
+	}
+}
+
+// programStatus is the participant's OSC 7501 status for the end of its
+// line: the root record of its job log, painted by state. Only a pty job
+// has a log that can carry records, and only its owner sees what it wrote
+// (the same rule attach and the watch capture view apply, lane.MayAttach);
+// everything else, and a log with no records, gives "" and the line is what
+// it always was. A polling viewer (follow) reads only appended bytes; a
+// one-shot render reads the whole log, so a record survives however much
+// output was written after it.
+func programStatus(p colorize.Palette, laneDir string, e lane.Entry, owner string, follow *statusFollowers) string {
+	if !e.Ticket.PTY || e.PayloadError != "" || lane.MayAttach(e.Ticket, owner) != nil {
+		return ""
+	}
+	path, err := joblog.Path(laneDir, e.File)
+	if err != nil {
+		return ""
+	}
+	var r osc7501.Record
+	var ok bool
+	if follow != nil {
+		r, ok = follow.follower(laneDir, e.File).Read(path)
+	} else {
+		var ls osc7501.LogStatus
+		r, ok = ls.ReadWhole(path)
+	}
+	if !ok {
+		return ""
+	}
+	line := r.Line(statusMsgWidth)
+	switch r.State {
+	case "working":
+		// yellow is the plain palette's amber: the accent working is
+		// painted in on a color terminal (the TUI's accent is the same hue)
+		line = p.Yellow(line)
+	case "done":
+		line = p.Green(line)
+	case "error":
+		line = p.Red(line)
+	case "blocked":
+		line = p.Yellow(line)
+	default:
+		line = p.Dim(line)
+	}
+	return "  " + line
+}
+
+// statusMsgWidth is how much of a record's msg the participant line keeps.
+const statusMsgWidth = 40
+
+func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, owner string, follow *statusFollowers) {
 	if !qr.Exists {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+" "+p.Dim("(never used on this machine)"))
 		return
@@ -154,8 +252,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 		fmt.Fprintf(w, "  %s\n", p.Red("config unreadable: "+qr.ConfigError))
 	}
 	for _, e := range qr.Holders {
-		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
+		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
+			p.BoldCyan("HOLDER"), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, owner, follow))
 		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
@@ -175,8 +273,8 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport) {
 	} else {
 		fmt.Fprintf(w, "  %s\n", p.BoldYellow("WAITING (arrival order):"))
 		for n, e := range qr.Waiting {
-			fmt.Fprintf(w, "    %s%s pid %s waited %s %s%s\n",
-				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString())
+			fmt.Fprintf(w, "    %s%s pid %s waited %s %s%s%s\n",
+				p.Dim(fmt.Sprintf("%2d.", n+1)), ptyTag(e), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.WaitingSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), programStatus(p, qr.Dir, e, owner, follow))
 			fmt.Fprintf(w, "        %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
 			if e.Ticket.Owner != "" {
 				fmt.Fprintf(w, "        %s %s\n", p.Dim("owner:"), e.Ticket.Owner)

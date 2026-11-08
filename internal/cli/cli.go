@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deblasis/incoda/internal/child"
+
 	"github.com/deblasis/incoda/internal/lane"
 )
 
@@ -102,6 +104,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "run":
 		err = cmdRun(rest, stdout, stderr)
+	case child.ConinjCommand:
+		// Hidden, no usage: the pty runner's console-mode probe (see
+		// internal/child/coninj_windows.go), not a user command.
+		child.InjectConsoleInput(rest)
+		return ExitOK
 	case "status":
 		err = cmdStatus(rest, stdout, stderr)
 	case "watch":

@@ -70,6 +70,10 @@ type PTYOptions struct {
 	// down: a consumer that stopped reading is the pty-mode equivalent of a
 	// closed stdout pipe.
 	Tee io.Writer
+	// OnOutputCut, when not nil, is called once, when the drain cut writes
+	// its marker into the tee: the runner notes out-of-band that this job's
+	// log stopped recording (the marker text alone is forgeable by a job).
+	OnOutputCut func()
 }
 
 // Run starts argv, forwards interrupt signals to it, and returns its exit code

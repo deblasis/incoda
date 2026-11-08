@@ -23,6 +23,7 @@ import (
 
 	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
+	"github.com/deblasis/incoda/internal/osc7501"
 	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/report"
 )
@@ -174,6 +175,11 @@ type Model struct {
 	toast     toast
 	help      bool
 	lastClick clickStamp
+
+	// logs follow each owned pty participant's job log; status is the root
+	// record they gave at the last report (see refreshStatus).
+	logs   map[string]*osc7501.LogStatus
+	status map[string]osc7501.Record
 }
 
 // New builds a model. Missing options get the real implementations.
@@ -210,7 +216,7 @@ func New(opt Options) Model {
 	in.Prompt = "reason: "
 	in.Placeholder = "why this job should stop (its owner will read this)"
 	in.CharLimit = 200
-	m := Model{opt: opt, st: newStyles(true), input: in, width: 100, height: 30}
+	m := Model{opt: opt, st: newStyles(true), input: in, width: 100, height: 30, logs: map[string]*osc7501.LogStatus{}}
 	if opt.Key != "" {
 		m.single = true
 		m.key = opt.Key
@@ -318,6 +324,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return qi.Key < qj.Key
 			})
 		}
+		m.refreshStatus(m.rep)
 		m.clamp()
 		// The next load is scheduled from here, not from the tick, so a
 		// slow scan (many queues, a busy disk) delays the next one instead
