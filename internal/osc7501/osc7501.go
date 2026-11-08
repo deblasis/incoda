@@ -153,7 +153,7 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 				s.finish(cb, false)
 				s.state = stEsc
 			case c == 0x18, c == 0x1a: // CAN, SUB
-				s.finish(cb, false)
+				// a terminal aborts the string on these: no dispatch, no reply
 				s.state = stNormal
 			case c < 0x20:
 				// ignored inside the string
@@ -303,34 +303,33 @@ func parse(body string) (Record, bool) {
 			return Record{}, false
 		}
 		val := strings.Trim(field[eq+1:], ascii)
-		valid := valueOK(val)
+		switch key {
+		case "state", "kind", "progress", "app", "id", "title", "msg":
+			if !valueOK(val) {
+				// A value the terminal would refuse makes the whole report
+				// one the terminal discards, whichever key carried it.
+				return Record{}, false
+			}
+		}
 		switch key {
 		case "state":
-			if valid {
-				state = val
-			}
+			state = val
 		case "kind":
-			if valid {
-				kind = val
-			}
+			kind = val
 		case "progress":
-			if valid {
-				prog = val
-			}
+			prog = val
 		case "app":
-			if valid {
-				if len(val) > MaxAppBytes {
-					return Record{}, false
-				}
-				app = val
+			if len(val) > MaxAppBytes {
+				return Record{}, false
 			}
+			app = val
 		case "id":
-			if !valid || !idOK(val) {
+			if !idOK(val) {
 				return Record{}, false
 			}
 			id = val
 		case "title":
-			if !valid || len(val) > MaxTitleEncodedBytes {
+			if len(val) > MaxTitleEncodedBytes {
 				return Record{}, false
 			}
 			t, ok := text(val, MaxTitleBytes)
@@ -339,7 +338,7 @@ func parse(body string) (Record, bool) {
 			}
 			title = t
 		case "msg":
-			if !valid || len(val) > MaxMsgEncodedBytes {
+			if len(val) > MaxMsgEncodedBytes {
 				return Record{}, false
 			}
 			m, ok := text(val, MaxMsgBytes)

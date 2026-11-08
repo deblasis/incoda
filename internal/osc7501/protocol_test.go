@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/textsafe"
 )
 
@@ -67,8 +68,8 @@ func TestBadTextDiscardsTheReport(t *testing.T) {
 	}
 }
 
-// A value with a byte outside the alphabet in id, title or msg discards the
-// report (a skipped id would read as "the root").
+// A value with a byte outside the alphabet discards the report, whichever
+// known key carried it (a skipped id would read as "the root").
 func TestBadValueAlphabetDiscards(t *testing.T) {
 	for name, seq := range map[string]string{
 		"id bang":     rec("state=clear:id=a!b", "\x07"),
@@ -80,9 +81,18 @@ func TestBadValueAlphabetDiscards(t *testing.T) {
 			t.Errorf("%s: want the report discarded, got %+v", name, r)
 		}
 	}
-	// An app outside the alphabet is just ignored.
-	if r, ok := one(t, rec("state=working:app=bad app!", "\x07")); !ok || r.App != "" {
-		t.Errorf("bad app must be ignored, not fatal: %+v ok=%v", r, ok)
+	// Any known key outside the alphabet discards the report, app included:
+	// which key was malformed does not change what the terminal does.
+	if r, ok := one(t, rec("state=working:app=bad app!", "\x07")); ok {
+		t.Errorf("bad app must discard the report, got %+v", r)
+	}
+	if r, ok := one(t, rec("state=idle:state=bad!x", "\x07")); ok {
+		t.Errorf("a bad second state must discard the report, got %+v", r)
+	}
+	// An unknown key with any value stays ignored: the terminal does not
+	// know it, so there is nothing to refuse.
+	if r, ok := one(t, rec("state=working:zz=anything at!", "\x07")); !ok || r.State != "working" {
+		t.Errorf("unknown keys stay ignored: %+v ok=%v", r, ok)
 	}
 }
 
@@ -126,16 +136,14 @@ func TestLimitsMirrorTheTerminal(t *testing.T) {
 	}
 }
 
-// ESC, CAN and SUB end the OSC the way the terminal's parser does: the
-// query is dispatched, not abandoned; C0 controls inside the body are
+// ESC ends the OSC the way the terminal's parser does and dispatches what
+// it holds; CAN and SUB abort it instead, the xterm/vt500 answer to a
+// cancelled string: no record, no reply. C0 controls inside the body are
 // ignored.
 func TestEscEndsTheSequenceLikeTheTerminal(t *testing.T) {
 	for name, stream := range map[string]string{
 		"CSI c after": "\x1b]7501;?\x1b[c",
 		"ESC BEL":     "\x1b]7501;?\x1b\x07",
-		"CAN":         "\x1b]7501;?\x18",
-		"SUB":         "\x1b]7501;?\x1a",
-		"C0 inside":   "\x1b]7501;\x01?\x07",
 		"ESC ESC ST":  "\x1b]7501;?\x1b\x1b\\",
 	} {
 		fw := &fakeWriter{}
@@ -150,9 +158,22 @@ func TestEscEndsTheSequenceLikeTheTerminal(t *testing.T) {
 	if len(got) != 1 || got[0].State != "working" {
 		t.Errorf("a C0 control inside the body is ignored: %+v", got)
 	}
-	// A record is still dispatched by the ESC that follows it.
+	// A record is still dispatched by the ESC that follows it, and
+	// cancelled by the CAN or SUB that follows it.
 	if got := collect("\x1b]7501;state=done\x1b[0m"); len(got) != 1 {
 		t.Errorf("ESC dispatches a record too: %+v", got)
+	}
+	for _, c := range []string{"\x18", "\x1a"} {
+		if got := collect("\x1b]7501;state=done" + c); len(got) != 0 {
+			t.Errorf("CAN/SUB must abort the record: %+v", got)
+		}
+		fw := &fakeWriter{}
+		var s Scanner
+		s.Respond(fw)
+		s.Scan([]byte("\x1b]7501;?"+c), nil)
+		if len(fw.writes) != 0 {
+			t.Errorf("CAN/SUB must abort the query: %d replies", len(fw.writes))
+		}
 	}
 	// Split anywhere gives the same replies.
 	stream := "\x1b]7501;?\x1b[c"
@@ -305,7 +326,9 @@ func TestLogStatusIsIncremental(t *testing.T) {
 	if st.BytesRead() != before {
 		t.Fatalf("an unchanged log was read again: %d -> %d", before, st.BytesRead())
 	}
-	// A huge file is not read whole on the first look.
+	// The first look reads a log whole, bounded by the per-job log cap, so
+	// a record survives however much output follows it; the file past the
+	// cap is hostile input, not a job log, and only its tail is read.
 	big := filepath.Join(t.TempDir(), "big.out")
 	if err := os.WriteFile(big, append(bytes.Repeat([]byte("x"), 20<<20), full...), 0o600); err != nil {
 		t.Fatal(err)
@@ -314,13 +337,24 @@ func TestLogStatusIsIncremental(t *testing.T) {
 	if r, ok := st2.Read(big); !ok || r.Msg != "linking" {
 		t.Fatalf("big log: %+v ok=%v", r, ok)
 	}
-	if st2.BytesRead() > 1<<20 {
-		t.Fatalf("a 20 MiB log was read with %d bytes on the first look", st2.BytesRead())
+	if st2.BytesRead() > joblog.MaxBytes {
+		t.Fatalf("a 20 MiB log was read with %d bytes on the first look (cap %d)", st2.BytesRead(), joblog.MaxBytes)
+	}
+	// A record buried deep INSIDE the cap still speaks for the job.
+	deep := filepath.Join(t.TempDir(), "deep.out")
+	if err := os.WriteFile(deep, append(append([]byte(full), bytes.Repeat([]byte("x"), 600<<10)...), []byte("tail\r\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var st3 LogStatus
+	if r, ok := st3.Read(deep); !ok || r.Msg != "linking" {
+		t.Fatalf("deep-buried record: %+v ok=%v", r, ok)
 	}
 }
 
-// A log that hit its cap ends with a marker line; the status before it is
-// frozen and unknowable, so none is shown.
+// A log that hit its cap ends with a marker line and carries the runner's
+// out-of-band sidecar; the status before it is frozen and unknowable, so
+// none is shown. The marker text alone — byte-exact, even — is not enough:
+// a job can print it, and only the sidecar says the note is incoda's own.
 func TestStatusNotShownPastTheLogCap(t *testing.T) {
 	for _, marker := range []string{
 		"\r\nincoda: job log truncated at 16777216 bytes; later output only reached the run's stdout\r\n",
@@ -332,9 +366,20 @@ func TestStatusNotShownPastTheLogCap(t *testing.T) {
 		if err := os.WriteFile(p, []byte(log), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		joblog.MarkCapped(p)
 		var st LogStatus
 		if r, ok := st.Read(p); ok {
 			t.Errorf("%q: log is capped, got live-looking %q", marker, r.Line(40))
+		}
+		// Same text, no sidecar: that is a job's forgery, not a cap, and
+		// the status stays.
+		p2 := filepath.Join(t.TempDir(), "j.out")
+		if err := os.WriteFile(p2, []byte(log), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var st2 LogStatus
+		if r, ok := st2.Read(p2); !ok || r.Msg != "linking" {
+			t.Errorf("%q: marker text without the sidecar must not cap the log: %+v ok=%v", marker, r, ok)
 		}
 	}
 }
