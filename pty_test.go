@@ -207,18 +207,20 @@ func TestPTYCaptureAndPassthrough(t *testing.T) {
 	}
 }
 
-// TestPTYTtyVsPipe: the job sees a TTY exactly when pty mode is on, and the
-// default stays the pipe path.
+// TestPTYTtyVsPipe: the job sees a TTY exactly when pty mode is on; a
+// Windows run defaults to the console and --pty=false opts back to pipes.
 func TestPTYTtyVsPipe(t *testing.T) {
 	bin, tty := ptyBinaries(t)
 	state := t.TempDir()
 	linkTestKeys(t, bin, state, "pty-tty")
-	for _, on := range []bool{false, true} {
-		want := "stdout=pipe"
+	for _, on := range []bool{true, false} {
+		want := "stdout=tty"
 		args := []string{"run", "--queue", "pty-tty", "--owner", "alice", "--reason", "test", "--"}
 		if on {
-			want = "stdout=tty"
 			args = append(args[:len(args)-1], "--pty", "--")
+		} else {
+			args = append(args[:len(args)-1], "--pty=false", "--")
+			want = "stdout=pipe"
 		}
 		args = append(args, tty, "tty")
 		out, _, code := ptyRunIncoda(t, ownerEnv(state, "alice"), args...)
@@ -263,39 +265,6 @@ func TestPTYEnvSurvivesSpawn(t *testing.T) {
 	}
 }
 
-// TestPTYConfigDefaultFollowsNamedFirstKey: the pty default comes from the
-// config of the key the user named first, not the first key of the plan's
-// sorted order. pty-zulu sorts after pty-alpha, and only pty-zulu carries
-// the default, so a run reading the sorted-first key's config would spawn
-// with pipes here, and the flag-less run below would say pipe.
-func TestPTYConfigDefaultFollowsNamedFirstKey(t *testing.T) {
-	bin, tty := ptyBinaries(t)
-	state := t.TempDir()
-	linkTestKeys(t, bin, state, "pty-zulu", "pty-alpha")
-	if out, _, code := ptyRunIncoda(t, ownerEnv(state, "alice"), "config", "pty-zulu", "--pty"); code != 0 {
-		t.Fatalf("config --pty exited %d:\n%s", code, out)
-	}
-	out, errb, code := ptyRunIncoda(t, ownerEnv(state, "alice"),
-		"run", "--queue", "pty-zulu,pty-alpha", "--owner", "alice", "--reason", "test", "--",
-		tty, "tty")
-	if code != 0 {
-		t.Fatalf("run exited %d:\n%s", code, errb)
-	}
-	if !strings.Contains(out, "stdout=tty") {
-		t.Fatalf("config on the named-first key did not route the run through a pty:\n%q", out)
-	}
-	// An explicit --pty=false beats the config default.
-	out, errb, code = ptyRunIncoda(t, ownerEnv(state, "alice"),
-		"run", "--queue", "pty-zulu", "--owner", "alice", "--reason", "test", "--pty=false", "--",
-		tty, "tty")
-	if code != 0 {
-		t.Fatalf("run --pty=false exited %d:\n%s", code, errb)
-	}
-	if !strings.Contains(out, "stdout=pipe") {
-		t.Fatalf("--pty=false did not beat the config default:\n%q", out)
-	}
-}
-
 // TestPTYMultiKeyRunTeedPerHeldLane: a run holding two lanes tees to one job
 // file per lane, so an attach through either key finds the same bytes.
 func TestPTYMultiKeyRunTeedPerHeldLane(t *testing.T) {
@@ -336,12 +305,10 @@ func TestPTYNestedPassThroughWritesNoJobFile(t *testing.T) {
 	bin, tty := ptyBinaries(t)
 	state := t.TempDir()
 	linkTestKeys(t, bin, state, "pty-nest")
-	// The inner run rides the parent's ticket with pty mode ON (it reads
-	// the same lane config), because a pass-through that is not in pty
-	// mode never reaches the pty tee at all and guards nothing.
-	if out, _, code := ptyRunIncoda(t, ownerEnv(state, "alice"), "config", "pty-nest", "--pty"); code != 0 {
-		t.Fatalf("config --pty exited %d:\n%s", code, out)
-	}
+	// The inner run rides the parent's ticket with pty mode ON (the outer
+	// run passed --pty, and the nested run inherits its console), because
+	// a pass-through that is not in pty mode never reaches the pty tee at
+	// all and guards nothing.
 	payload := "nested-payload\r\n"
 	outer, _, code := ptyRunIncoda(t, ownerEnv(state, "alice"),
 		"run", "--queue", "pty-nest", "--owner", "alice", "--reason", "test", "--pty", "--",

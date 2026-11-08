@@ -219,7 +219,7 @@ func TestAnswerRefusedForNonPtyJobs(t *testing.T) {
 	}
 	env := ownerEnv(state, "alice")
 	run := exec.Command(bin, "run", "--queue", "pty-ans3", "--owner", "alice",
-		"--reason", "test", "--", py, script)
+		"--reason", "test", "--pty=false", "--", py, script)
 	run.Env = env
 	if err := run.Start(); err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestPlantedAnswerOnPipeRunIsRefused(t *testing.T) {
 	}
 	env := ownerEnv(state, "alice")
 	run := exec.Command(bin, "run", "--queue", "pty-ans4", "--owner", "alice",
-		"--reason", "test", "--", py, script)
+		"--reason", "test", "--pty=false", "--", py, script)
 	run.Env = env
 	if err := run.Start(); err != nil {
 		t.Fatal(err)
