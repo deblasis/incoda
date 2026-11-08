@@ -250,15 +250,22 @@ work, and both need `--pty`:
   bound), so a program that spews queries cannot grow the host without
   limit; what a job never reads is dropped, the silence of a terminal that
   did not answer.
-- `watch` follows each held or running pty job's log, reading only the bytes
-  appended since its last look, and shows the record with the fewest `id`
-  path segments (the latest on a tie), so a build's own record speaks for
-  it, not its steps, however much output follows it. A log that stopped
-  recording — it hit its size cap or its writer failed — shows no status:
-  the last record in it may be stale. The status carries text the job
-  wrote, so like the capture view it is for the job's own owner alone
-  (`--owner` / `$INCODA_OWNER` on `watch` and `status`); anyone else sees
-  the line without it.
+- Every renderer shows the record with the fewest `id` path segments (the
+  latest on a tie), so a build's own record speaks for it, not its steps,
+  however much output follows it: `watch` (TUI and `--plain` alike) follows
+  each held or running pty job's log, reading only the bytes appended since
+  its last look, and a one-shot `status` reads the log whole, once. A log
+  that stopped recording — it hit its size cap, its writer failed, or the
+  run's output was cut — shows no status: the last record in it may be
+  stale, and only the runner's own note saying so counts, not a line the
+  job printed. The status carries text the job wrote, so like the capture
+  view it is for the job's own owner alone (`--owner` / `$INCODA_OWNER` on
+  `watch` and `status`); anyone else sees the line without it. `status
+  --json` does not carry the status text: the JSON schema is for scripts
+  and stays as it was.
+
+In the plain text renderer the accent family has only ANSI yellow, so
+`working` is yellow there and amber in the TUI — the same hue, two palettes.
 
 A job on plain pipes emits nothing, so it has no status; that is by design.
 A job with no records shows the line it always did.
