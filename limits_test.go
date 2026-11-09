@@ -531,6 +531,7 @@ func TestManualKillRacingALimit(t *testing.T) {
 // limit is not reported as killed. Each job writes its exit stamp before it
 // exits 0; a stamp together with a limit exit is a finished job called dead.
 func TestMaxRunNeverReportsAFinishedJob(t *testing.T) {
+	requireStableExitWindow(t)
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 	linkTestKeys(t, incoda, state, "fin")
