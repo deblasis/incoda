@@ -127,6 +127,7 @@ func TestMaxRunLeavesAShortJobAlone(t *testing.T) {
 // TestStallKillsAnIdleJob: a job tree that uses no CPU for --stall is killed
 // with the stall exit code, however short its wall time so far.
 func TestStallKillsAnIdleJob(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
@@ -171,6 +172,7 @@ func TestStallSparesABusyJob(t *testing.T) {
 // grandchild burns CPU. The tree is busy, so no stall; the control, a tree
 // whose grandchild sleeps too, is stalled.
 func TestStallCountsDescendants(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
@@ -192,6 +194,7 @@ func TestStallCountsDescendants(t *testing.T) {
 // no flag takes it, a flag overrides it either way (0 turns it off), and
 // config shows and clears it.
 func TestLimitLaneDefaultsAndOverrides(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
@@ -262,6 +265,7 @@ func TestLimitFlagsAreValidated(t *testing.T) {
 // nothing else; the parent, which asked for no limit, sees an ordinary
 // non-zero child and records no limit on its release line.
 func TestNestedRunDoesNotKillItsParent(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
@@ -318,6 +322,7 @@ func run(incoda, state string, t *testing.T, args ...string) (string, int) {
 // TestLimitsOnPipes repeats the core behaviours on the pipe path, where the
 // CPU probe is armed by a different piece of code than on a pseudo-console.
 func TestLimitsOnPipes(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
@@ -359,6 +364,9 @@ func TestLimitKillLeavesNothingBehind(t *testing.T) {
 				name = mode.name + "/nested"
 			}
 			t.Run(name, func(t *testing.T) {
+				if mode.name == "pty" {
+					requirePty(t)
+				}
 				state := t.TempDir()
 				key := "nb"
 				linkTestKeys(t, incoda, state, key)
@@ -523,6 +531,7 @@ func TestManualKillRacingALimit(t *testing.T) {
 // limit is not reported as killed. Each job writes its exit stamp before it
 // exits 0; a stamp together with a limit exit is a finished job called dead.
 func TestMaxRunNeverReportsAFinishedJob(t *testing.T) {
+	requireStableExitWindow(t)
 	incoda, stamp := binaries(t)
 	state := t.TempDir()
 	linkTestKeys(t, incoda, state, "fin")
@@ -557,6 +566,7 @@ func TestLimitFlagValuesAreRefused(t *testing.T) {
 
 // TestShortStallWarns: a --stall under 30s is allowed and says what it risks.
 func TestShortStallWarns(t *testing.T) {
+	requireStallCounter(t)
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()

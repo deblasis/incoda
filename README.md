@@ -209,9 +209,12 @@ A nested `run` on a lane its parent already holds has no ticket of its own:
 the lane's defaults belong to the parent, which enforces them against the
 whole tree. Only a limit the nested run was given by flag applies, to its own
 child and that child's descendants, and it exits with the limit's code, which
-the parent sees as the child's ordinary exit status. A job that exits with
-status 0 on its own is never reported as limited, whatever the timer did at the
-same instant.
+the parent sees as the child's ordinary exit status. On Windows a job that
+exits with status 0 on its own is never reported as limited, whatever the
+timer did at the same instant: the Job Object path is where that is proven. On
+Unix a max-run kill landing inside the child's exit window can convert an
+exiting child into a signal death and report `131`, a known residual tracked
+in #35, next to the stall-counter deferral above.
 
 Output is colored on a terminal and plain everywhere else. The standard
 opt-outs work: `--no-color`, or `NO_COLOR` set to any non-empty value, and
