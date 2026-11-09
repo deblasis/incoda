@@ -1,7 +1,9 @@
 package child
 
 import (
+	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -17,9 +19,13 @@ import (
 const tickWindow = 200 * time.Millisecond
 
 // tickMaxIDs bounds the ids the gate tracks, the way a viewer's record set is
-// bounded. Past it a report flows on rather than evicting a reporter whose
-// waiting report the gate would then drop.
+// bounded. A reporter past it joins tickOverflow instead of passing free.
 const tickMaxIDs = 64
+
+// tickOverflow is the shared window every reporter past the id cap lands in:
+// one window between all of them, so the drain stays bounded however many ids
+// report. It cannot collide with a real id: an id's alphabet has no NUL.
+const tickOverflow = "\x00overflow"
 
 // tickGate coalesces OSC 7501 status reports in a pty drain path. Everything
 // that is not a report passes through verbatim at the position it arrived,
@@ -40,6 +46,7 @@ type tickGate struct {
 	ids   map[string]*tickID
 	order []string // ids with a report waiting, oldest wait first
 	timer *time.Timer
+	err   error // the first downstream write failure, never cleared
 }
 
 type tickMark struct {
@@ -73,6 +80,12 @@ func newTickGateWait(next io.Writer, window time.Duration) *tickGate {
 func (g *tickGate) Write(p []byte) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.err != nil {
+		// A downstream write already failed, most likely on the release
+		// path: the reader must see what it would have seen before the gate
+		// existed, the first failure, and take the job down on it.
+		return len(p), g.err
+	}
 	carried := g.carry
 	g.carry = nil
 	g.marks = g.marks[:0]
@@ -125,13 +138,20 @@ func (g *tickGate) Write(p []byte) (int, error) {
 // report was held.
 func (g *tickGate) limit(rec osc7501.Record, seq []byte) bool {
 	now := time.Now()
-	id, ok := g.ids[rec.ID]
-	if !ok {
+	key := rec.ID
+	id := g.ids[key]
+	if id == nil {
 		if len(g.ids) >= tickMaxIDs {
-			return false
+			// Past the cap the reporter joins the shared overflow window:
+			// bounded like any other, one window between all of them, which
+			// is what keeps the promise true for however many ids report.
+			key = tickOverflow
+			id = g.ids[key]
 		}
-		id = &tickID{}
-		g.ids[rec.ID] = id
+		if id == nil {
+			id = &tickID{}
+			g.ids[key] = id
+		}
 	}
 	if id.held == nil && (id.last.IsZero() || now.Sub(id.last) >= g.window) {
 		// The window is open and nothing waits, so the report keeps its own
@@ -142,13 +162,14 @@ func (g *tickGate) limit(rec osc7501.Record, seq []byte) bool {
 		return false
 	}
 	if id.held == nil {
-		g.order = append(g.order, rec.ID)
+		g.order = append(g.order, key)
 	}
 	held := append([]byte{}, seq...)
 	if held[len(held)-1] != 0x07 {
 		// The sequence ended at an ESC, which belongs to what follows it: a
-		// report held past its neighbours needs a terminator of its own.
-		held = append(held, 0x07)
+		// report held past its neighbours needs a terminator of its own, and
+		// the one it arrived with is the one it keeps.
+		held = append(held, '\x1b', '\\')
 	}
 	id.held, id.due = held, id.last.Add(g.window)
 	return true
@@ -195,16 +216,28 @@ func (g *tickGate) release() {
 			kept = append(kept, id)
 			continue
 		}
-		_, _ = g.next.Write(t.held)
+		_, err := g.next.Write(t.held)
+		g.note(err)
 		t.held, t.last = nil, now
 	}
 	g.order = kept
 	g.arm()
 }
 
-// flush sends every waiting report: the drain has ended, so no window will
-// ever close on its own again, and the newest status a job sent is part of
-// its tail.
+// note remembers the first downstream write failure: the next Write returns
+// it, which is what tears the job down through the reader the way the first
+// failing write did before the gate existed.
+func (g *tickGate) note(err error) {
+	if err != nil && g.err == nil {
+		g.err = err
+	}
+}
+
+// flush is the drain's end. A report candidate still open is the job's own
+// output and goes out verbatim, before the held reports, the way it reached
+// the tee before the gate existed; then every waiting report, because no
+// window will ever close on its own again and the newest status a job sent
+// is part of its tail. Nothing the reader accepted is dropped here.
 func (g *tickGate) flush() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -212,10 +245,22 @@ func (g *tickGate) flush() {
 		g.timer.Stop()
 		g.timer = nil
 	}
+	if len(g.carry) > 0 {
+		_, err := g.next.Write(g.carry)
+		g.note(err)
+		g.carry = nil
+	}
 	for _, id := range g.order {
 		t := g.ids[id]
-		_, _ = g.next.Write(t.held)
+		_, err := g.next.Write(t.held)
+		g.note(err)
 		t.held, t.last = nil, time.Now()
 	}
 	g.order = nil
+	if g.err != nil {
+		// The last writer there is: nothing downstream of the gate can carry
+		// the failure any more, so it is said here, once, the way the runner
+		// says the reader's own write failures.
+		fmt.Fprintf(os.Stderr, "incoda: writing job output failed (%v); the tail at the drain's end was lost\n", g.err)
+	}
 }

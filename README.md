@@ -367,8 +367,10 @@ id's reports pass the drain at most once per 200 ms, and a report arriving
 inside that window replaces the one waiting in it (a later report for an id
 always supersedes an earlier one), so the newest is what goes out when the
 window closes and the run's stdout and every capture stay readable however
-many processes report at once. Everything else in the stream, and a report
-paced slower than the window, passes through unchanged.
+many processes report at once. Past 64 distinct ids reporting in one run the
+extra ids share a single window between them, so the stream stays bounded
+whatever the crowd. Everything else in the stream, and a report paced slower
+than the window, passes through unchanged.
 
 In the plain text renderer the accent family has only ANSI yellow, so
 `working` is yellow there and amber in the TUI — the same hue, two palettes.
