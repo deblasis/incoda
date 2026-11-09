@@ -218,8 +218,9 @@ func (r *replier) stop() {
 	}
 }
 
-// statusTap sits in front of the tee. The bytes go to next exactly as read
-// (the result and error are next's, so a tee failure still tears the job
+// statusTap sits in front of whatever drains the stream (the tee, or the
+// tick gate in front of it). The bytes go to next exactly as read (the
+// result and error are next's, so a failure downstream still tears the job
 // down); the scanner only looks.
 type statusTap struct {
 	next io.Writer

@@ -170,11 +170,19 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 	if opt.PTY.Tee != nil {
 		tee = opt.PTY.Tee
 	}
-	tap := newStatusTap(tee, replies)
+	// The gate bounds the status reports in the stream before the tee sees
+	// it, so a job that reports through the console in a burst cannot flood
+	// the run's stdout and every capture with repaints (#36); the tap still
+	// sees every query, which the gate never holds.
+	gate := newTickGate(tee)
+	tap := newStatusTap(gate, replies)
 	readDone := make(chan struct{})
 	progress := make(chan struct{}, 1)
 	go func() {
 		defer close(readDone)
+		// Held reports go out before the drain can see the reader done: the
+		// newest status a job sent is part of its tail.
+		defer gate.flush()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := p.Read(buf)
