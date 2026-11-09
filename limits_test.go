@@ -83,7 +83,7 @@ func TestMaxRunKillsAJobPastItsLimit(t *testing.T) {
 	state := t.TempDir()
 	linkTestKeys(t, incoda, state, "mr")
 
-	out, code, el := timedRun(t, incoda, state, "run", "--queue", "mr", "--poll", "50ms", "--max-run", "1s",
+	out, code, el := timedRun(t, incoda, state, "run", "--queue", "mr", "--poll", "50ms", "--max-run", "1s", "--pty=true",
 		"--", lim, "sleep", "30000")
 	if code != exitMaxRun {
 		t.Fatalf("a job past --max-run exits %d, got %d:\n%s", exitMaxRun, code, out)
