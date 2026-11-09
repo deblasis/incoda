@@ -205,3 +205,61 @@ func TestSweepIgnoresForeignNames(t *testing.T) {
 		}
 	}
 }
+
+func TestExitSidecarRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Create(dir, ticketName(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	path, err := Path(dir, ticketName(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadExit(path); ok {
+		t.Fatal("a fresh job file must read as no exit code")
+	}
+	if err := w.Exit(3); err != nil {
+		t.Fatal(err)
+	}
+	code, ok := ReadExit(path)
+	if !ok || code != 3 {
+		t.Fatalf("exit sidecar reads %d/%v, want 3/true", code, ok)
+	}
+	// A malformed sidecar is no answer, never a guess.
+	if err := os.WriteFile(ExitPath(path), []byte("boom\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadExit(path); ok {
+		t.Fatal("a malformed sidecar must not read as a code")
+	}
+}
+
+// A swept job file takes its exit sidecar with it: the directory does not
+// grow a second set of stale files.
+func TestSweepRemovesExitSidecars(t *testing.T) {
+	dir := t.TempDir()
+	jobs := filepath.Join(dir, dirName)
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(1); i <= 12; i++ {
+		base := filepath.Join(jobs, strings.TrimSuffix(ticketName(i), ".ticket")+jobExt)
+		if err := os.WriteFile(base, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ExitPath(base), []byte("0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := Create(dir, ticketName(13))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	gone := filepath.Join(jobs, strings.TrimSuffix(ticketName(1), ".ticket")+jobExt)
+	if _, err := os.Stat(ExitPath(gone)); !os.IsNotExist(err) {
+		t.Fatalf("the swept log's exit sidecar survived: %v", err)
+	}
+}

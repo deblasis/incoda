@@ -191,6 +191,16 @@ func (m Model) mouse_(msg tea.MouseMsg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
+		if m.screen == screenPty && m.pty != nil {
+			// The wheel reads the capture, not the selection behind it.
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				m.pty.scrollBy(-3, m.ptyRows())
+			case tea.MouseWheelDown:
+				m.pty.scrollBy(3, m.ptyRows())
+			}
+			return m, nil
+		}
 		switch mouse.Button {
 		case tea.MouseWheelUp:
 			return m.nudgeSelection(-1), nil

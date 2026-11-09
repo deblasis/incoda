@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/deblasis/incoda/internal/lane"
@@ -31,6 +32,12 @@ const (
 	// cappedExt is the sidecar that says a job log stopped recording, out
 	// of band, where the job itself cannot write one (see MarkCapped).
 	cappedExt = ".capped"
+	// exitExt is the sidecar that records how the run's job ended, next to
+	// the capture it belongs to. The capture itself has no room for a
+	// footer (a job can end mid-line), and the ticket that carried the pid
+	// is released with the run, so this is what a viewer that was watching
+	// the job reads once the process is gone.
+	exitExt = ".exit"
 
 	dirName = "jobs"
 	jobExt  = ".out"
@@ -178,6 +185,49 @@ func Capped(logPath string) bool {
 	return err == nil
 }
 
+// ExitPath is the sidecar beside a job log that holds its exit code.
+func ExitPath(logPath string) string {
+	return strings.TrimSuffix(logPath, jobExt) + exitExt
+}
+
+// Exit records code beside the job file: the capture a viewer streams has
+// no room for a footer (a job can end mid-line), and the ticket that
+// carried the pid is released with the run, so this is what a viewer that
+// was watching reads afterwards. Best-effort by design: a code that could
+// not be written reads as no code, never as a wrong one.
+func (w *Writer) Exit(code int) error {
+	if w.path == "" {
+		return nil
+	}
+	return WriteExit(w.path, code)
+}
+
+// WriteExit records code beside the job log at logPath.
+func WriteExit(logPath string, code int) error {
+	if logPath == "" {
+		return nil
+	}
+	if err := os.WriteFile(ExitPath(logPath), []byte(strconv.Itoa(code)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("joblog: recording the job's exit code: %w", err)
+	}
+	return nil
+}
+
+// ReadExit reads the exit code recorded beside the job log at logPath. A
+// missing or unreadable sidecar is simply no answer: an old incoda never
+// wrote one, and a viewer showing nothing beats a viewer showing a guess.
+func ReadExit(logPath string) (int, bool) {
+	b, err := os.ReadFile(ExitPath(logPath))
+	if err != nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
 // sweep deletes the oldest job files so that at most keep-1 remain, by name:
 // ticket names are zero-padded arrival nanoseconds, so lexicographic order
 // is arrival order. Only names with a ticket's shape count and get deleted:
@@ -204,6 +254,7 @@ func sweep(dir string) error {
 	for _, name := range names[KeepPerLane-1:] {
 		_ = os.Remove(name)
 		_ = os.Remove(name + cappedExt) // a swept log's sidecar goes with it
+		_ = os.Remove(ExitPath(name))   // and so does its exit code
 	}
 	return nil
 }

@@ -495,9 +495,34 @@ func (m Model) renderPending(w int) string {
 	return st.box.Width(min(w-2, 90)).Render(lipgloss.JoinVertical(lipgloss.Left, line, st.dim.Render("reason: "+p.reason)))
 }
 
+// ptyRows is the capture window's height: the terminal minus the frame
+// (header, gauge, the blank between them, help) and the capture's own head
+// line and notes.
+func (m Model) ptyRows() int {
+	n := 1
+	if m.pty != nil {
+		if m.pty.capped {
+			n++
+		}
+		if m.pty.missed {
+			n++
+		}
+		if m.pty.errText != "" {
+			n++
+		}
+	}
+	rows := m.height - n - 4
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
 // renderPty is the live capture screen: the job's bytes as captured, tail
-// last, raw — the stream is whatever the job wrote, ANSI and all — kept to
-// the screen the way a terminal keeps its scrollback.
+// last, raw — the stream is whatever the job wrote, ANSI and all — in a
+// window of fixed height, each line clipped to the width so a long line
+// cannot wrap and push the frame around. Scrolling reads back through the
+// bounded tail while the job keeps writing.
 func (m Model) renderPty(w int) string {
 	st := m.st
 	if m.pty == nil {
@@ -505,12 +530,25 @@ func (m Model) renderPty(w int) string {
 	}
 	p := m.pty
 	state := st.accent.Render("streaming…")
-	if p.ended {
+	switch {
+	case p.ended && p.haveExit && p.exitCode == 0:
+		state = st.toastOK.Render("job ended; exit code 0")
+	case p.ended && p.haveExit:
+		state = st.toastErr.Render(fmt.Sprintf("job ended; exit code %d", p.exitCode))
+	case p.ended:
 		state = st.dim.Render("job ended; the capture is complete")
 	}
 	head := st.title.Render(p.key) + "  " + st.bold.Render(fmt.Sprintf("pid %d", p.pid)) +
 		"  " + state + "  " + st.dim.Render("read-only, like attach")
-	lines := []string{head}
+	rows := m.ptyRows()
+	if p.scrollOn {
+		back := p.tailTop(rows) - p.top
+		if back < 1 {
+			back = 1
+		}
+		head += "  " + st.dim.Render(fmt.Sprintf("↑ %d line(s) back · End follows", back))
+	}
+	lines := []string{ptyClip(head, w)}
 	if p.capped {
 		lines = append(lines, st.dim.Render("… older output trimmed (the view is bounded)"))
 	}
@@ -520,21 +558,28 @@ func (m Model) renderPty(w int) string {
 	if p.errText != "" {
 		lines = append(lines, st.toastErr.Render(trunc("read error: "+p.errText, w)))
 	}
-	lines = append(lines, ptyTailLines(string(p.buf), m.height-len(lines)-4)...)
+	content := p.window(rows)
+	for _, ln := range content {
+		lines = append(lines, ptyClip(ln, w))
+	}
+	// Pad to the window: the capture is a pane of fixed height, so a short
+	// job does not move the frame under the reader.
+	for shown := len(content); shown < rows; shown++ {
+		lines = append(lines, "")
+	}
 	return strings.Join(lines, "\n")
 }
 
-// ptyTailLines keeps the last n whole lines so the newest output is always
-// on screen; a job that rewrites one line with \r never walks the view away.
-func ptyTailLines(s string, n int) []string {
-	if n < 1 {
-		n = 1
+// ptyClip fits one captured line to the screen width so the window keeps
+// its height: a wrapped line would take a row away from the lines below
+// it. Tabs expand first; the capture is raw bytes and a tab is the
+// terminal's to expand, but the pane counts cells, not tab stops.
+func ptyClip(s string, w int) string {
+	if w < 1 {
+		return ""
 	}
-	lines := strings.Split(s, "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return lines
+	s = strings.ReplaceAll(s, "\t", "        ")
+	return ansi.Truncate(s, w, "…")
 }
 
 func (m Model) renderBottom(w int) string {
@@ -553,7 +598,7 @@ func (m Model) renderBottom(w int) string {
 			help = "↑/↓ or wheel · click select · k kill · K force-kill · enter pty output · r refresh · esc back · q quit"
 		}
 	case screenPty:
-		help = "esc back · the stream is the job's own captured output, read-only"
+		help = "esc back · ↑/↓ or wheel scroll · PgUp/PgDn page · End follows the tail · the stream is the job's own captured output, read-only"
 	case screenKillPrompt:
 		help = "type the reason · enter confirm · esc cancel"
 	case screenKillPending:

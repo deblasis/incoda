@@ -101,8 +101,32 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	}
 	if ctx.Err() != nil {
 		fmt.Fprintf(stderr, "attach: detached\n")
+		return nil
+	}
+	// The run records the job's exit code beside the capture on its way
+	// out; a run that never got there, or one from before the sidecar, has
+	// none to give. A short wait covers the racing write.
+	if code, ok := awaitJobExit(path, 3*time.Second); ok {
+		fmt.Fprintf(stderr, "attach: pid %d exited with code %d\n", *pid, code)
 	}
 	return nil
+}
+
+// awaitJobExit polls for the exit sidecar the run writes beside a job's
+// capture. A viewer that stops on the process's death can arrive before
+// that write; an old incoda never wrote one, and then there is simply no
+// code to show.
+func awaitJobExit(path string, within time.Duration) (int, bool) {
+	deadline := time.Now().Add(within)
+	for {
+		if code, ok := joblog.ReadExit(path); ok {
+			return code, true
+		}
+		if time.Now().After(deadline) {
+			return 0, false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // authorizeAttach is every gate that decides whether this entry may be

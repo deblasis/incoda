@@ -9,6 +9,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -58,10 +59,13 @@ type Options struct {
 
 	// PtyRead drains the job file past offset to its end; the default
 	// reads the real capture. PtyAlive says whether the run process is
-	// still there. Both are seams so the streaming screen is testable
-	// without a terminal, a state directory or a live job.
+	// still there. PtyExit reads the code the run recorded beside the
+	// capture, and whether there is one. All three are seams so the
+	// streaming screen is testable without a terminal, a state directory
+	// or a live job.
 	PtyRead  func(path string, offset int64) ([]byte, int64, error)
 	PtyAlive func(pid int) bool
+	PtyExit  func(path string) (int, bool)
 }
 
 // participant is one row of the queue screen: a holder or a waiter.
@@ -78,27 +82,129 @@ type ptyView struct {
 	path    string
 	offset  int64
 	buf     []byte
-	capped  bool   // the head was dropped to stay bounded
-	ended   bool   // the run process is gone and the file is drained
-	missed  bool   // the run ended before any byte was captured
-	errText string // last read error, shown instead of failing silently
+	lines   []string // buf split for display, last element may be partial
+	total   int64    // newlines ever seen: the absolute number of the next line
+	capped  bool     // the head was dropped to stay bounded
+	ended   bool     // the run process is gone and the file is drained
+	missed  bool     // the run ended before any byte was captured
+	errText string   // last read error, shown instead of failing silently
+
+	// scroll pauses the tail view so an older window can be read while the
+	// job keeps writing; top is that window's first line, as an absolute
+	// line number. scrollOn off means follow the newest line.
+	scrollOn bool
+	top      int64
+
+	// exitWait counts the ticks spent after the run died waiting for the
+	// exit sidecar the run writes once its own tail drain is done.
+	exitWait int
+	exitCode int
+	haveExit bool
 }
 
 // ptyKeep bounds the capture the screen holds: the file keeps everything up
 // to its own cap; the view only needs what it can show.
 const ptyKeep = 64 * 1024
 
+// ptyMaxLines bounds the display buffer even when the capture is a flood of
+// very short lines: the scrollback is for reading the tail, not history.
+const ptyMaxLines = 2000
+
 // ptyTickEvery is the capture poll, the same cadence attach streams at.
 const ptyTickEvery = 150 * time.Millisecond
+
+// ptyExitTicks is how long the view keeps polling for the exit sidecar
+// after the run process is gone. The run records the code once its own
+// tail drain ends, which can trail the pid's death by about a second.
+const ptyExitTicks = 20
 
 // append keeps the last ptyKeep bytes, remembering the cut, so a job that
 // streams for hours still renders instantly.
 func (p *ptyView) append(chunk []byte) {
-	p.buf = append(p.buf, chunk...)
-	if len(p.buf) > ptyKeep {
-		p.buf = p.buf[len(p.buf)-ptyKeep:]
-		p.capped = true
+	if len(chunk) > 0 {
+		p.buf = append(p.buf, chunk...)
+		p.total += int64(bytes.Count(chunk, []byte{'\n'}))
+		if len(p.buf) > ptyKeep {
+			p.buf = p.buf[len(p.buf)-ptyKeep:]
+			p.capped = true
+		}
 	}
+	p.lines = strings.Split(string(p.buf), "\n")
+	if len(p.lines) > ptyMaxLines {
+		p.lines = p.lines[len(p.lines)-ptyMaxLines:]
+	}
+}
+
+// baseAbs is the absolute line number of lines[0]. The bytes cap can cut
+// the head mid-line; that fragment is still one line of the display buffer,
+// and the count of newlines held is what anchors it to the stream.
+func (p *ptyView) baseAbs() int64 {
+	if len(p.lines) == 0 {
+		return p.total
+	}
+	return p.total - int64(len(p.lines)-1)
+}
+
+// tailTop is the absolute line number of the first row of the window that
+// shows the newest line.
+func (p *ptyView) tailTop(rows int) int64 {
+	if len(p.lines) == 0 {
+		return p.total
+	}
+	top := p.baseAbs() + int64(len(p.lines)-1) - int64(rows) + 1
+	if base := p.baseAbs(); top < base {
+		top = base
+	}
+	return top
+}
+
+// scrollBy moves the window delta lines, negative back in time, and turns
+// following back on when the newest line is reached again.
+func (p *ptyView) scrollBy(delta, rows int) {
+	if len(p.lines) == 0 || int64(len(p.lines)) <= int64(rows) {
+		p.scrollOn = false
+		return
+	}
+	top := p.tailTop(rows)
+	if p.scrollOn {
+		top = p.top
+	}
+	top += int64(delta)
+	if tail := p.tailTop(rows); top >= tail {
+		p.scrollOn = false
+		return
+	}
+	if base := p.baseAbs(); top < base {
+		top = base
+	}
+	p.top, p.scrollOn = top, true
+}
+
+// window is the rows lines to draw, newest last unless the view is scrolled
+// back; short content is the caller's to pad.
+func (p *ptyView) window(rows int) []string {
+	if len(p.lines) == 0 || rows < 1 {
+		return nil
+	}
+	top := p.tailTop(rows)
+	if p.scrollOn {
+		top = p.top
+		if tail := p.tailTop(rows); top > tail {
+			top = tail
+		}
+		if base := p.baseAbs(); top < base {
+			top = base
+		}
+	}
+	start := int(top - p.baseAbs())
+	if start < 0 {
+		start = 0
+	}
+	end := start + rows
+	if end > len(p.lines) {
+		end = len(p.lines)
+	}
+	return p.lines[start:end]
 }
 
 type pendingKill struct {
@@ -200,6 +306,9 @@ func New(opt Options) Model {
 	}
 	if opt.PtyAlive == nil {
 		opt.PtyAlive = procinfo.Alive
+	}
+	if opt.PtyExit == nil {
+		opt.PtyExit = joblog.ReadExit
 	}
 	if opt.Load == nil {
 		dir, version, key, events := opt.Dir, opt.Version, opt.Key, opt.Events
@@ -400,6 +509,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.opt.PtyAlive(p.pid) {
 			p.ended = true
 			p.missed = len(p.buf) == 0
+			if !p.haveExit && p.exitWait < ptyExitTicks {
+				p.exitWait++
+				if code, ok := m.opt.PtyExit(p.path); ok {
+					p.exitCode, p.haveExit = code, true
+				}
+				if !p.haveExit {
+					// The run records the code after its own tail drain;
+					// the process's death can land before that write.
+					return m, m.ptyTick(ptyTickEvery)
+				}
+			}
 			return m, nil
 		}
 		return m, m.ptyTick(ptyTickEvery)
@@ -481,10 +601,26 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.clamp()
 		return m, nil
 	case screenPty:
+		if m.pty == nil {
+			m.screen = screenQueue
+			return m, nil
+		}
 		switch k {
 		case "esc", "escape", "left", "h", "backspace", "q":
 			m.pty = nil
 			m.screen = screenQueue
+		case "up", "k":
+			m.pty.scrollBy(-1, m.ptyRows())
+		case "down", "j":
+			m.pty.scrollBy(1, m.ptyRows())
+		case "pgup":
+			m.pty.scrollBy(-max(m.ptyRows()-1, 1), m.ptyRows())
+		case "pgdown":
+			m.pty.scrollBy(max(m.ptyRows()-1, 1), m.ptyRows())
+		case "home":
+			m.pty.scrollBy(-ptyMaxLines, m.ptyRows())
+		case "end":
+			m.pty.scrollOn = false
 		}
 		return m, nil
 	case screenKillPrompt:

@@ -98,6 +98,14 @@ func press(m Model, keys ...string) Model {
 			msg = tea.KeyPressMsg{Code: tea.KeyUp}
 		case "down":
 			msg = tea.KeyPressMsg{Code: tea.KeyDown}
+		case "pgup":
+			msg = tea.KeyPressMsg{Code: tea.KeyPgUp}
+		case "pgdown":
+			msg = tea.KeyPressMsg{Code: tea.KeyPgDown}
+		case "home":
+			msg = tea.KeyPressMsg{Code: tea.KeyHome}
+		case "end":
+			msg = tea.KeyPressMsg{Code: tea.KeyEnd}
 		default:
 			r := []rune(k)
 			msg = tea.KeyPressMsg{Code: r[0], Text: k}

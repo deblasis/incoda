@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/lockfile"
 )
@@ -193,5 +194,28 @@ func TestAttachRefusesMangledTicketWiring(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "names pid 4242") || !strings.Contains(stderr.String(), "claims pid 4243") {
 		t.Fatalf("refusal must name both pids, got:\n%s", stderr.String())
+	}
+}
+
+// The run records the exit code after its own tail drain, so a viewer that
+// stops on the process's death must give that write a moment; a run from
+// before the sidecar existed has no code to give.
+func TestAwaitJobExit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "00000000000000000001-1111.out")
+	if _, ok := awaitJobExit(logPath, 50*time.Millisecond); ok {
+		t.Fatal("a missing sidecar must read as no code, not hang or guess")
+	}
+	if err := joblog.WriteExit(logPath, 7); err != nil {
+		t.Fatal(err)
+	}
+	if code, ok := awaitJobExit(logPath, 50*time.Millisecond); !ok || code != 7 {
+		t.Fatalf("a written sidecar must be read, got %d/%v", code, ok)
+	}
+	if err := os.WriteFile(joblog.ExitPath(logPath), []byte("nonsense"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := awaitJobExit(logPath, 50*time.Millisecond); ok {
+		t.Fatal("a malformed sidecar must read as no code")
 	}
 }

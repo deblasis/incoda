@@ -1,19 +1,24 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"charm.land/lipgloss/v2"
 
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/report"
 )
 
-// fakePty feeds canned chunks per read and reports the run alive as told.
+// fakePty feeds canned chunks per read and reports the run alive as told;
+// exit is the code the run recorded beside the capture, when there is one.
 type fakePty struct {
 	chunks [][]byte
 	calls  int
 	alive  bool
+	exit   func() (int, bool)
 }
 
 func (f *fakePty) read(_ string, offset int64) ([]byte, int64, error) {
@@ -23,6 +28,13 @@ func (f *fakePty) read(_ string, offset int64) ([]byte, int64, error) {
 	}
 	f.calls++
 	return b, offset + int64(len(b)), nil
+}
+
+func (f *fakePty) exitCode() (int, bool) {
+	if f.exit == nil {
+		return 0, false
+	}
+	return f.exit()
 }
 
 func ptySampleReport() *report.Report {
@@ -46,6 +58,7 @@ func newPtyModel(fp *fakePty) Model {
 		Dir:      "C:/state",
 		PtyRead:  fp.read,
 		PtyAlive: func(int) bool { return fp.alive },
+		PtyExit:  func(string) (int, bool) { return fp.exitCode() },
 	})
 	m.width, m.height = 120, 40
 	m.key = "builds"
@@ -84,20 +97,149 @@ func TestEnterStreamsPtyJob(t *testing.T) {
 }
 
 // The stream ends by itself when the run is gone, the way attach ends: the
-// last read carries the tail and no further tick is scheduled.
+// last read carries the tail, the head says how the job ended, and no
+// further tick is scheduled.
 func TestPtyStreamEndsWithTheRun(t *testing.T) {
-	fp := &fakePty{chunks: [][]byte{[]byte("done\nexit 0\n")}, alive: false}
+	fp := &fakePty{chunks: [][]byte{[]byte("done\nexit 0\n")}, alive: false,
+		exit: func() (int, bool) { return 0, true }}
 	m := press(newPtyModel(fp), "enter")
 	mm, cmd := m.Update(ptyTickMsg{})
 	m = mm.(Model)
-	if !strings.Contains(view(m), "job ended") {
-		t.Fatalf("a dead run must say so, got:\n%s", view(m))
+	v := view(m)
+	if !strings.Contains(v, "job ended") {
+		t.Fatalf("a dead run must say so, got:\n%s", v)
 	}
-	if !strings.Contains(view(m), "exit 0") {
-		t.Fatalf("the final read must carry the tail, got:\n%s", view(m))
+	if !strings.Contains(v, "exit code 0") {
+		t.Fatalf("the head must carry the job's exit code, got:\n%s", v)
+	}
+	if !strings.Contains(v, "exit 0") {
+		t.Fatalf("the final read must carry the tail, got:\n%s", v)
 	}
 	if cmd != nil {
 		t.Fatal("no further capture read is scheduled once the run is gone")
+	}
+}
+
+// A non-zero code is the viewer's whole point for watching the ending.
+func TestPtyStreamShowsNonZeroExitCode(t *testing.T) {
+	fp := &fakePty{chunks: [][]byte{[]byte("boom\n")}, alive: false,
+		exit: func() (int, bool) { return 3, true }}
+	m := press(newPtyModel(fp), "enter")
+	mm, _ := m.Update(ptyTickMsg{})
+	if v := view(mm.(Model)); !strings.Contains(v, "exit code 3") {
+		t.Fatalf("a failed job must show its code, got:\n%s", v)
+	}
+}
+
+// The run records the code after its own tail drain, which can trail the
+// process's death: the view polls for it, then stops.
+func TestPtyWaitsForTheExitSidecar(t *testing.T) {
+	code, have := 0, false
+	fp := &fakePty{chunks: [][]byte{[]byte("tail\n")}, alive: false,
+		exit: func() (int, bool) { return code, have }}
+	m := press(newPtyModel(fp), "enter")
+	mm, cmd := m.Update(ptyTickMsg{})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("the view must keep polling while the exit code is not written yet")
+	}
+	if !strings.Contains(view(m), "job ended") {
+		t.Fatalf("the view still says the job ended while it waits, got:\n%s", view(m))
+	}
+	code, have = 7, true
+	mm, cmd = m.Update(ptyTickMsg{})
+	m = mm.(Model)
+	if cmd != nil {
+		t.Fatal("the code landed: no further tick")
+	}
+	if v := view(m); !strings.Contains(v, "exit code 7") {
+		t.Fatalf("the late code must show, got:\n%s", v)
+	}
+}
+
+// A run from before the sidecar existed never writes one: after the grace
+// the view settles on "ended" instead of polling forever.
+func TestPtyStopsWaitingForAnAbsentExitSidecar(t *testing.T) {
+	m := press(newPtyModel(&fakePty{alive: false}), "enter")
+	stopped := false
+	for i := 0; i < ptyExitTicks+2; i++ {
+		mm, cmd := m.Update(ptyTickMsg{})
+		m = mm.(Model)
+		if cmd == nil {
+			stopped = true
+			break
+		}
+	}
+	if !stopped {
+		t.Fatal("the view must stop polling for an exit code that will never come")
+	}
+	if v := view(m); !strings.Contains(v, "job ended") || strings.Contains(v, "exit code") {
+		t.Fatalf("a job without a recorded code must say so without inventing one, got:\n%s", v)
+	}
+}
+
+// The capture is a window of fixed height: the newest lines fill it, a
+// short capture is padded, and every row fits the width so a long line
+// cannot wrap and displace the frame.
+func TestPtyWindowIsFixed(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(strings.Repeat("wide ", 60) + "\n")
+	for i := 1; i <= 100; i++ {
+		b.WriteString("line " + fmt.Sprintf("%03d", i) + "\n")
+	}
+	fp := &fakePty{chunks: [][]byte{[]byte(b.String())}, alive: true}
+	m := press(newPtyModel(fp), "enter")
+	mm, _ := m.Update(ptyTickMsg{})
+	m = mm.(Model)
+	body := m.renderPty(m.width)
+	rows := m.ptyRows()
+	if want := 1 + rows; strings.Count(body, "\n")+1 != want {
+		t.Fatalf("the capture body must be the head plus exactly %d rows, got %d:\n%s", rows, strings.Count(body, "\n")+1, body)
+	}
+	for _, ln := range strings.Split(body, "\n") {
+		if w := lipgloss.Width(ln); w > m.width {
+			t.Fatalf("a rendered row is %d cells wide on a %d-cell screen: %q", w, m.width, ln)
+		}
+	}
+	if !strings.Contains(body, "line 100") {
+		t.Fatalf("the newest line must be on screen, got:\n%s", body)
+	}
+	if strings.Contains(body, "line 001\n") {
+		t.Fatalf("the oldest line must be off screen in a 100-line capture, got:\n%s", body)
+	}
+}
+
+// Scrolling reads back through the bounded tail, and new output does not
+// drag the window away from the reader; End follows the tail again.
+func TestPtyScrollsBackAndFreezes(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 100; i++ {
+		b.WriteString("line " + fmt.Sprintf("%03d", i) + "\n")
+	}
+	fp := &fakePty{chunks: [][]byte{[]byte(b.String())}, alive: true}
+	m := press(newPtyModel(fp), "enter")
+	mm, _ := m.Update(ptyTickMsg{})
+	m = mm.(Model)
+
+	m = press(m, "pgup")
+	body := m.renderPty(m.width)
+	if !strings.Contains(body, "line 033") {
+		t.Fatalf("PgUp must page back to older lines, got:\n%s", body)
+	}
+	if strings.Contains(body, "line 100") {
+		t.Fatalf("the newest line must leave the window when scrolled back, got:\n%s", body)
+	}
+	// The job keeps writing; the reader's window must not slide.
+	fp.chunks = append(fp.chunks, []byte("line 101\nline 102\nline 103\n"))
+	mm, _ = m.Update(ptyTickMsg{})
+	m = mm.(Model)
+	if body2 := m.renderPty(m.width); !strings.Contains(body2, "line 033") {
+		t.Fatalf("new output must not drag a scrolled window away, got:\n%s", body2)
+	}
+
+	m = press(m, "end")
+	if body := m.renderPty(m.width); !strings.Contains(body, "line 103") {
+		t.Fatalf("End must follow the tail again, got:\n%s", body)
 	}
 }
 

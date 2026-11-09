@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/deblasis/incoda/internal/joblog"
 	"github.com/deblasis/incoda/internal/lane"
 )
 
@@ -87,5 +89,31 @@ func TestRunPtyRefusesOffWindows(t *testing.T) {
 	code := Main([]string{"run", "--queue", "seed", "--pty", "--", "true"}, io.Discard, &stderr)
 	if code != ExitUsage || !strings.Contains(stderr.String(), "not implemented") {
 		t.Fatalf("want 120 naming the missing implementation, got %d:\n%s", code, stderr.String())
+	}
+}
+
+// TestRunPtyRecordsJobExit: a pty run records how the job ended beside its
+// capture. The ticket is released with the run, so this sidecar is what a
+// viewer that was watching the pid reads once the process is gone.
+func TestRunPtyRecordsJobExit(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pty mode is Windows-only")
+	}
+	dir := t.TempDir()
+	t.Setenv("INCODA_DIR", dir)
+	if code := Main([]string{"config", "seed"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate: %d", code)
+	}
+	relink(t, dir, "seed", "tests")
+	if code := Main([]string{"run", "--queue", "seed", "--reason", "exit code", "--", "cmd", "/c", "exit", "7"}, io.Discard, io.Discard); code != 7 {
+		t.Fatalf("run must pass the child's code through, got %d", code)
+	}
+	files, err := filepath.Glob(filepath.Join(joblog.Dir(lane.LaneDir(dir, "seed")), "*.out"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("want one job file, got %v (%v)", files, err)
+	}
+	code, ok := joblog.ReadExit(files[0])
+	if !ok || code != 7 {
+		t.Fatalf("exit sidecar reads %d/%v, want 7/true", code, ok)
 	}
 }

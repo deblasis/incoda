@@ -792,8 +792,15 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 			jobClosers = append(jobClosers, jl)
 		}
 		tee = io.MultiWriter(writers...)
+		// rc, not the child's code, is the run's own verdict: a killed or
+		// limited job never produced one, and a job that could not start
+		// has none. Record it beside every job file on the way out, after
+		// the child's tail drain and before the tickets are released: the
+		// viewer watches this pid, and the sidecar outlives the ticket that
+		// carried it.
 		defer func() {
 			for _, jl := range jobClosers {
+				_ = jl.Exit(rc)
 				_ = jl.Close()
 			}
 		}()
