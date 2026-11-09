@@ -105,6 +105,17 @@ type Scanner struct {
 	overflow bool
 	skip     bool // an OSC that is not 7501: nothing is kept
 	w        io.Writer
+
+	// Mark, when set, reports every complete 7501 report sequence: start and
+	// end are its byte range in the chunk just scanned, with start < 0 when
+	// the sequence began in an earlier chunk (bytes the caller withheld).
+	// end stops before a terminating ESC, which belongs to what follows, and
+	// includes a terminating BEL. ok is false for a body that is not a valid
+	// report; r is the parsed record when it is. Queries, and sequences the
+	// terminal would abort or discard, are not reported at all.
+	Mark  func(start, end int, r Record, ok bool)
+	escAt int // where the ESC that may open an OSC sat in the chunk, -1 if earlier
+	oscAt int // where the current OSC candidate began, -1 if earlier
 }
 
 // Respond makes the scanner write SupportReply to w for every complete
@@ -114,13 +125,35 @@ type Scanner struct {
 // same as on a terminal that lacks the protocol.
 func (s *Scanner) Respond(w io.Writer) { s.w = w }
 
+// Pending reports a sequence still open at the end of the chunk just scanned
+// that may yet become a report: from is where its ESC sat in that chunk, or
+// -1 when it began in an earlier chunk. ok is false when nothing is open, or
+// when what is open is already known not to be a report (another OSC, or a
+// body past the size limit). A caller withholding report candidates holds
+// the bytes from from to the end of the chunk.
+func (s *Scanner) Pending() (from int, ok bool) {
+	if s.state == stEsc {
+		return s.escAt, true
+	}
+	if s.state == stOSC && !s.skip && !s.overflow {
+		return s.oscAt, true
+	}
+	return 0, false
+}
+
 // Scan feeds the next chunk of output, calling cb (when not nil) for each
 // complete record. With a nil cb nothing is decoded: only queries matter.
 func (s *Scanner) Scan(data []byte, cb func(Record)) {
-	for _, c := range data {
+	// A candidate carried in from an earlier chunk began before this chunk's
+	// index 0, which the marks and Pending report as -1.
+	if s.state == stEsc || s.state == stOSC {
+		s.escAt, s.oscAt = -1, -1
+	}
+	for i, c := range data {
 		switch s.state {
 		case stNormal:
 			if c == 0x1b {
+				s.escAt = i
 				s.state = stEsc
 			}
 		case stEsc:
@@ -132,7 +165,11 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 				// next ESC the way the terminal's parser leaves it (dispatch and
 				// re-enter escape), so a query that follows is a query.
 				s.state = stString
-			case c == 0x1b, c == 0x7f, c < 0x20 && c != 0x18 && c != 0x1a:
+			case c == 0x1b:
+				// the terminal stays in escape, and this ESC is the one that
+				// may open the sequence that follows it
+				s.escAt = i
+			case c == 0x7f, c < 0x20 && c != 0x18 && c != 0x1a:
 				// the terminal stays in escape for these
 			default:
 				s.state = stNormal
@@ -140,6 +177,7 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 		case stString:
 			switch {
 			case c == 0x1b:
+				s.escAt = i
 				s.state = stEsc
 			case c == 0x18, c == 0x1a: // CAN, SUB end the string
 				s.state = stNormal
@@ -147,10 +185,11 @@ func (s *Scanner) Scan(data []byte, cb func(Record)) {
 		case stOSC:
 			switch {
 			case c == 0x07:
-				s.finish(cb, true)
+				s.finish(cb, true, i+1)
 				s.state = stNormal
 			case c == 0x1b:
-				s.finish(cb, false)
+				s.finish(cb, false, i)
+				s.escAt = i
 				s.state = stEsc
 			case c == 0x18, c == 0x1a: // CAN, SUB
 				// a terminal aborts the string on these: no dispatch, no reply
@@ -169,6 +208,7 @@ func (s *Scanner) begin() {
 	s.buf = s.buf[:0]
 	s.overflow = false
 	s.skip = false
+	s.oscAt = s.escAt
 }
 
 func (s *Scanner) add(c byte) {
@@ -186,7 +226,7 @@ func (s *Scanner) add(c byte) {
 	}
 }
 
-func (s *Scanner) finish(cb func(Record), bel bool) {
+func (s *Scanner) finish(cb func(Record), bel bool, end int) {
 	if s.overflow || s.skip || len(s.buf) < len(prefix) {
 		return
 	}
@@ -197,10 +237,14 @@ func (s *Scanner) finish(cb func(Record), bel bool) {
 		}
 		return
 	}
-	if cb == nil {
+	if cb == nil && s.Mark == nil {
 		return
 	}
-	if r, ok := parse(string(body)); ok {
+	r, ok := parse(string(body))
+	if s.Mark != nil {
+		s.Mark(s.oscAt, end, r, ok)
+	}
+	if ok && cb != nil {
 		cb(r)
 	}
 }
