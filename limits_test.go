@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -81,9 +82,9 @@ func TestMaxRunKillsAJobPastItsLimit(t *testing.T) {
 	incoda, _ := binaries(t)
 	lim := limitsBinary(t)
 	state := t.TempDir()
-	linkTestKeys(t, incoda, state, "mr")
+	linkTestKeys(t, incoda, state, "mr", "mrp")
 
-	out, code, el := timedRun(t, incoda, state, "run", "--queue", "mr", "--poll", "50ms", "--max-run", "1s", "--pty=true",
+	out, code, el := timedRun(t, incoda, state, "run", "--queue", "mr", "--poll", "50ms", "--max-run", "1s",
 		"--", lim, "sleep", "30000")
 	if code != exitMaxRun {
 		t.Fatalf("a job past --max-run exits %d, got %d:\n%s", exitMaxRun, code, out)
@@ -106,8 +107,17 @@ func TestMaxRunKillsAJobPastItsLimit(t *testing.T) {
 		t.Fatalf("the kill event must record the limit:\n%s", log)
 	}
 	// The sidecar beside the capture carries the same code the run exits
-	// with: a limit kill never produced the job's own.
-	exits, err := filepath.Glob(filepath.Join(laneDir(state, "mr"), "jobs", "*.exit"))
+	// with: a limit kill never produced the job's own. Only ConPTY jobs
+	// have a capture, so the pty run is the one that can show it.
+	if runtime.GOOS != "windows" {
+		return
+	}
+	out, code = run(incoda, state, t, "run", "--queue", "mrp", "--poll", "50ms", "--max-run", "1s", "--pty=true",
+		"--", lim, "sleep", "30000")
+	if code != exitMaxRun {
+		t.Fatalf("a pty job past --max-run exits %d, got %d:\n%s", exitMaxRun, code, out)
+	}
+	exits, err := filepath.Glob(filepath.Join(laneDir(state, "mrp"), "jobs", "*.exit"))
 	if err != nil || len(exits) != 1 {
 		t.Fatalf("want one exit sidecar beside the capture, got %v (%v)", exits, err)
 	}
