@@ -105,6 +105,15 @@ func TestMaxRunKillsAJobPastItsLimit(t *testing.T) {
 	if kl := logLine(log, "kill"); !strings.Contains(kl, "limit=max-run") {
 		t.Fatalf("the kill event must record the limit:\n%s", log)
 	}
+	// The sidecar beside the capture carries the same code the run exits
+	// with: a limit kill never produced the job's own.
+	exits, err := filepath.Glob(filepath.Join(laneDir(state, "mr"), "jobs", "*.exit"))
+	if err != nil || len(exits) != 1 {
+		t.Fatalf("want one exit sidecar beside the capture, got %v (%v)", exits, err)
+	}
+	if b, err := os.ReadFile(exits[0]); err != nil || strings.TrimSpace(string(b)) != fmt.Sprint(exitMaxRun) {
+		t.Fatalf("the sidecar must record the run's code %d, got %q (%v)", exitMaxRun, b, err)
+	}
 }
 
 // TestMaxRunLeavesAShortJobAlone: finishing inside the limit is a plain run.
