@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/deblasis/incoda/internal/atomicfile"
 	"github.com/deblasis/incoda/internal/textsafe"
@@ -41,6 +42,13 @@ type Config struct {
 	Pools []string `json:"pools,omitempty"`
 	// QuietMachine makes every run on this project lane take quiet-machine.
 	QuietMachine bool `json:"quiet_machine,omitempty"`
+	// MaxRun is the lane's default for `run --max-run`: a job that has held
+	// the lane this long is killed. Zero is no limit; a run's own flag
+	// overrides it (0 turns it off for that run).
+	MaxRun time.Duration `json:"-"`
+	// Stall is the lane's default for `run --stall`: a job whose process
+	// tree used no CPU time for this long is killed. Zero is no limit.
+	Stall time.Duration `json:"-"`
 	// Schema is the file format version; a file without it is schema 1 and
 	// is upgraded on its next write. (The retired "pty" key of schema 2
 	// configs is preserved as an unknown field and ignored: consoles are
@@ -50,10 +58,30 @@ type Config struct {
 	// extra holds fields this binary does not know, so a rewrite by an older
 	// binary never drops what a newer one wrote.
 	extra map[string]json.RawMessage
+	// warnings are stored values this binary could not use and ignored.
+	warnings []string
 }
 
-// ConfigSchema is the config.json format this binary writes.
-const ConfigSchema = 2
+// Warnings lists the stored values that were ignored because they were not
+// valid, for the commands that read the config to say so.
+func (c Config) Warnings() []string { return c.warnings }
+
+// ConfigSchema is the config.json format this binary writes for a lane with
+// no run limit. ConfigSchemaLimits is the one it writes for a lane that has
+// one: an older incoda refuses that file by name (NewerSchemaError) instead
+// of reading its limits as unknown fields and running the lane unbounded.
+const (
+	ConfigSchema       = 2
+	ConfigSchemaLimits = 3
+)
+
+// schemaFor is the schema stamped on a config that is about to be stored.
+func schemaFor(c Config) int {
+	if c.MaxRun > 0 || c.Stall > 0 {
+		return ConfigSchemaLimits
+	}
+	return ConfigSchema
+}
 
 // NewerSchemaError is returned when config.json was written by a newer
 // incoda. Reading on would mean ignoring rules this binary does not know,
@@ -70,17 +98,54 @@ func (e *NewerSchemaError) Error() string {
 // configKnown lists the JSON names Config owns; everything else is extra.
 var configKnown = map[string]bool{
 	"slots": true, "description": true, "require_reason": true, "closed": true,
-	"pools": true, "quiet_machine": true, "schema": true,
+	"pools": true, "quiet_machine": true, "schema": true, "max_run": true, "stall": true,
 }
 
 type configJSON struct {
-	Slots         int      `json:"slots,omitempty"`
-	Description   string   `json:"description,omitempty"`
-	RequireReason bool     `json:"require_reason,omitempty"`
-	Closed        string   `json:"closed,omitempty"`
-	Pools         []string `json:"pools,omitempty"`
-	QuietMachine  bool     `json:"quiet_machine,omitempty"`
-	Schema        int      `json:"schema,omitempty"`
+	Slots         int             `json:"slots,omitempty"`
+	Description   string          `json:"description,omitempty"`
+	RequireReason bool            `json:"require_reason,omitempty"`
+	Closed        string          `json:"closed,omitempty"`
+	Pools         []string        `json:"pools,omitempty"`
+	QuietMachine  bool            `json:"quiet_machine,omitempty"`
+	MaxRun        json.RawMessage `json:"max_run,omitempty"`
+	Stall         json.RawMessage `json:"stall,omitempty"`
+	Schema        int             `json:"schema,omitempty"`
+}
+
+// parseLimitField reads a stored limit: a Go duration, never negative; an
+// absent value is no limit. A value that is not usable is no limit as well
+// and comes back as a warning: a hand edit must not take the lane, and the
+// command that would repair it, down with it. Not killing is the safe
+// direction.
+func parseLimitField(name string, raw json.RawMessage) (time.Duration, string) {
+	if len(raw) == 0 {
+		return 0, ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || s == "" {
+		return 0, fmt.Sprintf("config %s %s is not a duration like 30m; ignored (clear it with `config --%s 0`)", name, textsafe.Escape(string(raw)), limitFlag(name))
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Sprintf("config %s %q is not a non-negative duration like 30m; ignored (clear it with `config --%s 0`)", name, textsafe.Escape(s), limitFlag(name))
+	}
+	return d, ""
+}
+
+func limitFlag(field string) string {
+	if field == "max_run" {
+		return "max-run"
+	}
+	return field
+}
+
+func limitText(d time.Duration) json.RawMessage {
+	if d <= 0 {
+		return nil
+	}
+	b, _ := json.Marshal(d.String())
+	return b
 }
 
 // UnmarshalJSON reads the known fields and keeps the rest in extra.
@@ -93,10 +158,18 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &all); err != nil {
 		return err
 	}
-	*c = Config{
+	maxRun, w1 := parseLimitField("max_run", known.MaxRun)
+	stall, w2 := parseLimitField("stall", known.Stall)
+	var warnings []string
+	for _, w := range []string{w1, w2} {
+		if w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	*c = Config{warnings: warnings,
 		Slots: known.Slots, Description: known.Description, RequireReason: known.RequireReason,
 		Closed: known.Closed, Pools: known.Pools, QuietMachine: known.QuietMachine,
-		Schema: known.Schema,
+		MaxRun: maxRun, Stall: stall, Schema: known.Schema,
 	}
 	for k, v := range all {
 		if !configKnown[k] {
@@ -114,7 +187,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	b, err := json.Marshal(configJSON{
 		Slots: c.Slots, Description: c.Description, RequireReason: c.RequireReason,
 		Closed: c.Closed, Pools: c.Pools, QuietMachine: c.QuietMachine,
-		Schema: c.Schema,
+		MaxRun: limitText(c.MaxRun), Stall: limitText(c.Stall), Schema: c.Schema,
 	})
 	if err != nil || len(c.extra) == 0 {
 		return b, err
@@ -139,6 +212,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 func EqualConfig(a, b Config) bool {
 	if a.Slots != b.Slots || a.Description != b.Description || a.RequireReason != b.RequireReason ||
 		a.Closed != b.Closed || a.QuietMachine != b.QuietMachine ||
+		a.MaxRun != b.MaxRun || a.Stall != b.Stall ||
 		len(a.Pools) != len(b.Pools) {
 		return false
 	}
@@ -217,7 +291,7 @@ func ReadConfig(dir string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Config{}, fmt.Errorf("config %s is not valid JSON: %w", path, err)
 	}
-	if c.Schema > ConfigSchema {
+	if c.Schema > ConfigSchemaLimits {
 		return Config{}, &NewerSchemaError{Path: path, Schema: c.Schema}
 	}
 	return c, nil
@@ -233,7 +307,7 @@ var ErrNoChange = errors.New("no change")
 // inside one hold of the registry lock, so two writers changing different
 // fields cannot lose each other's change. The write goes through a temp
 // file and a rename, so a reader never sees half a file. The stored file is
-// stamped with ConfigSchema and keeps fields this binary does not know. A
+// stamped with the schema its content needs (schemaFor) and keeps fields this binary does not know. A
 // config written by a newer incoda is refused, never rewritten.
 func (q *Queue) UpdateConfig(fn func(*Config) error) (Config, error) {
 	var out Config
@@ -258,7 +332,7 @@ func (q *Queue) UpdateConfigHeld(fn func(*Config) error) (Config, error) {
 		}
 		return out, err
 	}
-	c.Schema = ConfigSchema
+	c.Schema = schemaFor(c)
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return out, err

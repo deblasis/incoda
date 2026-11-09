@@ -43,13 +43,17 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	unlink := fs.Bool("unlink", false, "remove the link; runs on the queue are then refused until it is linked again")
 	quietMachine := fs.Bool("quiet-machine", false, "every run on this queue takes quiet-machine: an exclusive ticket on every pool (--quiet-machine=false clears it)")
 
+	maxRun := &limitValue{}
+	fs.Var(maxRun, "max-run", "the lane's default for `run --max-run`: a job that has held the lane this long is killed (a Go duration like 90m or bare seconds; 0 clears it)")
+	stall := &limitValue{floor: stallFloorError}
+	fs.Var(stall, "stall", "the lane's default for `run --stall`: a job whose process tree used no CPU time for this long is killed (a Go duration like 20m or bare seconds, at least 1s; 0 clears it). Waits for disk, network or input use no CPU and read as a stall")
 	noColor := fs.Bool("no-color", false, "never emit ANSI color, even on a terminal (the NO_COLOR environment variable does the same)")
 	wait := &waitValue{d: time.Minute}
 	fs.Var(wait, "wait", "how long to wait for machine.lock and a state upgrade: a Go duration (1m) or bare seconds; negative waits forever")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: incoda config KEY [--slots N] [--description TEXT] [--require-reason[=false]] [--close MSG | --open]\n"+
 			"                   [--pool P,P [--replace] | --add-pool P,P | --remove-pool P,P | --unlink] [--quiet-machine[=false]]\n"+
-			"                   [--wait DUR]\n\n")
+			"                   [--max-run DUR] [--stall DUR] [--wait DUR]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -106,6 +110,10 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 				cfg.Closed = *closeMsg
 			case "open":
 				cfg.Closed = ""
+			case "max-run":
+				cfg.MaxRun = maxRun.d
+			case "stall":
+				cfg.Stall = stall.d
 
 			default:
 				return
@@ -115,7 +123,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		return changed
 	}
 	logConfig := func(cfg lane.Config) {
-		lane.AppendLog(lane.LaneDir(dir, key), "queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed))
+		lane.AppendLog(lane.LaneDir(dir, key), "queue=%s event=config pid=%d slots=%d require_reason=%v closed=%s max_run=%s stall=%s", key, os.Getpid(), cfg.Slots, cfg.RequireReason, textsafe.LogValue(cfg.Closed), cfg.MaxRun, cfg.Stall)
 	}
 	var cfg lane.Config
 	switch {
@@ -178,6 +186,14 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	}
 
 	p := paletteFor(stdout, *noColor)
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow("warning: "+w))
+	}
+	if given["stall"] {
+		if w := stallWarning(cfg.Stall); w != "" {
+			fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"), p.Yellow(w))
+		}
+	}
 	fmt.Fprintf(stdout, "queue %q\n", key)
 	if cfg.Slots < 1 {
 		fmt.Fprintf(stdout, "  %s 1 %s\n", p.Dim("slots:"), p.Dim("(default)"))
@@ -195,6 +211,8 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "  %s %s\n", p.Dim("closed:"), p.BoldRed(textsafe.Escape(cfg.Closed)))
 	}
+	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("max run:"), limitLine(cfg.MaxRun))
+	fmt.Fprintf(stdout, "  %s %s\n", p.Dim("stall:"), limitLine(cfg.Stall))
 	if reg.IsPool(key) {
 		fmt.Fprintf(stdout, "  %s pool\n", p.Dim("kind:"))
 		return nil
@@ -242,6 +260,14 @@ func checkTexts(given map[string]bool, values map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// limitLine renders a lane's stored limit for `config`.
+func limitLine(d time.Duration) string {
+	if d <= 0 {
+		return "none"
+	}
+	return d.String()
 }
 
 func yesNo(b bool) string {

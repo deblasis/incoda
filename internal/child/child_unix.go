@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+
+	"github.com/deblasis/incoda/internal/procinfo"
 )
 
 type supervisor struct {
@@ -85,14 +87,83 @@ func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.
 	return peak, havePeak, cpu, haveCPU
 }
 
+// liveCPU is the CPU the live job tree has used so far: the child, every
+// descendant of it, and every member of its process group when it has one.
+// Only processes still alive are counted (a reaped grandchild takes its time
+// with it), so the sum can fall as well as rise; a caller treats any change as
+// activity.
+func (s *supervisor) liveCPU() (time.Duration, bool) {
+	if s.pid <= 0 {
+		return 0, false
+	}
+	ps, err := procinfo.List()
+	if err != nil {
+		return 0, false
+	}
+	return treeCPU(ps, s.pid, s.pgid), true
+}
+
+// killSet is the job tree as the process list shows it: root, every
+// descendant of it and, when pgid is positive, every member of that group.
+func killSet(ps []procinfo.Proc, root, pgid int) map[int]bool {
+	in := map[int]bool{root: true}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range ps {
+			if !in[p.PID] && (in[p.PPID] || (pgid > 0 && p.PGID == pgid)) {
+				in[p.PID] = true
+				changed = true
+			}
+		}
+	}
+	return in
+}
+
+// treeCPU sums the CPU of the tree killSet names.
+func treeCPU(ps []procinfo.Proc, root, pgid int) time.Duration {
+	in := killSet(ps, root, pgid)
+	var total time.Duration
+	for _, p := range ps {
+		if in[p.PID] {
+			total += p.CPU
+		}
+	}
+	return total
+}
+
+// killTree ends the whole job tree. The group goes first when the job has one;
+// then the live process list is swept for what the group did not hold: the
+// descendants of a nested run, which shares its parent's group, and
+// descendants that left the group. A descendant that has already been
+// reparented to init is out of reach of any walk and survives (documented).
 func (s *supervisor) killTree() {
 	if s.pgid > 0 {
 		_ = syscall.Kill(-s.pgid, syscall.SIGKILL)
+	}
+	if s.pid <= 0 {
 		return
 	}
-	if s.pid > 0 {
-		_ = syscall.Kill(s.pid, syscall.SIGKILL)
+	self := os.Getpid()
+	for round := 0; round < 5; round++ {
+		ps, err := procinfo.List()
+		if err != nil {
+			break
+		}
+		live := 0
+		for _, p := range ps {
+			if !killSet(ps, s.pid, s.pgid)[p.PID] || p.State == 'Z' || p.PID <= 1 || p.PID == self {
+				continue
+			}
+			live++
+			_ = syscall.Kill(p.PID, syscall.SIGKILL)
+		}
+		if live == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	// No process list: at least the direct child.
+	_ = syscall.Kill(s.pid, syscall.SIGKILL)
 }
 
 // dispose is a no-op on Unix: there is no job handle whose closure would clean

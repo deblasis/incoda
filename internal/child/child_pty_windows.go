@@ -111,6 +111,9 @@ func runPTY(argv []string, abort <-chan struct{}, opt Options) (Result, error) {
 		return Result{}, fmt.Errorf("resume child: %w", err)
 	}
 
+	opt.Probe.arm(sup.liveCPU)
+	defer opt.Probe.disarm()
+
 	// Waiter: reports the exit code and releases the pseudo-console. The
 	// CloseConsole call runs in its own goroutine because a conhost wedged
 	// mid-teardown must not wedge the run's exit path with it.
@@ -305,7 +308,9 @@ drain:
 	}
 
 	// Accounting before dispose closes the job handle; the numbers go with it.
-	res := Result{Code: int(code), Aborted: aborted}
+	// An exit status of 0 is a job that finished by itself, whatever abort
+	// arrived while it was exiting: a terminated job never reports 0.
+	res := Result{Code: int(code), Aborted: aborted && code != 0}
 	res.PeakBytes, res.HavePeak, res.CPU, res.HaveCPU = sup.usage(nil)
 	return res, nil
 }

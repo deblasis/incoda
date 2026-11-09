@@ -150,6 +150,21 @@ func (s *supervisor) usage(cmd *exec.Cmd) (peak uint64, havePeak bool, cpu time.
 	return peak, havePeak, cpu, haveCPU
 }
 
+// liveCPU is the job's user plus kernel time so far. The Job Object accounts
+// for every process that ever ran in it, grandchildren and the ones that have
+// already exited included, so the figure only ever grows while work is done.
+func (s *supervisor) liveCPU() (time.Duration, bool) {
+	if s.job == 0 {
+		return 0, false
+	}
+	var acct jobBasicAccounting
+	if err := windows.QueryInformationJobObject(s.job, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&acct)), uint32(unsafe.Sizeof(acct)), nil); err != nil {
+		return 0, false
+	}
+	return time.Duration(acct.TotalUserTime+acct.TotalKernelTime) * 100, true
+}
+
 func (s *supervisor) killTree() {
 	if s.job != 0 {
 		_ = windows.TerminateJobObject(s.job, 1)

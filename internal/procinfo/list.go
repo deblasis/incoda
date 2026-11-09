@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Proc is one process as the process listing sees it.
@@ -18,7 +19,15 @@ type Proc struct {
 	// State is 'T' for a stopped process, 'Z' for a zombie and 'R' for
 	// anything else.
 	State byte
+	// CPU is the user plus system time the process has used so far, read
+	// from scheduler ticks of tick. A caller compares it with an earlier
+	// reading of the same process.
+	CPU time.Duration
 }
+
+// tick is the length of one scheduler tick in the counters the kernel keeps
+// (USER_HZ on Linux, the statclock on macOS: 100 Hz on both).
+const tick = 10 * time.Millisecond
 
 // ErrNoProcess means no process has the pid.
 var ErrNoProcess = errors.New("no such process")
@@ -58,7 +67,9 @@ func parseStat(s string) (Proc, error) {
 	ppid, err1 := strconv.Atoi(f[1])
 	pgid, err2 := strconv.Atoi(f[2])
 	start, err3 := strconv.ParseUint(f[19], 10, 64)
-	if err := errors.Join(err1, err2, err3); err != nil {
+	utime, err4 := strconv.ParseUint(f[11], 10, 64)
+	stime, err5 := strconv.ParseUint(f[12], 10, 64)
+	if err := errors.Join(err1, err2, err3, err4, err5); err != nil {
 		return Proc{}, fmt.Errorf("stat line for pid %d: %w", pid, err)
 	}
 	st := byte('R')
@@ -68,5 +79,6 @@ func parseStat(s string) (Proc, error) {
 	case 'Z', 'X':
 		st = 'Z'
 	}
-	return Proc{PID: pid, PPID: ppid, PGID: pgid, Start: start, State: st}, nil
+	return Proc{PID: pid, PPID: ppid, PGID: pgid, Start: start, State: st,
+		CPU: time.Duration(utime+stime) * tick}, nil
 }
