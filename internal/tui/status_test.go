@@ -142,3 +142,40 @@ func TestStatusStyleByState(t *testing.T) {
 		}
 	}
 }
+
+// A done report from a live run claims nothing on the watch screen either:
+// the mark stays alone while the pid lives, and the record is believed once
+// the run is gone.
+func TestWatchStaleDoneFromALiveRunClaimsNothing(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(lane.LaneDir(state, "builds"), "jobs")
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msg := base64.StdEncoding.EncodeToString([]byte("exit 0"))
+	log := "\x1b]7501;state=done:id=just/materialize-fast:msg=" + msg + "\x07" + "output keeps coming\r\n"
+	if err := os.WriteFile(filepath.Join(jobs, "01794028541589289100-161600.out"), []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep := ptySampleReport()
+	alive := true
+	m := New(Options{
+		Killer:   &fakeKiller{},
+		Load:     func() (*report.Report, error) { return rep, nil },
+		Now:      func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) },
+		Dir:      state,
+		PtyAlive: func(int) bool { return alive },
+	})
+	m.width, m.height = 120, 40
+	m.key = "builds"
+	m.screen = screenQueue
+	mm, _ := m.Update(reportMsg{rep: rep})
+	if v := view(mm.(Model)); strings.Contains(v, "✅") || strings.Contains(v, "exit 0") {
+		t.Fatalf("a live run's stale done must not badge or speak, got:\n%s", v)
+	}
+	alive = false
+	mm, _ = m.Update(reportMsg{rep: rep})
+	if v := view(mm.(Model)); !strings.Contains(v, "🖥️ ✅") || !strings.Contains(v, "exit 0") {
+		t.Fatalf("a dead run's done is believed, got:\n%s", v)
+	}
+}

@@ -122,7 +122,7 @@ Linux) and nothing is ever resolved from the working directory.
 |---|---|
 | `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--max-run DUR] [--stall DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). `--max-run DUR` kills the job once it has held the lane for `DUR`, and `--stall DUR` kills it when its whole process tree has used no CPU time for `DUR` (see [Run limits](#run-limits)). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--max-run DUR] [--stall DUR] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, the link to the machine-wide pools the key's jobs take, and the default `--max-run` and `--stall` its runs take (`0` clears one). |
-| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line. `--json` is a stable, versioned schema for scripts. |
+| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line — except `done`, which is believed only once the run's process is gone. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live in a fixed window (scroll with the arrows, PgUp/PgDn and Home; End follows the tail), ends by itself when the job does and shows the exit code it recorded — viewing is open to everyone. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
 | `incoda queues` | Every queue with state on this machine, and whether it is busy. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
@@ -327,8 +327,11 @@ show it in `watch` and plain `status` beside the job's `🖥️` mark: the state
 as a glyph (🔄 working, ✅ done, ❌ error, 🛑 blocked, 💤 idle) with its
 progress beside it when the job reported one (`🖥️ 🔄 40%`), and the record's
 message at the end of the line, colored by state (working in the accent,
-done green, error red, blocked yellow, idle dim). Two parts make that
-work, and both need `--pty`:
+done green, error red, blocked yellow, idle dim). A `done` report is
+believed only once the run's process is gone: while the pid lives, a done
+record claims nothing (the mark stays alone), because a sub-task inside
+the job — a step, an inner build — can finish while the job itself goes
+on. Two parts make that work, and both need `--pty`:
 
 - A job under `incoda run --pty` that asks its terminal whether OSC 7501 is
   supported (`ESC ] 7501 ; ? BEL`) gets the support reply on its console

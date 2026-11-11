@@ -540,6 +540,19 @@ var badges = map[string]string{
 	"error":   "❌",
 }
 
+// WhileAlive is the record a viewer may show for a job whose run process
+// is still alive. A done report from a live run is stale: something inside
+// the job finished — a sub-make, a step — while the job goes on writing,
+// and that report never speaks for the whole run again. It claims nothing
+// (ok false, the zero record) until the process is gone; every other state
+// speaks as reported, live or not.
+func (r Record) WhileAlive(alive bool) (Record, bool) {
+	if alive && r.State == "done" {
+		return Record{}, false
+	}
+	return r, true
+}
+
 // Text is the record's msg escaped and cut to maxMsg cells, for painting
 // beside a Badge (which already said the state); no msg gives "".
 func (r Record) Text(maxMsg int) string {

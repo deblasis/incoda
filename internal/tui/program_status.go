@@ -47,7 +47,12 @@ func (m *Model) refreshStatus(rep *report.Report) {
 						m.logs[k] = ls
 					}
 					if r, ok := ls.Read(path); ok {
-						next[k] = r
+						// A done report from a live run is a sub-task's, not
+						// the job's ending: it claims nothing while the pid
+						// lives (see osc7501.Record.WhileAlive).
+						if r, ok = r.WhileAlive(m.opt.PtyAlive(e.Ticket.PID)); ok {
+							next[k] = r
+						}
 					}
 				}
 			}

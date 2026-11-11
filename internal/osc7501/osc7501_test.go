@@ -291,3 +291,24 @@ func TestText(t *testing.T) {
 		}
 	}
 }
+
+// WhileAlive demotes only a done report from a live run: something inside
+// the job finished while the job goes on writing, so the record claims
+// nothing until the process is gone. Every other state speaks as reported,
+// live or not, and a done report from a dead run is believed.
+func TestWhileAlive(t *testing.T) {
+	pct := 100
+	done := Record{ID: "just/x", State: "done", Progress: &pct, Msg: "exit 0"}
+	if r, ok := done.WhileAlive(true); ok || r != (Record{}) {
+		t.Fatalf("done from a live run claims nothing, got %+v ok=%v", r, ok)
+	}
+	if r, ok := done.WhileAlive(false); !ok || r.State != "done" || r.Msg != "exit 0" || r.Progress != &pct {
+		t.Fatalf("done from a dead run is believed as reported, got %+v ok=%v", r, ok)
+	}
+	for _, state := range []string{"working", "blocked", "error", "idle", "unknown"} {
+		r := Record{State: state, Msg: "m"}
+		if got, ok := r.WhileAlive(true); !ok || got.State != state {
+			t.Fatalf("state %q must speak as reported while alive, got %+v ok=%v", state, got, ok)
+		}
+	}
+}

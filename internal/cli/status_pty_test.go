@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/deblasis/incoda/internal/colorize"
 	"github.com/deblasis/incoda/internal/lane"
@@ -191,4 +193,75 @@ func TestForgedMarkerDoesNotFreezeTheStatus(t *testing.T) {
 	if !strings.Contains(buf.String(), "🔄") || !strings.Contains(buf.String(), "still going") {
 		t.Fatalf("a forged marker froze the status row:\n%s", buf.String())
 	}
+}
+
+// A done report from a live run claims nothing: the mark stays alone until
+// the process is gone, because a sub-task's "done, exit 0" is not the job's
+// ending while the job keeps running. Once the pid is gone the record is
+// believed again.
+func TestADoneReportFromALiveRunClaimsNothing(t *testing.T) {
+	laneDir := t.TempDir()
+	jobs := filepath.Join(laneDir, "jobs")
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msg := base64.StdEncoding.EncodeToString([]byte("exit 0"))
+	log := "\x1b]7501;state=working:id=just/materialize-fast:app=just\x1b\\" +
+		"\x1b]7501;state=done:id=just/materialize-fast:app=just:msg=" + msg + "\x07" +
+		strings.Repeat("build output keeps coming\r\n", 50)
+	if err := os.WriteFile(filepath.Join(jobs, "01794404609713789100-11496.out"), []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStatusSleeper$", "-test.v")
+	cmd.Env = append(os.Environ(), "GO_INCODA_STATUS_SLEEPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	qr := QueueReport{
+		Key: "builds", Exists: true, Dir: laneDir,
+		Holders: []lane.Entry{{Holding: true, HeldSeconds: 5, File: "01794404609713789100-11496.ticket",
+			Ticket: lane.Ticket{PID: cmd.Process.Pid, PTY: true, Owner: "alice", Command: []string{"pwsh", "release"}}}},
+	}
+	render := func() string {
+		var buf bytes.Buffer
+		renderQueue(&buf, colorize.Plain, qr, nil)
+		return buf.String()
+	}
+	if out := render(); strings.Contains(out, "✅") || strings.Contains(out, "exit 0") {
+		t.Fatalf("a live run's stale done must not badge or speak, got:\n%s", out)
+	}
+	if !strings.Contains(render(), "HOLDER 🖥️") {
+		t.Fatalf("the mark stays alone on a live run, got:\n%s", render())
+	}
+	// The JSON report carries the same verdict: no program_status for a
+	// live run's stale done, the record once the pid is gone.
+	rep := &Report{Schema: 1, Queues: []QueueReport{{
+		Key: "builds", Exists: true, Dir: laneDir,
+		Holders: []lane.Entry{qr.Holders[0]},
+	}}}
+	fillProgramStatus(rep)
+	if ps := rep.Queues[0].Holders[0].ProgramStatus; ps != nil {
+		t.Fatalf("a live run's stale done must not reach the JSON report, got %+v", ps)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	if out := render(); !strings.Contains(out, "🖥️ ✅") || !strings.Contains(out, "exit 0") {
+		t.Fatalf("a dead run's done is believed, got:\n%s", out)
+	}
+	fillProgramStatus(rep)
+	if ps := rep.Queues[0].Holders[0].ProgramStatus; ps == nil || ps.State != "done" || ps.Msg != "exit 0" {
+		t.Fatalf("a dead run's done reaches the JSON report, got %+v", ps)
+	}
+}
+
+// TestStatusSleeper is the helper process the test above keeps alive: it
+// only runs when asked to, and then it just sleeps.
+func TestStatusSleeper(t *testing.T) {
+	if os.Getenv("GO_INCODA_STATUS_SLEEPER") != "1" {
+		t.Skip("helper process")
+	}
+	time.Sleep(2 * time.Minute)
 }

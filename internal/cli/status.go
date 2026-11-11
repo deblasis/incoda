@@ -12,6 +12,7 @@ import (
 	"github.com/deblasis/incoda/internal/jobstatus"
 	"github.com/deblasis/incoda/internal/lane"
 	"github.com/deblasis/incoda/internal/osc7501"
+	"github.com/deblasis/incoda/internal/procinfo"
 	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 )
@@ -87,7 +88,9 @@ func fillEntryProgramStatus(e *lane.Entry, laneDir string) {
 	var ls jobstatus.LogStatus
 	e.ProgramStatus = nil
 	if r, ok := ls.ReadWhole(path); ok {
-		e.ProgramStatus = &r
+		if r, ok = believed(r, true, e.Ticket.PID); ok {
+			e.ProgramStatus = &r
+		}
 	}
 }
 
@@ -244,10 +247,22 @@ func programStatus(laneDir string, e lane.Entry, follow *statusFollowers) (osc75
 		return osc7501.Record{}, false
 	}
 	if follow != nil {
-		return follow.follower(laneDir, e.File).Read(path)
+		r, ok := follow.follower(laneDir, e.File).Read(path)
+		return believed(r, ok, e.Ticket.PID)
 	}
 	var ls jobstatus.LogStatus
-	return ls.ReadWhole(path)
+	r, ok := ls.ReadWhole(path)
+	return believed(r, ok, e.Ticket.PID)
+}
+
+// believed is the record after the run's own liveness has its say: a done
+// report from a live run is a sub-task's, not the job's ending, so it
+// claims nothing while the pid lives (see osc7501.Record.WhileAlive).
+func believed(r osc7501.Record, ok bool, pid int) (osc7501.Record, bool) {
+	if !ok {
+		return r, false
+	}
+	return r.WhileAlive(procinfo.Alive(pid))
 }
 
 // statusSuffix paints a record's msg at the end of a participant line;
