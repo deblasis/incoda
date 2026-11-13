@@ -68,6 +68,20 @@ type Queue struct {
 	// still the live participants; only a ticket created or released during the
 	// read can be missing from them.
 	Lockless bool `json:"lockless,omitempty"`
+	// UpstreamWaiting lists the lanes that link to this pool and have
+	// tickets queued on the lane that have not entered the pool yet. A pool
+	// holds only forwarded runs, so its own Waiting is empty by construction
+	// and a pool-scoped view would otherwise read "0 waiting" while work
+	// queues behind it. Empty for a project lane.
+	UpstreamWaiting []UpstreamWaiting `json:"upstream_waiting,omitempty"`
+}
+
+// UpstreamWaiting is one project lane's queue depth as seen from a pool it
+// links to: Waiting counts the tickets queued on the lane, none of which
+// has reached the pool.
+type UpstreamWaiting struct {
+	Lane    string `json:"lane"`
+	Waiting int    `json:"waiting"`
 }
 
 // StateDirSource names how the state directory was resolved.
@@ -167,6 +181,64 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 			holders = append(holders, machine.Holder{Key: qr.Key, PID: e.Ticket.PID})
 		}
 	}
+	// Pools only forward. A waiter on a lane that links to a pool is real
+	// work queued behind that pool, but its ticket is on the lane, so the
+	// pool's own Waiting can never show it; attach the lane counts to the
+	// pool entries so a pool-scoped view states the depth it is read for.
+	if hasPool(rep.Queues) {
+		up := ScanUpstream(v.Root, mode, deadline)
+		for qi := range rep.Queues {
+			if rep.Queues[qi].IsPool {
+				rep.Queues[qi].UpstreamWaiting = up[rep.Queues[qi].Key]
+			}
+		}
+	}
 	rep.Warnings = machine.StatusWarnings(stateDir, v, holders, deadline)
 	return rep, nil
+}
+
+// hasPool reports whether the report carries a pool, so the upstream scan
+// (which lists and probes the lanes) only runs when somebody can read it.
+func hasPool(queues []Queue) bool {
+	for _, q := range queues {
+		if q.IsPool {
+			return true
+		}
+	}
+	return false
+}
+
+// ScanUpstream counts, per pool key, the tickets queued on the lanes that
+// link to it. Links are config facts, read without the registry lock; each
+// linking lane is observed once on the caller's deadline. Display detail:
+// a lane whose config or state cannot be read is skipped, never an error.
+func ScanUpstream(root string, mode lane.Mode, deadline time.Time) map[string][]UpstreamWaiting {
+	keys, err := lane.ListIn(root)
+	if err != nil {
+		return nil
+	}
+	sort.Strings(keys)
+	out := map[string][]UpstreamWaiting{}
+	for _, k := range keys {
+		cfg, err := lane.ReadConfig(filepath.Join(root, k))
+		if err != nil || len(cfg.Pools) == 0 {
+			continue
+		}
+		q, err := lane.OpenIn(root, k, mode)
+		if err != nil {
+			continue
+		}
+		snap, err := q.ObserveBy(0, deadline)
+		q.Close()
+		if err != nil || len(snap.Waiting) == 0 {
+			continue
+		}
+		for _, pool := range cfg.Pools {
+			if pool == k {
+				continue
+			}
+			out[pool] = append(out[pool], UpstreamWaiting{Lane: k, Waiting: len(snap.Waiting)})
+		}
+	}
+	return out
 }

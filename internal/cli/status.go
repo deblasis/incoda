@@ -365,6 +365,9 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 			}
 		}
 	}
+	for _, u := range qr.UpstreamWaiting {
+		fmt.Fprintf(w, "  %s %s\n", p.Dim("upstream:"), fmt.Sprintf("%d waiting on %s", u.Waiting, u.Lane))
+	}
 	if len(qr.RecentEvents) > 0 {
 		fmt.Fprintf(w, "  %s\n", p.Dim("recent events:"))
 		for _, l := range qr.RecentEvents {

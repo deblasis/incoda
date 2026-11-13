@@ -205,6 +205,16 @@ first link under one `machine.lock` hold, logged as `event=link`. Two writers
 racing the same first link with different sets is a refusal
 (`link-conflict`), not a last-writer-wins.
 
+**A pool's waiting is upstream.** A pool holds only forwarded runs, and a
+forwarded run is a holder from the moment it enters, so the pool's own waiting
+list is empty by construction. Work that queued behind a busy pool is waiting
+on the *lane*, not on the pool, and a pool-scoped view has to say so or it
+reports "0 waiting" while the machine is backed up: `incoda queues` adds
+`1 upstream (wintty-build)` to the pool's row, `status --queue builds` lists
+`upstream: 1 waiting on wintty-build`, and `--json` carries it as the pool's
+`upstream_waiting`. The counts are read from the linking lanes' own state
+(display detail: a lane that cannot be read is skipped, not an error).
+
 **The lane set of a run** is the named keys plus every linked pool they bring
 in, deduplicated, and the order is total: project lanes first by key, then
 pools by key. Every run sorts the same way, so two multi-lane runs can never

@@ -17,6 +17,7 @@ import (
 	"github.com/deblasis/incoda/internal/lockfile"
 	"github.com/deblasis/incoda/internal/machine"
 	"github.com/deblasis/incoda/internal/procinfo"
+	"github.com/deblasis/incoda/internal/report"
 	"github.com/deblasis/incoda/internal/sysinfo"
 	"github.com/deblasis/incoda/internal/textsafe"
 	"github.com/deblasis/incoda/internal/tui"
@@ -130,6 +131,12 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 	if !v.Migrated {
 		mode = lane.ReadOnly
 	}
+	// Pools only forward: their own Waiting is empty while lanes queue
+	// behind them, so the pool row also states the upstream depth.
+	upstream := map[string][]report.UpstreamWaiting{}
+	if v.Registry != nil {
+		upstream = report.ScanUpstream(v.Root, mode, time.Now().Add(lane.ViewProbeWait))
+	}
 	for _, k := range keys {
 		q, err := lane.OpenIn(v.Root, k, mode)
 		if err != nil {
@@ -145,6 +152,9 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		state := p.BoldGreen("free")
 		if len(snap.Holders) > 0 {
 			state = p.BoldYellow(fmt.Sprintf("%d/%d held, %d waiting", len(snap.Holders), snap.EffectiveSlots, len(snap.Waiting)))
+		}
+		for _, u := range upstream[k] {
+			state += p.Dim(fmt.Sprintf(", %d upstream (%s)", u.Waiting, u.Lane))
 		}
 		if snap.Config.Closed != "" {
 			state = p.BoldRed("closed") + " " + p.Dim(snap.Config.Closed)
