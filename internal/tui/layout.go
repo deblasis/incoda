@@ -212,8 +212,28 @@ func (m Model) mouse_(msg tea.MouseMsg) (Model, tea.Cmd) {
 		if mouse.Button != tea.MouseLeft {
 			return m, nil
 		}
+		if m.screen == screenPty && m.pty != nil {
+			if c, ok := m.ptyCellAt(mouse.X, mouse.Y); ok {
+				m.pty.beginSel(c)
+			}
+			return m, nil
+		}
 		m, _ = m.clickAt(mouse.Y)
 		return m, nil
+	case tea.MouseMotionMsg:
+		mouse := msg.Mouse()
+		if m.screen == screenPty && m.pty != nil && m.pty.dragging {
+			if c, ok := m.ptyCellAt(mouse.X, mouse.Y); ok {
+				m.pty.dragSel(c)
+			}
+			return m, nil
+		}
+	case tea.MouseReleaseMsg:
+		// Cell motion reports the release as a button state, not a press:
+		// the drag flag is the reliable "a selection was held" signal.
+		if m.screen == screenPty && m.pty != nil && m.pty.dragging {
+			return m.copySelection()
+		}
 	}
 	return m, nil
 }

@@ -20,6 +20,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/deblasis/incoda/internal/joblog"
@@ -66,6 +67,11 @@ type Options struct {
 	PtyRead  func(path string, offset int64) ([]byte, int64, error)
 	PtyAlive func(pid int) bool
 	PtyExit  func(path string) (int, bool)
+
+	// Clipboard writes a selected range's text to the system clipboard; the
+	// default writes it directly and the screen falls back to OSC 52 when it
+	// fails. A seam so selection tests never touch the real clipboard.
+	Clipboard func(string) error
 }
 
 // participant is one row of the queue screen: a holder or a waiter.
@@ -100,6 +106,12 @@ type ptyView struct {
 	exitWait int
 	exitCode int
 	haveExit bool
+
+	// sel is the drag selection, anchored to absolute lines so it stays on
+	// its text as new output moves the window; dragging says whether the
+	// button is still held.
+	sel      *ptySelection
+	dragging bool
 }
 
 // ptyKeep bounds the capture the screen holds: the file keeps everything up
@@ -180,11 +192,11 @@ func (p *ptyView) scrollBy(delta, rows int) {
 	p.top, p.scrollOn = top, true
 }
 
-// window is the rows lines to draw, newest last unless the view is scrolled
-// back; short content is the caller's to pad.
-func (p *ptyView) window(rows int) []string {
+// windowTop is the window's first absolute line: the tail, unless the view
+// is scrolled back, then the stored top clamped to what still exists.
+func (p *ptyView) windowTop(rows int) int64 {
 	if len(p.lines) == 0 || rows < 1 {
-		return nil
+		return p.baseAbs()
 	}
 	top := p.tailTop(rows)
 	if p.scrollOn {
@@ -196,7 +208,16 @@ func (p *ptyView) window(rows int) []string {
 			top = base
 		}
 	}
-	start := int(top - p.baseAbs())
+	return top
+}
+
+// window is the rows lines to draw, newest last unless the view is scrolled
+// back; short content is the caller's to pad.
+func (p *ptyView) window(rows int) []string {
+	if len(p.lines) == 0 || rows < 1 {
+		return nil
+	}
+	start := int(p.windowTop(rows) - p.baseAbs())
 	if start < 0 {
 		start = 0
 	}
@@ -309,6 +330,9 @@ func New(opt Options) Model {
 	}
 	if opt.PtyExit == nil {
 		opt.PtyExit = joblog.ReadExit
+	}
+	if opt.Clipboard == nil {
+		opt.Clipboard = clipboard.WriteAll
 	}
 	if opt.Load == nil {
 		dir, version, key, events := opt.Dir, opt.Version, opt.Key, opt.Events
@@ -523,6 +547,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.ptyTick(ptyTickEvery)
+	case ptyCopyDone:
+		m.say(ptyCopyLine(msg), msg.err != nil)
+		if msg.err != nil {
+			// OSC 52 is the terminal's own clipboard: best effort, and a
+			// no-op on the terminals that do not implement it.
+			return m, tea.SetClipboard(msg.text)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		return m.key_(msg)
 	case tea.MouseMsg:
@@ -606,9 +638,19 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch k {
-		case "esc", "escape", "left", "h", "backspace", "q":
+		case "esc", "escape", "left", "h", "backspace":
+			// The first esc drops the selection; the next one leaves.
+			if m.pty.sel != nil || m.pty.dragging {
+				m.pty.clearSel()
+				return m, nil
+			}
 			m.pty = nil
 			m.screen = screenQueue
+		case "q":
+			m.pty = nil
+			m.screen = screenQueue
+		case "y":
+			return m, m.copySelected()
 		case "up", "k":
 			m.pty.scrollBy(-1, m.ptyRows())
 		case "down", "j":

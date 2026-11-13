@@ -549,18 +549,15 @@ func (m Model) renderPty(w int) string {
 		head += "  " + st.dim.Render(fmt.Sprintf("↑ %d line(s) back · End follows", back))
 	}
 	lines := []string{ptyClip(head, w)}
-	if p.capped {
-		lines = append(lines, st.dim.Render("… older output trimmed (the view is bounded)"))
-	}
-	if p.missed {
-		lines = append(lines, st.dim.Render("(the run ended before it captured any output)"))
-	}
-	if p.errText != "" {
-		lines = append(lines, st.toastErr.Render(trunc("read error: "+p.errText, w)))
-	}
+	lines = append(lines, m.ptyNotes(w)...)
+	top := p.windowTop(rows)
 	content := p.window(rows)
-	for _, ln := range content {
-		lines = append(lines, ptyClip(ln, w))
+	for i, ln := range content {
+		drawn := ptyClip(ln, w)
+		if left, right, ok := p.selSpan(top+int64(i), w); ok {
+			drawn = ptyPaintSel(drawn, left, right)
+		}
+		lines = append(lines, drawn)
 	}
 	// Pad to the window: the capture is a pane of fixed height, so a short
 	// job does not move the frame under the reader.
@@ -568,6 +565,26 @@ func (m Model) renderPty(w int) string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ptyNotes are the capture's notes under its head line: the head was trimmed
+// to stay bounded, the run wrote nothing, or the last read failed.
+func (m Model) ptyNotes(w int) []string {
+	if m.pty == nil {
+		return nil
+	}
+	st := m.st
+	var out []string
+	if m.pty.capped {
+		out = append(out, st.dim.Render("… older output trimmed (the view is bounded)"))
+	}
+	if m.pty.missed {
+		out = append(out, st.dim.Render("(the run ended before it captured any output)"))
+	}
+	if m.pty.errText != "" {
+		out = append(out, st.toastErr.Render(trunc("read error: "+m.pty.errText, w)))
+	}
+	return out
 }
 
 // ptyClip fits one captured line to the screen width so the window keeps
@@ -598,7 +615,7 @@ func (m Model) renderBottom(w int) string {
 			help = "↑/↓ or wheel · click select · k kill · K force-kill · enter pty output · r refresh · esc back · q quit"
 		}
 	case screenPty:
-		help = "esc back · ↑/↓ or wheel scroll · PgUp/PgDn page · End follows the tail · the stream is the job's own captured output, read-only"
+		help = "drag to select · y copy · esc back · ↑/↓ or wheel scroll · PgUp/PgDn page · End follows the tail"
 	case screenKillPrompt:
 		help = "type the reason · enter confirm · esc cancel"
 	case screenKillPending:
