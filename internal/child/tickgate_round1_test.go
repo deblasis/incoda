@@ -230,8 +230,9 @@ func TestTickGateSurfacesAFlushWriteFailure(t *testing.T) {
 // TestTickGateStressUnderTimerAndReader: many writes with held reports and a
 // short window, timer firing against the reader constantly. Asserts no
 // report content goes downstream twice (a double-firing release timer must
-// not double-write a hold) and every plain line and the newest report land
-// at flush. Under -race this is also the data-race probe.
+// not double-write a hold), every non-report byte lands in order, and the
+// newest report reaches the tail. Under -race this is also the data-race
+// probe.
 func TestTickGateStressUnderTimerAndReader(t *testing.T) {
 	s := &sink{}
 	g := newTickGateWait(s, 2*time.Millisecond)
@@ -261,14 +262,54 @@ func TestTickGateStressUnderTimerAndReader(t *testing.T) {
 			t.Fatalf("report %d went downstream %d times: a hold must be written exactly once however the timer fires", i, n)
 		}
 	}
-	for i := 0; i < rounds; i += 7 {
-		if want := "LINE-" + strconv.Itoa(i) + "\r\n"; !strings.Contains(got, want) {
-			t.Fatalf("lost plain line %q:\n%d bytes", want, len(got))
+	// A released report can be written between any two chunks, so a plain
+	// line can come out split by a report the reader never put there: no
+	// byte is lost, but downstream is not the payload verbatim. What the
+	// gate owes the stream is every non-report byte, in order, so compare
+	// with the reports parsed away.
+	if got, want := stripTicks(got), stripTicks(string(payload)); got != want {
+		i := 0
+		for i < len(got) && i < len(want) && got[i] == want[i] {
+			i++
 		}
+		t.Fatalf("non-report bytes diverged at %d of %d:\ngot  %q\nwant %q",
+			i, len(want), clip(got, i), clip(want, i))
 	}
 	if !strings.Contains(got, tickSeq("j", rounds-1)) {
 		t.Fatalf("the newest report never landed")
 	}
+}
+
+// stripTicks removes every complete 7501 report from s. The reports in this
+// stream end with BEL, their only terminator here.
+func stripTicks(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "\x1b]7501;")
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		bel := strings.IndexByte(s[i:], 0x07)
+		if bel < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		s = s[i+bel+1:]
+	}
+}
+
+// clip returns s around i for a failure message.
+func clip(s string, i int) string {
+	lo, hi := i-40, i+40
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(s) {
+		hi = len(s)
+	}
+	return s[lo:hi]
 }
 
 // TestTickGateHoldsAnSTerminatedReportWithItsTerminator: a report ended with
