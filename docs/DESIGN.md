@@ -165,17 +165,28 @@ closed would let the old key back in.
 
 Some jobs' results are durations, and a neighbour falsifies them without
 failing anything. A timing test on a two-slot build queue does not need one
-slot; it needs the machine. `--exclusive` marks the ticket, and while any
-exclusive ticket is live the effective slot count is 1.
+slot; it needs the machine. `--exclusive` marks the ticket: it starts only
+when nothing ahead of it is holding or admitted, nothing starts while it
+runs, and nothing behind it starts until it releases.
 
-This is the most-restrictive-participant rule used on purpose, and it is the
-one narrowing that survives a configured count: an exclusive ticket is checked
-before the config floor, so the queue says 5 and still admits nobody but the
-exclusive run. Because it is that ticket's own request rather than a
-mismatch, it is not counted as a slots disagreement. Everything else follows
-from the existing ordering: an exclusive arrival waits for the holders ahead
-of it to leave (a running participant is never revoked), holds alone, and the
-count goes back up when it releases.
+Admission is one prefix walk over the arrival order, shared by the wait loop
+and by `status`, so a waiter is never shown as holding before it can start or
+as waiting after it may. A ticket starts when it is ordinary and fewer than N
+tickets ahead of it are holding or admitted, or when it is exclusive and
+nothing ahead of it is. A ticket that cannot start stops the walk: that is
+FIFO, and for an exclusive ticket it is the barrier that leaves the machine
+empty. A participant that already acquired is never revoked, so a ticket
+count change cannot unseat a running job.
+
+The effective slot count does not change for an exclusive ticket. It used to
+narrow to 1, which paused the jobs ahead of it for no reason and let their
+free slots sit idle; the barrier is what serializes the machine, and the
+count stays the queue's width. A named-lane run without `--slots` carries no
+count and does not vote on that width; a pool ticket carries the pool's
+count and does. Because it is the ticket's own request rather than a
+slot-count mismatch, it is still not counted as a slots disagreement.
+An exclusive arrival waits for the holders ahead of it to leave, holds alone,
+and the jobs behind it start when it releases.
 
 ## System pools
 

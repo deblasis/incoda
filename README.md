@@ -87,10 +87,12 @@ configured number, a run that passes a disagreeing `--slots` is refused
 rather than silently clamped (one stray `--slots 1` used to drag a five-slot
 queue down to one for everyone), and a ticket left by an older `incoda` can
 neither narrow the queue nor widen it. `--exclusive` asks for the queue
-alone: while that run is live the count is 1, whatever the queue says, which
-is what a timing-sensitive test needs. `--queue a,b` holds several queues
-for one command, taken in sorted order so two such runs can never deadlock
-each other.
+alone: it starts only once nothing ahead of it is running, nothing joins it
+while it runs, and the jobs queued behind it wait for it to leave. The jobs
+that arrived before it still take every free slot: an exclusive request is a
+barrier at its turn, not a queue-wide pause, which is what a timing-sensitive
+test needs. `--queue a,b` holds several queues for one command, taken in
+sorted order so two such runs can never deadlock each other.
 
 **Config, not convention.** A queue can carry a description, require a
 `--reason` on every run, or be closed with a message that names its
@@ -459,7 +461,7 @@ memory limits or cgroups, per-project state directories, distributed locks.
 - **A configured queue refuses a disagreeing `--slots`; an unconfigured one
   settles disagreements on the minimum.** A participant already running is
   never revoked, and that includes the moment an `--exclusive` run arrives: it
-  waits for the holders to leave rather than evicting them.
+  waits for the queue to drain rather than evicting anyone.
 - **A multi-key run holds its first keys while it waits for the rest.** That
   is what makes it deadlock-free, and it also means a job on `a,b` can keep
   `a` busy while it queues on `b`. Use lists for jobs that need everything

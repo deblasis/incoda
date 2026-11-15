@@ -21,10 +21,11 @@ type Ticket struct {
 	PID   int    `json:"pid"`
 	Queue string `json:"queue"`
 	Slots int    `json:"slots"`
-	// Exclusive asks for the queue alone: while this ticket is live the
-	// effective slot count is 1, whatever the queue or anyone else asked
-	// for. It is for jobs whose result is a duration, which a neighbour
-	// would falsify without failing anything.
+	// Exclusive asks for the queue alone: it starts only when no ticket
+	// ahead of it is holding or admitted, nothing starts while it runs, and
+	// nothing behind it starts until it releases. It is for jobs whose
+	// result is a duration, which a neighbour would falsify without failing
+	// anything.
 	Exclusive   bool     `json:"exclusive,omitempty"`
 	ArrivalNano int64    `json:"arrival_nano"`
 	Arrival     string   `json:"arrival"`

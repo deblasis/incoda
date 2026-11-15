@@ -46,7 +46,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	fs := newFlagSet("run", stderr)
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
 	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
-	exclusive := fs.Bool("exclusive", false, "hold the queue alone: the effective slot count is 1 while this run is live")
+	exclusive := fs.Bool("exclusive", false, "hold the queue alone: start only when every slot is free, and let nothing join while it runs")
 	maxCPU := fs.Float64("max-cpu", 0, "start only after whole-machine CPU% stays below this percent for --idle-for (--idle-for is optional and defaults to 0)")
 	idleFor := &waitValue{}
 	fs.Var(idleFor, "idle-for", "how long CPU must stay below --max-cpu before starting (requires --max-cpu): a Go duration (2m) or bare seconds; 0 means one below-threshold sample passes")
@@ -385,9 +385,9 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "%s %s\n", p.Dim("incoda:"),
 					p.Yellow(fmt.Sprintf("queue %q busy (%s%d slot(s), %d ahead of you), waited %s%s",
 						key, rolePart, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))))
-				for i, e := range live {
-					if i >= effSlots {
-						break
+				for _, e := range live {
+					if !e.Holding {
+						continue
 					}
 					if e.File == en.Name() {
 						// Held off only by unpooled runs: this run's own

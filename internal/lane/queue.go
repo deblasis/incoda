@@ -527,12 +527,9 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 	}
 	sortTickets(live)
 	slots := q.effectiveSlotsLocked(live)
+	admitted := admission(live, slots, 0)
 	for i := range live {
-		// A participant that already acquired is holding whatever the count
-		// says now: an exclusive arrival or a smaller --slots narrows the
-		// queue for newcomers but never revokes a running job, and status
-		// must not show that job as waiting.
-		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
+		live[i].Holding = admitted[i]
 		live[i].fill(now)
 	}
 	if reap && !q.readOnly {
@@ -556,15 +553,20 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 // there is a configuration error; the minimum is the safe direction, and
 // `incoda run` warns when it sees a disagreement.
 //
-// An exclusive participant overrides both: while one is live the count is 1,
-// whatever the queue or anyone else asked for. That is the one narrowing that
-// survives, because it is the ticket's explicit ask for the machine alone, and
-// it is not counted as a disagreement.
+// An exclusive participant does not narrow the count. Its ask is to run with
+// the queue empty, which admission enforces at its turn; narrowing the count
+// as well would pause the jobs ahead of it for no reason. One that carries no
+// count (a named-lane run without --slots) does not vote at all; a pool
+// ticket carries the pool's count and votes like any other.
 func effectiveSlots(live []Entry, cfgSlots int) int {
 	slots := 0
 	for _, e := range live {
-		if e.Ticket.Exclusive {
-			return 1
+		if e.Ticket.Exclusive && e.Ticket.Slots < 1 {
+			// An exclusive ticket carrying no count is a named-lane run
+			// without --slots. Its zero must not read as a one and narrow
+			// the queue for the jobs ahead of it; the barrier is its ask.
+			// A pool ticket does carry the pool's count, and votes.
+			continue
 		}
 		s := e.Ticket.Slots
 		if s < 1 {
@@ -589,6 +591,55 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 		}
 	}
 	return slots
+}
+
+// admission reports, in live (arrival) order, which tickets may start now.
+// It is the one admission rule: the wait loop and status both read it, so a
+// waiter is never shown as holding before it can start, or as waiting after
+// it may.
+//
+// A ticket starts when it is ordinary and fewer than slots tickets ahead of
+// it are holding or admitted, or when it is exclusive and no ticket ahead of
+// it is holding or admitted. Nothing behind a ticket that is not admitted
+// starts either: that is the FIFO property, and for an exclusive ticket it is
+// also the barrier that keeps the queue empty while it runs. extra counts
+// slots already held by runs with no ticket on this lane (unpooled holders);
+// they hold ahead of every waiter.
+func admission(live []Entry, slots, extra int) []bool {
+	ok := make([]bool, len(live))
+	used := extra
+	barrier := false
+	for i := range live {
+		e := &live[i]
+		if e.Ticket.AcquireNano != 0 {
+			// A participant that already acquired is holding whatever the
+			// count says now: nothing revokes a running job.
+			ok[i] = true
+			used++
+			if e.Ticket.Exclusive {
+				barrier = true
+			}
+			continue
+		}
+		if barrier {
+			continue
+		}
+		if e.Ticket.Exclusive {
+			if used == 0 {
+				ok[i] = true
+				used++
+			}
+			barrier = true
+			continue
+		}
+		if used < slots {
+			ok[i] = true
+			used++
+		} else {
+			barrier = true
+		}
+	}
+	return ok
 }
 
 // effectiveSlotsLocked is effectiveSlots with the queue's own config applied.

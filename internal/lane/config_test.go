@@ -222,7 +222,7 @@ func TestConfigSlotsAreTheDefaultForTickets(t *testing.T) {
 // (Acquire through Position) uses the same resolution.
 func TestConfiguredSlotsFloorAdmission(t *testing.T) {
 	// Resolution level: an unstamped or narrowed ticket rides at the
-	// configured width; an exclusive one still forces 1; without a config
+	// configured width; an exclusive one does not narrow it; without a config
 	// the minimum rules as it always did.
 	narrow := []Entry{{Ticket: Ticket{Slots: 5}}, {Ticket: Ticket{Slots: 1}}}
 	if got := effectiveSlots(narrow, 5); got != 5 {
@@ -233,8 +233,8 @@ func TestConfiguredSlotsFloorAdmission(t *testing.T) {
 		t.Fatalf("effectiveSlots on a 5-config queue with an unstamped ticket = %d, want 5", got)
 	}
 	excl := []Entry{{Ticket: Ticket{Slots: 1, Exclusive: true}}}
-	if got := effectiveSlots(excl, 5); got != 1 {
-		t.Fatalf("exclusive must still force 1 on a configured queue, got %d", got)
+	if got := effectiveSlots(excl, 5); got != 5 {
+		t.Fatalf("exclusive must not narrow a configured queue, got %d, want 5", got)
 	}
 	if got := effectiveSlots(narrow, 0); got != 1 {
 		t.Fatalf("without a config the minimum must rule, got %d", got)
@@ -415,8 +415,8 @@ func TestAcquiredHolderStaysAHolderWhenExclusiveArrives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The exclusive ticket narrows the count to 1 for newcomers, but the
-	// second holder is still running and must be reported as holding.
+	// The exclusive ticket waits for the queue to drain, but the second
+	// holder is still running and must be reported as holding.
 	if len(snap.Holders) != 2 || len(snap.Waiting) != 1 {
 		t.Fatalf("want 2 holders and 1 waiter, got %d/%d", len(snap.Holders), len(snap.Waiting))
 	}
@@ -425,16 +425,27 @@ func TestAcquiredHolderStaysAHolderWhenExclusiveArrives(t *testing.T) {
 	}
 }
 
-func TestExclusiveTicketForcesOneSlot(t *testing.T) {
-	// An exclusive participant needs the queue to itself: while it is live
-	// the effective slot count is 1 whatever anyone else asked for, and it
-	// is not a "disagreement" worth warning about.
+func TestExclusiveTicketKeepsTheQueueWidth(t *testing.T) {
+	// An exclusive participant needs the queue to itself when it runs, but
+	// it does not narrow the queue for the jobs ahead of it: the effective
+	// count stays the queue's width, and admission (the barrier at its turn)
+	// is what serializes it. It is not a "disagreement" worth warning about.
 	live := []Entry{
 		{Ticket: Ticket{Slots: 4}},
 		{Ticket: Ticket{Slots: 4, Exclusive: true}},
 	}
-	if got := effectiveSlots(live, 0); got != 1 {
-		t.Fatalf("effectiveSlots with an exclusive ticket = %d, want 1", got)
+	if got := effectiveSlots(live, 0); got != 4 {
+		t.Fatalf("effectiveSlots with an exclusive ticket = %d, want the queue width 4", got)
+	}
+	// A named-lane --exclusive run without --slots carries zero, which must
+	// not read as a one and narrow the jobs ahead of it on an unconfigured
+	// queue.
+	unset := []Entry{
+		{Ticket: Ticket{Slots: 4}},
+		{Ticket: Ticket{Exclusive: true}},
+	}
+	if got := effectiveSlots(unset, 0); got != 4 {
+		t.Fatalf("an exclusive ticket without a count narrowed the queue to %d, want 4", got)
 	}
 	if SlotsDisagree(live) {
 		t.Fatal("an exclusive ticket is not a slots disagreement")
