@@ -553,19 +553,19 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 // there is a configuration error; the minimum is the safe direction, and
 // `incoda run` warns when it sees a disagreement.
 //
-// An exclusive participant does not narrow the count. Its ask is to run with
+// An exclusive participant never votes on the count. Its ask is to run with
 // the queue empty, which admission enforces at its turn; narrowing the count
-// as well would pause the jobs ahead of it for no reason. One that carries no
-// count (a named-lane run without --slots) does not vote at all; a pool
-// ticket carries the pool's count and votes like any other.
+// as well would pause the jobs ahead of it for no reason. A pool ticket
+// records the pool's count, which that queue's config already sets.
 func effectiveSlots(live []Entry, cfgSlots int) int {
 	slots := 0
 	for _, e := range live {
-		if e.Ticket.Exclusive && e.Ticket.Slots < 1 {
-			// An exclusive ticket carrying no count is a named-lane run
-			// without --slots. Its zero must not read as a one and narrow
-			// the queue for the jobs ahead of it; the barrier is its ask.
-			// A pool ticket does carry the pool's count, and votes.
+		if e.Ticket.Exclusive {
+			// An exclusive ticket asks for the queue alone, not for a
+			// width; it never votes on the count. The barrier is its ask.
+			// (A pool ticket carries the pool's count, which its config
+			// already says; on a queue with no configured count the
+			// minimum of the ordinary tickets, floored at 1, rules.)
 			continue
 		}
 		s := e.Ticket.Slots
@@ -594,9 +594,10 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 }
 
 // admission reports, in live (arrival) order, which tickets may start now.
-// It is the one admission rule: the wait loop and status both read it, so a
-// waiter is never shown as holding before it can start, or as waiting after
-// it may.
+// The wait loop and status both read this one rule, so the two cannot disagree
+// about a given participant set. They feed it different sets: the wait loop
+// adds the slots unpooled runs hold, which it scans; `status` and `queues`
+// read the lane's tickets and cannot see a run with no ticket there.
 //
 // A ticket starts when it is ordinary and fewer than slots tickets ahead of
 // it are holding or admitted, or when it is exclusive and no ticket ahead of
@@ -611,6 +612,17 @@ func admission(live []Entry, slots, extra int) []bool {
 	barrier := false
 	for i := range live {
 		e := &live[i]
+		if e.PayloadError != "" {
+			// The payload is unreadable, so the exclusive bit and the
+			// acquisition time are unknown. Fail closed: count it as a
+			// holder and a barrier. Nothing behind it can start (the
+			// safe direction); no non-holding ticket can legitimately be
+			// ahead of a running exclusive, so nothing new starts either.
+			ok[i] = true
+			used++
+			barrier = true
+			continue
+		}
 		if e.Ticket.AcquireNano != 0 {
 			// A participant that already acquired is holding whatever the
 			// count says now: nothing revokes a running job.
@@ -862,9 +874,9 @@ func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	// direction. Narrowing used to be allowed through the minimum rule
 	// and one stray "--slots 1" dragged a five-slot queue down to one
 	// for everyone; a job that genuinely needs the queue alone says
-	// --exclusive, which is explicit, visible in status, and still
-	// narrows to 1 on purpose. A missing or broken config leaves an
-	// unset count at 1, the safe direction.
+	// --exclusive, which is explicit, visible in status, and holds the
+	// queue empty at its turn without changing the count. A missing or
+	// broken config leaves an unset count at 1, the safe direction.
 	//
 	// The rules are checked here, under the registry lock, as well as
 	// before: a lane closed, or made to require a reason, after the
@@ -884,6 +896,11 @@ func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	switch {
 	case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
 		return nil, NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)
+	case t.Slots < 1 && t.Exclusive:
+		// An exclusive ticket without --slots keeps its zero: it asked for
+		// the queue alone, not for a width, and the ticket should record
+		// no more than that. The configured count, when there is one, is
+		// the queue's, and this ticket never votes on it.
 	case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
 		t.Slots = cfg.Slots
 	case t.Slots < 1:

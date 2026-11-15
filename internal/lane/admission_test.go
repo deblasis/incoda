@@ -76,6 +76,23 @@ func TestExclusiveTicketIsABarrierAtItsTurn(t *testing.T) {
 	f.Release(0)
 }
 
+// TestUnreadablePayloadFailsClosed: the exclusive ask and the acquisition time
+// live in the payload. A running exclusive whose payload was truncated must
+// read as a holder and a barrier, or a later job joins it on a wide lane.
+func TestUnreadablePayloadFailsClosed(t *testing.T) {
+	live := []Entry{
+		{File: "x.ticket", PayloadError: "parse: unexpected end of JSON input"},
+		{File: "j.ticket", Ticket: Ticket{Slots: 4}},
+	}
+	got := admission(live, 4, 0)
+	if !got[0] {
+		t.Fatal("an unreadable ticket must count as a holder, not a waiter")
+	}
+	if got[1] {
+		t.Fatal("a job joined a lane whose holder payload is unreadable")
+	}
+}
+
 // TestStatusShowsAJobAdmittedAheadOfAnExclusive: status and the wait loop read
 // the same admission rule. A plain ticket ahead of an exclusive one that can
 // start now is a holder in the report, not a waiter behind the request; the

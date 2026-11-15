@@ -492,6 +492,35 @@ func TestExclusiveTicketKeepsTheQueueWidth(t *testing.T) {
 	b.Release(0)
 }
 
+// TestExclusiveWithoutSlotsDoesNotNarrowAnUnconfiguredQueue: Enroll stamps an
+// unset count with 1 so the minimum rule has a number; an exclusive ticket
+// must keep its zero instead, or that stamp narrows the jobs ahead of it
+// before the barrier reaches its own turn.
+func TestExclusiveWithoutSlotsDoesNotNarrowAnUnconfiguredQueue(t *testing.T) {
+	q, err := Open(t.TempDir(), "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if _, err := q.Enroll(Ticket{Slots: 4, Command: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	x, err := q.Enroll(Ticket{Exclusive: true, Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, slots, live, err := x.Position()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx != 1 {
+		t.Fatalf("exclusive ticket index = %d, want 1 in the live set %v", idx, live)
+	}
+	if slots != 4 {
+		t.Fatalf("an exclusive ticket without a count narrowed the queue to %d, want 4", slots)
+	}
+}
+
 // TestConfigRetiredPTYKeySurvivesRewrites: "pty" is retired from the
 // config surface (consoles are the run default, --pty=false the per-job
 // override), but a schema-2 file written by an older incoda still carries

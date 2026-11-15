@@ -14,9 +14,12 @@ import (
 
 const ticketExt = ".ticket"
 
-// Ticket is the JSON payload written inside a ticket file. It exists purely so
-// that `incoda status` can describe who is in the queue; correctness never
-// depends on it, only on the OS lock the file carries.
+// Ticket is the JSON payload written inside a ticket file. It exists so that
+// `incoda status` can describe who is in the queue and so that admission can
+// read the exclusive ask and the acquisition time; liveness and ownership
+// never depend on it, only on the OS lock the file carries. An unreadable
+// payload fails closed: admission counts that ticket as a holder and a
+// barrier rather than guessing.
 type Ticket struct {
 	PID   int    `json:"pid"`
 	Queue string `json:"queue"`

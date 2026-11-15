@@ -171,7 +171,10 @@ runs, and nothing behind it starts until it releases.
 
 Admission is one prefix walk over the arrival order, shared by the wait loop
 and by `status`, so a waiter is never shown as holding before it can start or
-as waiting after it may. A ticket starts when it is ordinary and fewer than N
+as waiting after it may. The two can differ only in the participant set: the
+wait loop counts the unpooled runs it scans, while `status` reads the lane's
+tickets and cannot see a holder that carries none (an older incoda's run).
+A ticket starts when it is ordinary and fewer than N
 tickets ahead of it are holding or admitted, or when it is exclusive and
 nothing ahead of it is. A ticket that cannot start stops the walk: that is
 FIFO, and for an exclusive ticket it is the barrier that leaves the machine
@@ -181,10 +184,11 @@ count change cannot unseat a running job.
 The effective slot count does not change for an exclusive ticket. It used to
 narrow to 1, which paused the jobs ahead of it for no reason and let their
 free slots sit idle; the barrier is what serializes the machine, and the
-count stays the queue's width. A named-lane run without `--slots` carries no
-count and does not vote on that width; a pool ticket carries the pool's
-count and does. Because it is the ticket's own request rather than a
-slot-count mismatch, it is still not counted as a slots disagreement.
+count stays the queue's width. An exclusive ticket never votes on that width;
+its count field records what it was given (a pool ticket records the pool's
+count, which that queue's config already sets). Because it is the ticket's own
+request rather than a slot-count mismatch, it is still not counted as a slots
+disagreement.
 An exclusive arrival waits for the holders ahead of it to leave, holds alone,
 and the jobs behind it start when it releases.
 

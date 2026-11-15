@@ -397,6 +397,19 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
 						p.Dim(fmt.Sprintf("holder pid %d in %s: %s%s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()), viaText(e.Ticket.Via))))
 				}
+				// The first exclusive request ahead is the barrier, and it
+				// is the only reason a free slot can still mean a wait.
+				end := pos
+				if end < 0 {
+					end = len(live)
+				}
+				for _, e := range live[:end] {
+					if e.Ticket.Exclusive && !e.Holding && e.File != en.Name() {
+						fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
+							p.Dim(fmt.Sprintf("exclusive pid %d ahead: runs alone when the queue drains", e.Ticket.PID)))
+						break
+					}
+				}
 				for _, u := range unpooled {
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"), p.Dim(u.Line()))
 				}
