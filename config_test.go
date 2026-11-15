@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -415,15 +416,21 @@ func TestExclusiveComesAfterTheJobsAheadOfIt(t *testing.T) {
 	}
 	stamps := t.TempDir()
 
-	start := func(label string, holdMS int, exclusive bool) *exec.Cmd {
+	start := func(label string, holdMS int, exclusive, quiet bool, stderr *bytes.Buffer) *exec.Cmd {
 		t.Helper()
-		args := []string{"run", "--queue", "excl-order", "--wait", "60s", "--poll", "50ms", "--quiet"}
+		args := []string{"run", "--queue", "excl-order", "--wait", "60s", "--poll", "50ms"}
+		if quiet {
+			args = append(args, "--quiet")
+		}
 		if exclusive {
 			args = append(args, "--exclusive")
 		}
 		args = append(args, "--", stamp, filepath.Join(stamps, label+".txt"), label, strconv.Itoa(holdMS))
 		cmd := exec.Command(incoda, args...)
 		cmd.Env = laneEnv(state)
+		if stderr != nil {
+			cmd.Stderr = stderr
+		}
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start %s: %v", label, err)
 		}
@@ -458,15 +465,24 @@ func TestExclusiveComesAfterTheJobsAheadOfIt(t *testing.T) {
 	// plain job ahead of the exclusive one takes. The holders start together:
 	// only E, X and F need a known order.
 	for i, holdMS := range []int{20000, 4000, 4000, 4000} {
-		cmds = append(cmds, start(fmt.Sprintf("h%d", i), holdMS, false))
+		cmds = append(cmds, start(fmt.Sprintf("h%d", i), holdMS, false, true, nil))
 	}
 	waitFor(t, incoda, state, "excl-order", func(q queueReport) bool { return len(q.Holders) == 4 })
-	cmds = append(cmds, start("e", 6000, false))
+	cmds = append(cmds, start("e", 6000, false, true, nil))
 	waitLabel("e")
-	cmds = append(cmds, start("x", 2000, true))
+	xcmd := start("x", 2000, true, true, nil)
+	cmds = append(cmds, xcmd)
 	waitLabel("x")
-	cmds = append(cmds, start("f", 10, false))
+	// f arrives behind the exclusive request, so its busy line must name the
+	// exclusive one as the barrier and never call it a holder.
+	var fbuf bytes.Buffer
+	cmds = append(cmds, start("f", 10, false, false, &fbuf))
 	waitLabel("f")
+
+	// While x holds, the compact report says the lane admits nobody.
+	waitFor(t, incoda, state, "excl-order", func(q queueReport) bool {
+		return q.ExclusiveHolder && len(q.Holders) == 1 && q.Holders[0].Ticket.PID == xcmd.Process.Pid
+	})
 
 	for _, c := range cmds {
 		if err := c.Wait(); err != nil {
@@ -494,6 +510,20 @@ func TestExclusiveComesAfterTheJobsAheadOfIt(t *testing.T) {
 	}
 	if f.enter < x.exit {
 		t.Fatalf("job behind the exclusive one entered at %d before it left at %d", f.enter, x.exit)
+	}
+
+	// The waiting job behind x saw the barrier named and never saw x called
+	// a holder; with the pre-change loop (first N entries printed as
+	// holders) the second assertion fails.
+	busy := fbuf.String()
+	if !strings.Contains(busy, "holder pid") {
+		t.Fatalf("a waiting job should name the holders ahead of it:\n%s", busy)
+	}
+	if !strings.Contains(busy, fmt.Sprintf("exclusive pid %d ahead", xcmd.Process.Pid)) {
+		t.Fatalf("the wait line should name the exclusive request ahead (pid %d):\n%s", xcmd.Process.Pid, busy)
+	}
+	if strings.Contains(busy, fmt.Sprintf("holder pid %d", xcmd.Process.Pid)) {
+		t.Fatalf("a waiting exclusive request was printed as a holder:\n%s", busy)
 	}
 }
 

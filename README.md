@@ -87,12 +87,13 @@ configured number, a run that passes a disagreeing `--slots` is refused
 rather than silently clamped (one stray `--slots 1` used to drag a five-slot
 queue down to one for everyone), and a ticket left by an older `incoda` can
 neither narrow the queue nor widen it. `--exclusive` asks for the queue
-alone: it starts only once nothing ahead of it is running, nothing joins it
-while it runs, and the jobs queued behind it wait for it to leave. The jobs
-that arrived before it still take every free slot: an exclusive request is a
-barrier at its turn, not a queue-wide pause, which is what a timing-sensitive
-test needs. `--queue a,b` holds several queues for one command, taken in
-sorted order so two such runs can never deadlock each other.
+alone: it starts only once nothing ahead of it is holding or admitted,
+nothing joins it while it waits or runs, and the jobs queued behind it wait
+for it to leave. The jobs that arrived before it still take every free
+slot: an exclusive request is a barrier at its turn, not a queue-wide
+pause, which is what a timing-sensitive test needs. `--queue a,b` holds
+several queues for one command, taken in sorted order so two such runs can
+never deadlock each other.
 
 **Config, not convention.** A queue can carry a description, require a
 `--reason` on every run, or be closed with a message that names its

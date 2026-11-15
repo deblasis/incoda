@@ -151,7 +151,20 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		}
 		state := p.BoldGreen("free")
 		if len(snap.Holders) > 0 {
-			state = p.BoldYellow(fmt.Sprintf("%d/%d held, %d waiting", len(snap.Holders), snap.EffectiveSlots, len(snap.Waiting)))
+			exclusive := false
+			for _, h := range snap.Holders {
+				if h.Ticket.Exclusive {
+					exclusive = true
+					break
+				}
+			}
+			held := fmt.Sprintf("%d/%d held", len(snap.Holders), snap.EffectiveSlots)
+			if exclusive {
+				// A holder asking for the queue alone admits nobody, so
+				// the fraction alone would imply free capacity.
+				held += " (exclusive)"
+			}
+			state = p.BoldYellow(fmt.Sprintf("%s, %d waiting", held, len(snap.Waiting)))
 		}
 		for _, u := range upstream[k] {
 			state += p.Dim(fmt.Sprintf(", %d upstream (%s)", u.Waiting, u.Lane))

@@ -305,7 +305,11 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 	if qr.Free {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+"  "+p.Dim(fmt.Sprintf("(%d slot(s))", qr.EffectiveSlots)))
 	} else {
-		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(fmt.Sprintf("%d/%d slot(s) held", len(qr.Holders), qr.EffectiveSlots)))
+		held := fmt.Sprintf("%d/%d slot(s) held", len(qr.Holders), qr.EffectiveSlots)
+		if qr.ExclusiveHolder {
+			held += " (exclusive)"
+		}
+		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(held))
 	}
 	if qr.Config.Description != "" {
 		fmt.Fprintf(w, "  %s\n", p.Dim(qr.Config.Description))
