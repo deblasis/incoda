@@ -457,13 +457,13 @@ func TestExclusiveComesAfterTheJobsAheadOfIt(t *testing.T) {
 	// free slot appears while h0 still holds, which is exactly the slot the
 	// plain job ahead of the exclusive one takes. The holders start together:
 	// only E, X and F need a known order.
-	for i, holdMS := range []int{8000, 3000, 3000, 3000} {
+	for i, holdMS := range []int{20000, 4000, 4000, 4000} {
 		cmds = append(cmds, start(fmt.Sprintf("h%d", i), holdMS, false))
 	}
 	waitFor(t, incoda, state, "excl-order", func(q queueReport) bool { return len(q.Holders) == 4 })
 	cmds = append(cmds, start("e", 6000, false))
 	waitLabel("e")
-	cmds = append(cmds, start("x", 100, true))
+	cmds = append(cmds, start("x", 2000, true))
 	waitLabel("x")
 	cmds = append(cmds, start("f", 10, false))
 	waitLabel("f")

@@ -4,9 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/deblasis/incoda/internal/lockfile"
 )
 
 func TestValidateKey(t *testing.T) {
@@ -60,6 +63,46 @@ func TestStateDirIgnoresWorkingDirectory(t *testing.T) {
 		if got != want {
 			t.Fatalf("StateDir() from cwd %s = %q, want %q (state must never depend on the working directory)", dir, got, want)
 		}
+	}
+}
+
+// TestEnrollStampsAfterEveryLiveTicket: arrival order is the admission order,
+// and the wall clock can repeat a value (its steps are coarse on Windows) or
+// step back. A ticket that sorted ahead of one already live could start beside
+// a running exclusive, because a ticket that already acquired is never
+// revoked, so enrollment stamps past every live ticket.
+func TestEnrollStampsAfterEveryLiveTicket(t *testing.T) {
+	q, err := Open(t.TempDir(), "order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	future := time.Now().Add(time.Hour).UnixNano()
+	name := ticketName(future, 4242)
+	path := ticketPath(q.Dir, name)
+	lf, err := lockfile.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := lf.TryLock(); err != nil || !ok {
+		t.Fatalf("hold: ok=%v err=%v", ok, err)
+	}
+	t.Cleanup(func() {
+		_ = lf.Close()
+		_ = os.Remove(path)
+	})
+	payload := `{"pid":4242,"slots":1,"arrival_nano":` + strconv.FormatInt(future, 10) + `}`
+	if err := lf.Truncate([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	en, err := q.Enroll(Ticket{Slots: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if en.ticket.ArrivalNano <= future {
+		t.Fatalf("stamp %d did not move past live ticket %d", en.ticket.ArrivalNano, future)
 	}
 }
 

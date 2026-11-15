@@ -858,16 +858,36 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	return en, nil
 }
 
+// nextArrival returns a stamp strictly greater than every live ticket's. The
+// wall clock can repeat a value (its steps are coarse) or step back after an
+// NTP correction, and the filename order is what admission trusts: a ticket
+// that sorted ahead of one already live could start beside a running
+// exclusive, because a ticket that already acquired is never revoked.
+func nextArrival(stamp int64, live []Entry) int64 {
+	for _, e := range live {
+		if e.Ticket.ArrivalNano >= stamp {
+			stamp = e.Ticket.ArrivalNano + 1
+		}
+	}
+	return stamp
+}
+
 // enrollLocked writes this process's ticket. The caller holds the registry
 // lock.
 func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	// The stamp is taken while holding the registry lock so that stamp
-	// order and file-visibility order cannot disagree.
+	// order and file-visibility order cannot disagree, and moved past
+	// every live ticket so that no arrival can sort ahead of one already
+	// queued.
 	now := time.Now()
+	stamp := now.UnixNano()
+	if live, _, err := q.scan(now, false); err == nil {
+		stamp = nextArrival(stamp, live)
+	}
 	t.Queue = q.Key
 	t.PID = os.Getpid()
-	t.ArrivalNano = now.UnixNano()
-	t.Arrival = now.Format(time.RFC3339Nano)
+	t.ArrivalNano = stamp
+	t.Arrival = time.Unix(0, stamp).Format(time.RFC3339Nano)
 	// The configured count is the queue's width, in full. A ticket that
 	// does not ask is stamped with it; a ticket that asks for a
 	// different number is refused rather than silently clamped in either
