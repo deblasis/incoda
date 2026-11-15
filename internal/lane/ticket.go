@@ -162,6 +162,12 @@ type Entry struct {
 func (e *Entry) fill(now time.Time) {
 	if e.Ticket.ArrivalNano > 0 {
 		e.WaitingSeconds = now.Sub(time.Unix(0, e.Ticket.ArrivalNano)).Seconds()
+		if e.WaitingSeconds < 0 {
+			// A ticket stamped past the wall clock (a backwards step, or
+			// an arrival bumped past one) is not waiting a negative
+			// time; it is waiting zero.
+			e.WaitingSeconds = 0
+		}
 	}
 	if e.Ticket.AcquireNano > 0 {
 		e.HeldSeconds = now.Sub(time.Unix(0, e.Ticket.AcquireNano)).Seconds()

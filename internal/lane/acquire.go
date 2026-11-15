@@ -87,6 +87,13 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 		if err != nil {
 			return err
 		}
+		if idx >= 0 && live[idx].PayloadError != "" {
+			// This process owns the ticket: the in-memory copy is
+			// authoritative when the payload on disk is torn or gone.
+			// Everyone else still reads the entry as fail closed.
+			live[idx].Ticket = e.ticket
+			live[idx].PayloadError = ""
+		}
 		extra := 0
 		if opt.Unpooled != nil {
 			if extra, err = opt.Unpooled(); err != nil {

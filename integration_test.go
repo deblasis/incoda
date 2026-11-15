@@ -977,7 +977,14 @@ func statusJSON(t *testing.T, incoda, state, key string) report {
 
 func waitFor(t *testing.T, incoda, state, key string, ok func(queueReport) bool) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	waitForWithin(t, incoda, state, key, 30*time.Second, ok)
+}
+
+// waitForWithin is waitFor with an explicit budget: a state reachable only
+// after a slow holder leaves needs more than the default.
+func waitForWithin(t *testing.T, incoda, state, key string, budget time.Duration, ok func(queueReport) bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
 	for {
 		rep := statusJSON(t, incoda, state, key)
 		if len(rep.Queues) == 1 && ok(rep.Queues[0]) {

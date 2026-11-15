@@ -80,7 +80,10 @@ same reason.
 
 Fail-safe bias: a ticket that cannot be opened or parsed is treated as *live*
 (the queue waits) rather than dead, and `status` reports the payload error
-instead of hiding it. An unreadable payload is never fatal to correctness,
+instead of hiding it. It counts as a holder and a barrier and never starts on
+that payload; the process that owns it substitutes the ticket it holds in
+memory, so only its own run can proceed and everyone else waits until it leaves
+or is force-released. An unreadable payload is never fatal to correctness,
 which depends only on the OS lock, but a silently unreadable payload would
 make every queue look like a one-slot queue.
 
@@ -90,8 +93,11 @@ Ticket filenames are `<arrival-nanos>-<pid>.ticket`, zero-padded to 20 digits
 so lexical and numeric order agree. **The ordering rule is: arrival nanosecond,
 then pid, then filename**, fully deterministic, and every participant derives
 it from the same directory listing, so they all reach the same answer. The
-arrival stamp is taken while holding the registry lock, so stamp order and
-file-visibility order cannot disagree.
+arrival stamp is taken while holding the registry lock and moved past every
+name already in the lane, so a clock that repeats or steps back cannot put a
+fresh ticket ahead of one already queued; the bump reads the filenames because
+that is what the order reads. A name already at the maximum stamp saturates
+the next arrival there instead of wrapping negative.
 
 A participant holds a slot when its ticket is among the N lowest-ordered *live*
 tickets. Waiters poll (500 ms by default) instead of waiting on a signal: no

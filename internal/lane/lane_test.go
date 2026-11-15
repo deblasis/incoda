@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -103,6 +104,72 @@ func TestEnrollStampsAfterEveryLiveTicket(t *testing.T) {
 	defer en.Release(0)
 	if en.ticket.ArrivalNano <= future {
 		t.Fatalf("stamp %d did not move past live ticket %d", en.ticket.ArrivalNano, future)
+	}
+}
+
+// TestEnrollStampsPastADeadFutureName: the order is the filename, so a ticket
+// file the lane cannot open still bounds the next arrival. A name at the
+// maximum stamp saturates instead of wrapping negative.
+func TestEnrollStampsPastADeadFutureName(t *testing.T) {
+	q, err := Open(t.TempDir(), "dead-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	future := time.Now().Add(time.Hour).UnixNano()
+	if err := os.WriteFile(ticketPath(q.Dir, ticketName(future, 4242)), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	en, err := q.Enroll(Ticket{Slots: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if en.ticket.ArrivalNano <= future {
+		t.Fatalf("stamp %d did not move past dead ticket name %d", en.ticket.ArrivalNano, future)
+	}
+}
+
+func TestEnrollSaturatesAtTheMaximumStamp(t *testing.T) {
+	q, err := Open(t.TempDir(), "max-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := os.WriteFile(ticketPath(q.Dir, ticketName(math.MaxInt64, 4242)), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	en, err := q.Enroll(Ticket{Slots: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if en.ticket.ArrivalNano != math.MaxInt64 {
+		t.Fatalf("stamp %d did not saturate at the maximum", en.ticket.ArrivalNano)
+	}
+}
+
+// TestAcquireStartsThroughAnUnreadableOwnPayload: the owner of a ticket whose
+// payload was lost still starts when admission says so, because it has the
+// ticket in memory. Everyone else reads that ticket as a barrier.
+func TestAcquireStartsThroughAnUnreadableOwnPayload(t *testing.T) {
+	q, err := Open(t.TempDir(), "torn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	en, err := q.Enroll(Ticket{Slots: 1, Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if err := en.lock.Truncate([]byte("{")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := en.Acquire(ctx, AcquireOptions{Poll: 50 * time.Millisecond}); err != nil {
+		t.Fatalf("the owner could not start through a torn payload: %v", err)
 	}
 }
 

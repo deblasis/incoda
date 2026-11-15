@@ -82,14 +82,34 @@ func TestExclusiveTicketIsABarrierAtItsTurn(t *testing.T) {
 func TestUnreadablePayloadFailsClosed(t *testing.T) {
 	live := []Entry{
 		{File: "x.ticket", PayloadError: "parse: unexpected end of JSON input"},
-		{File: "j.ticket", Ticket: Ticket{Slots: 4}},
 	}
+	if admission(live, 4, 0)[0] {
+		t.Fatal("a ticket started on a payload its own process could not read")
+	}
+	live = append(live, Entry{File: "j.ticket", Ticket: Ticket{Slots: 4}})
 	got := admission(live, 4, 0)
-	if !got[0] {
-		t.Fatal("an unreadable ticket must count as a holder, not a waiter")
+	if got[0] {
+		t.Fatal("an unreadable ticket was admitted")
 	}
 	if got[1] {
 		t.Fatal("a job joined a lane whose holder payload is unreadable")
+	}
+}
+
+// TestAdmissionBlocksBesideARunningExclusive: an acquired exclusive holds the
+// whole lane, including a ticket that sorts ahead of it. The per-index barrier
+// cannot see that ticket, so admission checks for a running exclusive first.
+func TestAdmissionBlocksBesideARunningExclusive(t *testing.T) {
+	live := []Entry{
+		{File: "a.ticket", Ticket: Ticket{Slots: 4}},
+		{File: "x.ticket", Ticket: Ticket{Slots: 4, Exclusive: true, AcquireNano: 1}},
+	}
+	got := admission(live, 4, 0)
+	if !got[1] {
+		t.Fatal("the acquired exclusive was revoked")
+	}
+	if got[0] {
+		t.Fatal("a ticket ahead of a running exclusive started beside it")
 	}
 }
 

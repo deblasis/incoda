@@ -46,7 +46,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 	fs := newFlagSet("run", stderr)
 	queue := fs.String("queue", "", "queue key, or a comma-separated list to hold several at once (defaults to $INCODA_QUEUE)")
 	slots := fs.Int("slots", 0, "concurrent holders permitted on this queue; 0 takes the queue's configured slots, else 1; on a queue whose config sets a count, a disagreeing value is refused")
-	exclusive := fs.Bool("exclusive", false, "hold the queue alone: start only when nothing ahead is holding or admitted, and let nothing join while it waits or runs")
+	exclusive := fs.Bool("exclusive", false, "hold the queue alone: start only when nothing ahead is holding or admitted, and let nothing join while it waits or runs; it never votes on --slots")
 	maxCPU := fs.Float64("max-cpu", 0, "start only after whole-machine CPU% stays below this percent for --idle-for (--idle-for is optional and defaults to 0)")
 	idleFor := &waitValue{}
 	fs.Var(idleFor, "idle-for", "how long CPU must stay below --max-cpu before starting (requires --max-cpu): a Go duration (2m) or bare seconds; 0 means one below-threshold sample passes")
@@ -395,7 +395,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 						continue
 					}
 					fmt.Fprintf(stderr, "%s   %s\n", p.Dim("incoda:"),
-						p.Dim(fmt.Sprintf("holder pid %d in %s: %s%s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()), viaText(e.Ticket.Via))))
+						p.Dim(holderLine(e)))
 				}
 				// The first exclusive request ahead is the barrier, and it
 				// is the only reason a free slot can still mean a wait.
@@ -1102,6 +1102,16 @@ func viaText(via []string) string {
 		return ""
 	}
 	return " via " + strings.Join(via, ",")
+}
+
+// holderLine renders one holder of the wait line. The marker says the holder
+// asked for the queue alone, so a free slot beside it is not capacity.
+func holderLine(e lane.Entry) string {
+	line := fmt.Sprintf("holder pid %d in %s: %s%s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()), viaText(e.Ticket.Via))
+	if e.Ticket.Exclusive {
+		line += " (exclusive)"
+	}
+	return line
 }
 
 // waitingCheck is the per-poll config check of a waiting run: closed while

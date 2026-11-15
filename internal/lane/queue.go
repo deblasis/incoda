@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -603,11 +604,26 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 // it are holding or admitted, or when it is exclusive and no ticket ahead of
 // it is holding or admitted. Nothing behind a ticket that is not admitted
 // starts either: that is the FIFO property, and for an exclusive ticket it is
-// also the barrier that keeps the queue empty while it runs. extra counts
-// slots already held by runs with no ticket on this lane (unpooled holders);
-// they hold ahead of every waiter.
+// also the barrier that keeps the queue empty while it runs. An exclusive that
+// already acquired blocks every ticket that has not, wherever it sorts, so a
+// slow poll cannot start work beside it. A ticket whose payload cannot be read
+// counts as a holder and a barrier and does not start on that payload; its own
+// process substitutes the ticket it holds in memory. extra counts slots already
+// held by runs with no ticket on this lane (unpooled holders); they hold ahead
+// of every waiter.
 func admission(live []Entry, slots, extra int) []bool {
 	ok := make([]bool, len(live))
+	// An exclusive that already acquired holds the whole lane alone, not just
+	// the tickets behind it in this scan: a ticket ahead of it that its own
+	// process has not polled yet must not start beside it. The per-index
+	// barrier cannot see that case because "ahead" is not "behind".
+	heldExclusive := false
+	for i := range live {
+		if live[i].PayloadError == "" && live[i].Ticket.Exclusive && live[i].Ticket.AcquireNano != 0 {
+			heldExclusive = true
+			break
+		}
+	}
 	used := extra
 	barrier := false
 	for i := range live {
@@ -615,10 +631,11 @@ func admission(live []Entry, slots, extra int) []bool {
 		if e.PayloadError != "" {
 			// The payload is unreadable, so the exclusive bit and the
 			// acquisition time are unknown. Fail closed: count it as a
-			// holder and a barrier. Nothing behind it can start (the
-			// safe direction); no non-holding ticket can legitimately be
-			// ahead of a running exclusive, so nothing new starts either.
-			ok[i] = true
+			// holder and a barrier, and do not start it on a payload its
+			// own process could not read. The process that owns it
+			// substitutes its in-memory ticket in Acquire, so it still
+			// starts on data it knows; everyone else waits behind the
+			// barrier.
 			used++
 			barrier = true
 			continue
@@ -631,6 +648,12 @@ func admission(live []Entry, slots, extra int) []bool {
 			if e.Ticket.Exclusive {
 				barrier = true
 			}
+			continue
+		}
+		if heldExclusive {
+			// Not acquired, and an exclusive is running somewhere in this
+			// set: it may be ahead of this ticket in the scan, but the
+			// lane is held alone.
 			continue
 		}
 		if barrier {
@@ -788,7 +811,11 @@ func (q *Queue) snapshot(live []Entry, slots int, cfg Config, cfgErr error, logL
 		s.ConfigError = cfgErr.Error()
 	}
 	for _, e := range live {
-		if e.Holding {
+		// An unreadable payload is shown as a holder: the process is alive
+		// (it holds the lock) and admission treats the ticket as a barrier,
+		// even though the ticket does not start through that payload. The
+		// error on the row says why the details are missing.
+		if e.Holding || e.PayloadError != "" {
 			s.Holders = append(s.Holders, e)
 		} else {
 			s.Waiting = append(s.Waiting, e)
@@ -858,16 +885,27 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	return en, nil
 }
 
-// nextArrival returns a stamp strictly greater than every live ticket's. The
-// wall clock can repeat a value (its steps are coarse) or step back after an
-// NTP correction, and the filename order is what admission trusts: a ticket
-// that sorted ahead of one already live could start beside a running
-// exclusive, because a ticket that already acquired is never revoked.
-func nextArrival(stamp int64, live []Entry) int64 {
-	for _, e := range live {
-		if e.Ticket.ArrivalNano >= stamp {
-			stamp = e.Ticket.ArrivalNano + 1
+// nextArrival returns a stamp strictly greater than every ticket already in
+// the lane directory, taken from the filenames: ticketOrder sorts by the name,
+// so that is the total order admission trusts. The wall clock can repeat a
+// value (its steps are coarse) or step back after an NTP correction, and a
+// ticket that sorted ahead of one already live could start beside a running
+// exclusive, because a ticket that already acquired is never revoked. Reading
+// names costs one ReadDir under the registry hold; reading payloads would mean
+// a file per ticket. A name carrying the maximum stamp saturates the next
+// arrival there instead of wrapping negative; two tickets that then tie differ
+// by pid.
+func nextArrival(stamp int64, entries []os.DirEntry) int64 {
+	for _, de := range entries {
+		ord, ok := parseTicketName(de.Name())
+		if !ok || ord.arrivalNano < stamp {
+			continue
 		}
+		if ord.arrivalNano == math.MaxInt64 {
+			stamp = math.MaxInt64
+			continue
+		}
+		stamp = ord.arrivalNano + 1
 	}
 	return stamp
 }
@@ -881,9 +919,11 @@ func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	// queued.
 	now := time.Now()
 	stamp := now.UnixNano()
-	if live, _, err := q.scan(now, false); err == nil {
-		stamp = nextArrival(stamp, live)
+	entries, err := os.ReadDir(q.Dir)
+	if err != nil {
+		return nil, err
 	}
+	stamp = nextArrival(stamp, entries)
 	t.Queue = q.Key
 	t.PID = os.Getpid()
 	t.ArrivalNano = stamp
