@@ -160,3 +160,57 @@ func holdTicket(t *testing.T, dir, name string, tk lane.Ticket) {
 		_ = lf.Close()
 	})
 }
+
+// TestBuildDoesNotTrustExclusiveInATornPayload: the JSON decoder can keep the
+// exclusive bit of a payload that then failed to parse. The report must not
+// carry that bit: the ticket is unreadable, and whether it started or asked
+// for the lane alone is not knowable from the file.
+func TestBuildDoesNotTrustExclusiveInATornPayload(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(lane.LanesDir(state), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := map[string]any{"schema": 1, "layout": 2, "generation": 1}
+	b, _ := json.Marshal(reg)
+	if err := os.WriteFile(filepath.Join(state, "machine.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "queues"), []byte("fence"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := lane.LaneDir(state, "q")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "00000000000000000001-4242.ticket")
+	lf, err := lockfile.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := lf.TryLock(); err != nil || !ok {
+		t.Fatalf("hold ticket: ok=%v err=%v", ok, err)
+	}
+	t.Cleanup(func() {
+		_ = lf.Close()
+		_ = os.Remove(path)
+	})
+	// Valid JSON with one wrong type: Unmarshal fills the fields before the
+	// error, so pid and the exclusive bit land while the payload is torn.
+	if err := lf.Truncate([]byte(`{"pid":4242,"exclusive":true,"slots":"four"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Build(state, "test", nil, true, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Queues) != 1 {
+		t.Fatalf("report lists %d queues, want the one with the torn ticket", len(rep.Queues))
+	}
+	q := rep.Queues[0]
+	if q.ExclusiveHolder {
+		t.Fatalf("the report trusted an exclusive bit from a torn payload: %+v", q)
+	}
+	if len(q.Holders) != 1 || !q.Holders[0].Unreadable() || !q.Holders[0].Ticket.Exclusive {
+		t.Fatalf("fixture did not reach the report as a torn exclusive payload: %+v", q.Holders)
+	}
+}

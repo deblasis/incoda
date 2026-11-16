@@ -174,12 +174,7 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 		qr.ConfigError = snap.ConfigError
 		qr.Holders = snap.Holders
 		qr.Waiting = snap.Waiting
-		for _, e := range snap.Holders {
-			if e.Ticket.Exclusive {
-				qr.ExclusiveHolder = true
-				break
-			}
-		}
+		qr.ExclusiveHolder = lane.HasExclusiveHolder(snap.Holders)
 		qr.RecentEvents = snap.RecentEvents
 		qr.Lockless = snap.Lockless
 		qr.Free = len(snap.Holders) == 0

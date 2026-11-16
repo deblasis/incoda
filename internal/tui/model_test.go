@@ -516,17 +516,63 @@ func TestQueueScreenNamesAnUnreadableHolder(t *testing.T) {
 	rep.Queues[0].Holders = append(rep.Queues[0].Holders, lane.Entry{
 		File:         "00000000000000000003-3.ticket",
 		PayloadError: "parse: unexpected end of JSON input",
-		Ticket:       lane.Ticket{PID: 333},
+		// The decoder can keep the bit before the payload tears; the row
+		// must not print it.
+		Ticket: lane.Ticket{PID: 333, Exclusive: true},
 	})
 	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
 	m = press(m, "enter")
 	v := view(m)
-	for _, want := range []string{"1/2 slot(s), 1 unreadable", "pid 333", "unreadable", "ticket unreadable: parse: unexpected end of JSON input"} {
-		if !strings.Contains(v, want) {
-			t.Fatalf("queue screen missing %q:\n%s", want, v)
-		}
+	if !strings.Contains(v, "1/2 slot(s), 1 unreadable") {
+		t.Fatalf("queue header does not name the unreadable ticket:\n%s", v)
 	}
-	if strings.Contains(v, "held 0.0s") {
+	row, ok := lineWith(v, "pid 333")
+	if !ok {
+		t.Fatalf("queue screen does not list the unreadable ticket:\n%s", v)
+	}
+	if !strings.Contains(row, "unreadable") {
+		t.Fatalf("the unreadable row's state word is not unreadable: %q", row)
+	}
+	if strings.Contains(row, "EXCLUSIVE") {
+		t.Fatalf("the row printed an exclusive bit from a torn payload: %q", row)
+	}
+	if !strings.Contains(v, "ticket unreadable: parse: unexpected end of JSON input") {
+		t.Fatalf("queue screen hides the payload error:\n%s", v)
+	}
+	if strings.Contains(v, "held 0s") {
 		t.Fatalf("an unreadable ticket must not claim a held duration:\n%s", v)
 	}
+}
+
+// TestOverviewBadgesALaneWhoseOnlyTicketIsUnreadable: with nothing started the
+// fraction reads 0/n, so the badge is what says the lane is not free.
+func TestOverviewBadgesALaneWhoseOnlyTicketIsUnreadable(t *testing.T) {
+	rep := sampleReport()
+	rep.Queues[0].Holders = []lane.Entry{{
+		File:         "00000000000000000003-3.ticket",
+		PayloadError: "parse: unexpected end of JSON input",
+		Ticket:       lane.Ticket{PID: 333},
+	}}
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	v := view(m)
+	row, ok := lineWith(v, "wintty-build")
+	if !ok {
+		t.Fatalf("overview does not list the lane:\n%s", v)
+	}
+	if !strings.Contains(row, "UNREADABLE") {
+		t.Fatalf("overview badge does not say UNREADABLE: %q", row)
+	}
+	if !strings.Contains(row, "0/2") {
+		t.Fatalf("overview held column does not show the started count: %q", row)
+	}
+}
+
+// lineWith returns the first line containing want.
+func lineWith(s, want string) (string, bool) {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, want) {
+			return line, true
+		}
+	}
+	return "", false
 }

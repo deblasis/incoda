@@ -86,8 +86,9 @@ memory, so only its own run can proceed and everyone else waits until it leaves
 or is force-released. Its width is unknown, so it does not vote on the
 effective slot count: the barrier it already is stops everything behind it, so
 a vote could only idle slots ahead of it. `status` prints it as `UNREADABLE`
-and names it next to the started-holder fraction, because it counts against
-the lane without having started. An unreadable payload is never fatal to
+and names it next to the started-holder fraction; the report cannot say
+whether it started, because the payload that would carry the acquisition
+stamp is the one that failed to read. An unreadable payload is never fatal to
 correctness, which depends only on the OS lock; leaving it silent would hide
 which ticket the lane waits for.
 

@@ -17,11 +17,7 @@ func statusReportWith(es ...lane.Entry) QueueReport {
 		EffectiveSlots: 4,
 		Holders:        es,
 	}
-	for _, e := range es {
-		if e.Holding && e.Ticket.Exclusive {
-			qr.ExclusiveHolder = true
-		}
-	}
+	qr.ExclusiveHolder = lane.HasExclusiveHolder(es)
 	return qr
 }
 
@@ -41,6 +37,15 @@ func unreadableHolder(pid int) lane.Entry {
 	}
 }
 
+// unreadableExclusive is a payload that decoded the exclusive bit before it
+// tore. The bit cannot be trusted: the file also cannot say whether the
+// ticket started.
+func unreadableExclusive(pid int) lane.Entry {
+	e := unreadableHolder(pid)
+	e.Ticket.Exclusive = true
+	return e
+}
+
 func TestRenderQueueMarksAReadableExclusiveHolder(t *testing.T) {
 	cases := []struct {
 		name string
@@ -50,6 +55,7 @@ func TestRenderQueueMarksAReadableExclusiveHolder(t *testing.T) {
 	}{
 		{"exclusive", holder(7, true), "1/4 slot(s) held (exclusive)", ""},
 		{"plain", holder(8, false), "1/4 slot(s) held", "(exclusive)"},
+		{"torn exclusive", unreadableExclusive(9), "0/4 slot(s) held, 1 unreadable", "(exclusive)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -78,7 +84,7 @@ func TestRenderQueueNamesUnreadableTicketsApartFromStartedHolders(t *testing.T) 
 	if !strings.Contains(out, "1/4 slot(s) held, 1 unreadable") {
 		t.Fatalf("status header does not name the unreadable ticket:\n%s", out)
 	}
-	if !strings.Contains(out, "UNREADABLE") || !strings.Contains(out, "not started") {
+	if !strings.Contains(out, "UNREADABLE") || !strings.Contains(out, "state unknown") {
 		t.Fatalf("status row still calls an unreadable ticket a started holder:\n%s", out)
 	}
 	if !strings.Contains(out, "ticket unreadable") {
@@ -102,6 +108,10 @@ func TestQueuesStateMarksExclusiveAndUnreadable(t *testing.T) {
 			"1/4 held, 0 waiting", "(exclusive)"},
 		{"unreadable", &lane.Snapshot{EffectiveSlots: 4, Holders: []lane.Entry{holder(7, false), unreadableHolder(9)}},
 			"1/4 held, 1 unreadable, 0 waiting", ""},
+		{"torn exclusive", &lane.Snapshot{EffectiveSlots: 4, Holders: []lane.Entry{unreadableExclusive(9)}},
+			"0/4 held, 1 unreadable, 0 waiting", "(exclusive)"},
+		{"exclusive beside unreadable", &lane.Snapshot{EffectiveSlots: 4, Holders: []lane.Entry{holder(7, true), unreadableHolder(9)}},
+			"1/4 held (exclusive), 1 unreadable, 0 waiting", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -125,9 +135,12 @@ func TestHolderLineMarksAReadableExclusiveHolder(t *testing.T) {
 	if got := holderLine(plain); strings.Contains(got, "(exclusive)") {
 		t.Fatalf("holderLine marked a plain holder exclusive: %q", got)
 	}
-	bad := unreadableHolder(3)
+	bad := unreadableExclusive(3)
 	got := holderLine(bad)
 	if !strings.Contains(got, "ticket unreadable") || !strings.Contains(got, bad.PayloadError) {
 		t.Fatalf("holderLine hid the payload error: %q", got)
+	}
+	if strings.Contains(got, "(exclusive)") {
+		t.Fatalf("holderLine trusted an exclusive bit from a torn payload: %q", got)
 	}
 }

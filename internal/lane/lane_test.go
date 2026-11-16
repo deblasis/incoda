@@ -461,3 +461,40 @@ func TestHeldTicketPayloadStaysReadable(t *testing.T) {
 		t.Fatalf("queue key did not round-trip: %q", got.Ticket.Queue)
 	}
 }
+
+// TestSnapshotShelvesAnUnreadableTicketAsAHolder: a ticket whose payload was
+// torn by its owner is still live under its lock, so the snapshot must shelf
+// it with the holders and never with the waiters: admission counts it as a
+// barrier, and a view that listed it as queued would offer a slot behind it.
+func TestSnapshotShelvesAnUnreadableTicketAsAHolder(t *testing.T) {
+	q, err := Open(t.TempDir(), "torn-shelf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	en, err := q.Enroll(Ticket{Slots: 1, Exclusive: true, Command: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer en.Release(0)
+	if err := en.lock.Truncate([]byte("{")); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := q.Observe(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Holders) != 1 {
+		t.Fatalf("snapshot shelved %d holders, want the torn ticket: %+v", len(snap.Holders), snap)
+	}
+	e := snap.Holders[0]
+	if !e.Unreadable() || e.Holding {
+		t.Fatalf("torn ticket = %+v, want unreadable with no started flag", e)
+	}
+	if len(snap.Waiting) != 0 {
+		t.Fatalf("a live torn ticket was listed as waiting: %+v", snap.Waiting)
+	}
+	if HasExclusiveHolder(snap.Holders) {
+		t.Fatalf("a torn payload asserted the exclusive bit: %+v", e)
+	}
+}

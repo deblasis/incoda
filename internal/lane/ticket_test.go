@@ -36,3 +36,32 @@ func TestEntryHolderPredicateCoversUnreadable(t *testing.T) {
 		})
 	}
 }
+
+// TestHasExclusiveHolderRequiresAReadableStartedHolder: the exclusive bit is
+// only believed on a payload that read whole and on a ticket that started.
+// A torn payload can decode the bit before it fails, and a waiter that asked
+// for the queue alone has not been admitted yet. The torn case sets Holding
+// by hand, which scan never does, so the readability clause is exercised on
+// its own.
+func TestHasExclusiveHolderRequiresAReadableStartedHolder(t *testing.T) {
+	cases := []struct {
+		name string
+		e    Entry
+		want bool
+	}{
+		{"started and exclusive", Entry{Holding: true, Ticket: Ticket{Exclusive: true}}, true},
+		{"started, plain", Entry{Holding: true}, false},
+		{"waiting and exclusive", Entry{Ticket: Ticket{Exclusive: true}}, false},
+		{"torn payload claims exclusive", Entry{Holding: true, PayloadError: "parse: unexpected end of JSON input", Ticket: Ticket{Exclusive: true}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.e.ExclusiveHolder(); got != c.want {
+				t.Fatalf("ExclusiveHolder() = %v, want %v", got, c.want)
+			}
+			if got := HasExclusiveHolder([]Entry{c.e}); got != c.want {
+				t.Fatalf("HasExclusiveHolder() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

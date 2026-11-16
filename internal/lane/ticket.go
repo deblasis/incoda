@@ -190,9 +190,30 @@ func (e Entry) Unreadable() bool { return e.PayloadError != "" }
 // this one rule so they cannot split on the same entry.
 func (e Entry) CountsAsHolder() bool { return e.Holding || e.Unreadable() }
 
+// ExclusiveHolder reports whether the entry is a started holder that asked
+// for the queue alone. An unreadable payload cannot assert the bit: it may
+// have decoded more fields than it could verify, and whether it started is
+// not knowable from the file.
+func (e Entry) ExclusiveHolder() bool {
+	return e.Holding && !e.Unreadable() && e.Ticket.Exclusive
+}
+
+// HasExclusiveHolder reports whether any started holder asked for the queue
+// alone. It is the one rule behind the status header, the JSON field, the
+// queues marker and the watch badge.
+func HasExclusiveHolder(es []Entry) bool {
+	for _, e := range es {
+		if e.ExclusiveHolder() {
+			return true
+		}
+	}
+	return false
+}
+
 // StartedHolders counts the entries that acquired a slot, over any set of
-// holders. Unreadable tickets count against the lane without starting, so a
-// display that names both must not use len(holders) for the started count.
+// holders. Unreadable tickets count against the lane but cannot say whether
+// they started, so a display that names both must not use len(holders) for
+// the started count.
 func StartedHolders(es []Entry) int {
 	n := 0
 	for _, e := range es {

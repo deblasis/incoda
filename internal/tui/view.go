@@ -431,7 +431,7 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	} else {
 		first = trunc(idpart, budget-lipgloss.Width(mark)-1) + " " + mark
 	}
-	if t.Exclusive {
+	if t.Exclusive && !p.entry.Unreadable() {
 		first += " EXCLUSIVE"
 	}
 	if t.Owner != "" {
@@ -661,7 +661,7 @@ func (m Model) badge(q report.Queue, wide bool) string {
 
 // slotsText is the queue title's width line: started holders over the
 // effective width, with unreadable tickets named because they count against
-// the lane without starting.
+// the lane but cannot say whether they started.
 func slotsText(q report.Queue) string {
 	text := fmt.Sprintf("%d/%d slot(s)", lane.StartedHolders(q.Holders), q.EffectiveSlots)
 	if n := lane.UnreadableCount(q.Holders); n > 0 {
@@ -681,7 +681,7 @@ func plainState(q report.Queue) string {
 	case q.Free:
 		return "FREE"
 	case lane.StartedHolders(q.Holders) == 0 && lane.UnreadableCount(q.Holders) > 0:
-		// Nothing started, but the lane is not free: the ticket is a
+		// No readable start, but the lane is not free: the ticket is a
 		// barrier whose payload cannot say what it is.
 		return "UNREADABLE"
 	default:
@@ -690,12 +690,7 @@ func plainState(q report.Queue) string {
 }
 
 func hasExclusive(q report.Queue) bool {
-	for _, e := range q.Holders {
-		if e.Ticket.Exclusive {
-			return true
-		}
-	}
-	return false
+	return lane.HasExclusiveHolder(q.Holders)
 }
 
 func oldestWait(q report.Queue) string {

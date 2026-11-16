@@ -173,16 +173,14 @@ func queueStateLine(p colorize.Palette, snap *lane.Snapshot) string {
 		return p.BoldGreen("free")
 	}
 	held := fmt.Sprintf("%d/%d held", lane.StartedHolders(snap.Holders), snap.EffectiveSlots)
+	if lane.HasExclusiveHolder(snap.Holders) {
+		// A holder asking for the queue alone admits nobody, so the
+		// fraction alone would imply free capacity. The marker stays
+		// beside the fraction; unreadable tickets are named after it.
+		held += " (exclusive)"
+	}
 	if n := lane.UnreadableCount(snap.Holders); n > 0 {
 		held += fmt.Sprintf(", %d unreadable", n)
-	}
-	for _, h := range snap.Holders {
-		if h.Ticket.Exclusive && h.Holding {
-			// A holder asking for the queue alone admits nobody, so the
-			// fraction alone would imply free capacity.
-			held += " (exclusive)"
-			break
-		}
 	}
 	return p.BoldYellow(fmt.Sprintf("%s, %d waiting", held, len(snap.Waiting)))
 }
