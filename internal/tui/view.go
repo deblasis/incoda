@@ -336,7 +336,13 @@ func (m Model) queueTop(b queueBody) int {
 		// The prompt owns the viewport. Anchor it at its first line while it
 		// is taller than the body, so the kill target and the reason field
 		// stay visible; a prompt that fits keeps its place above the help.
-		return windowTop(total, m.bodyRows(), m.ptop, b.promptAt, min(total, b.promptAt+m.bodyRows()))
+		// The box draws a border above those lines; when it cannot fit, the
+		// border loses so the target and the input both reach the body.
+		start := b.promptAt
+		if total-start > m.bodyRows() {
+			start++
+		}
+		return windowTop(total, m.bodyRows(), m.ptop, start, min(total, start+m.bodyRows()))
 	}
 	start, end := 0, 0
 	if m.psel >= 0 && m.psel < len(b.starts) {

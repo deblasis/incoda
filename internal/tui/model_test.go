@@ -743,6 +743,37 @@ func TestReenteringAQueueStartsAtItsHead(t *testing.T) {
 	}
 }
 
+func TestDoubleClickingAQueueStartsAtItsHead(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 15
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	m = press(m, "esc")
+	y := -1
+	for i, line := range strings.Split(view(m), "\n") {
+		if strings.Contains(line, "many") {
+			y = i
+			break
+		}
+	}
+	if y < 0 {
+		t.Fatalf("the queue row is not painted:\n%s", view(m))
+	}
+	now := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	m.opt.Now = func() time.Time { return now }
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	m.opt.Now = func() time.Time { return now.Add(200 * time.Millisecond) }
+	mm, _ = m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	v := view(m)
+	if m.ptop != 0 || !strings.Contains(v, "many") || !strings.Contains(v, "HOLDING (6)") {
+		t.Fatalf("double-click entry must start at the queue title and header (ptop=%d):\n%s", m.ptop, v)
+	}
+}
+
 func TestTickOnKillPromptKeepsQueueScroll(t *testing.T) {
 	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
 	m.width, m.height = 80, 15
@@ -779,15 +810,28 @@ func TestKillPromptShowsItsHeadAt40x9(t *testing.T) {
 }
 
 func TestKillPromptShowsItsHeadUnderAToast(t *testing.T) {
-	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
-	m.width, m.height = 80, 9
-	m = press(m, "enter")
-	for i := 0; i < 5; i++ {
-		m = press(m, "down")
-	}
-	m = press(m, "k", "enter") // empty reason: the toast costs the body a row
-	if v := view(m); !strings.Contains(v, "kill pid 105") {
-		t.Fatalf("the prompt head must survive a toast on a 9-row terminal:\n%s", v)
+	for _, w := range []int{40, 80} {
+		m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+		m.width, m.height = w, 9
+		m = press(m, "enter")
+		for i := 0; i < 5; i++ {
+			m = press(m, "down")
+		}
+		m = press(m, "k", "enter") // empty reason: the toast costs the body a row
+		m = typeText(m, "why")
+		v := view(m)
+		if !strings.Contains(v, "kill pid 105") {
+			t.Fatalf("%dx9: the prompt head must survive a toast:\n%s", w, v)
+		}
+		reason := false
+		for _, line := range strings.Split(v, "\n") {
+			if strings.Contains(line, "reason:") && strings.Contains(line, "why") {
+				reason = true
+			}
+		}
+		if !reason {
+			t.Fatalf("%dx9: the reason input must survive a toast:\n%s", w, v)
+		}
 	}
 }
 
@@ -837,6 +881,9 @@ func TestWindowResizeKeepsSelectionAndHelpLine(t *testing.T) {
 	}
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	m = mm.(Model)
+	if m.height != 10 {
+		t.Fatalf("the resize message must set the new height, got %d", m.height)
+	}
 	v := view(m)
 	if !strings.Contains(v, "pid 109") {
 		t.Fatalf("the selected participant must stay on screen after a resize:\n%s", v)
@@ -845,8 +892,8 @@ func TestWindowResizeKeepsSelectionAndHelpLine(t *testing.T) {
 	if !strings.Contains(lines[len(lines)-1], "esc back") {
 		t.Fatalf("the help line must stay on the last row after a resize:\n%s", v)
 	}
-	if len(lines) != m.height {
-		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", len(lines), m.height, v)
+	if len(lines) != 10 {
+		t.Fatalf("the view is %d rows on a 10-row terminal:\n%s", len(lines), v)
 	}
 }
 
