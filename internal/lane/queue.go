@@ -561,6 +561,13 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 func effectiveSlots(live []Entry, cfgSlots int) int {
 	slots := 0
 	for _, e := range live {
+		if e.Unreadable() {
+			// Its width is unknown; the zero value would vote one and
+			// idle the slots of a wider unconfigured lane. It already
+			// blocks everything behind it as a barrier, so skipping the
+			// vote protects nothing that is still free.
+			continue
+		}
 		if e.Ticket.Exclusive {
 			// An exclusive ticket asks for the queue alone, not for a
 			// width; it never votes on the count. The barrier is its ask.
@@ -605,18 +612,24 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 // it is holding or admitted. Nothing behind a ticket that is not admitted
 // starts either: that is the FIFO property, and for an exclusive ticket it is
 // also the barrier that keeps the queue empty while it runs. An exclusive that
-// already acquired blocks every ticket that has not, wherever it sorts, so a
-// slow poll cannot start work beside it. A ticket whose payload cannot be read
-// counts as a holder and a barrier and does not start on that payload; its own
-// process substitutes the ticket it holds in memory. extra counts slots already
-// held by runs with no ticket on this lane (unpooled holders); they hold ahead
-// of every waiter.
+// already acquired blocks every other ticket that has not, wherever it sorts,
+// so a slow poll cannot start work beside it; that set-wide rule can only read
+// a readable payload, so a torn payload on the exclusive itself is a barrier
+// from its position onward but cannot assert the exclusive bit. A ticket whose
+// payload cannot be read counts as a holder and a barrier and does not start
+// on that payload; its own process substitutes the ticket it holds in memory.
+// extra counts slots already held by runs with no ticket on this lane (unpooled
+// holders); they hold ahead of every waiter.
 func admission(live []Entry, slots, extra int) []bool {
 	ok := make([]bool, len(live))
 	// An exclusive that already acquired holds the whole lane alone, not just
-	// the tickets behind it in this scan: a ticket ahead of it that its own
-	// process has not polled yet must not start beside it. The per-index
-	// barrier cannot see that case because "ahead" is not "behind".
+	// the tickets behind it in this scan. Enrollment stamps strictly after
+	// every live name, so this version cannot place a live ordinary ticket
+	// ahead of an acquired exclusive; an older incoda's ticket (a clock step
+	// before its enrollment) or a torn payload can. The per-index barrier
+	// cannot see that case because "ahead" is not "behind". A torn payload
+	// cannot assert the exclusive bit, so it covers the lane from its
+	// position onward only.
 	heldExclusive := false
 	for i := range live {
 		if live[i].PayloadError == "" && live[i].Ticket.Exclusive && live[i].Ticket.AcquireNano != 0 {
@@ -811,11 +824,12 @@ func (q *Queue) snapshot(live []Entry, slots int, cfg Config, cfgErr error, logL
 		s.ConfigError = cfgErr.Error()
 	}
 	for _, e := range live {
-		// An unreadable payload is shown as a holder: the process is alive
-		// (it holds the lock) and admission treats the ticket as a barrier,
-		// even though the ticket does not start through that payload. The
-		// error on the row says why the details are missing.
-		if e.Holding || e.PayloadError != "" {
+		// An unreadable payload counts as a holder: admission treats the
+		// ticket as a barrier, even though it does not start through that
+		// payload. The report marks it unreadable and does not count it as
+		// a started holder; the error on the row says why the details are
+		// missing.
+		if e.CountsAsHolder() {
 			s.Holders = append(s.Holders, e)
 		} else {
 			s.Waiting = append(s.Waiting, e)
@@ -892,9 +906,10 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 // ticket that sorted ahead of one already live could start beside a running
 // exclusive, because a ticket that already acquired is never revoked. Reading
 // names costs one ReadDir under the registry hold; reading payloads would mean
-// a file per ticket. A name carrying the maximum stamp saturates the next
-// arrival there instead of wrapping negative; two tickets that then tie differ
-// by pid.
+// a file per ticket. A name carrying the maximum stamp (only a writer other
+// than this binary can put one there) saturates the next arrival instead of
+// wrapping negative. Saturation loses arrival order: every later arrival ties
+// at the maximum and the pid decides, so remove such a name to restore FIFO.
 func nextArrival(stamp int64, entries []os.DirEntry) int64 {
 	for _, de := range entries {
 		ord, ok := parseTicketName(de.Name())

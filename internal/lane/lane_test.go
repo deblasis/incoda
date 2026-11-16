@@ -2,6 +2,7 @@ package lane
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -364,6 +365,52 @@ func TestEffectiveSlotsTakesTheMinimum(t *testing.T) {
 	// before the config was narrowed cannot keep the queue wide.
 	if got := effectiveSlots(live, 1); got != 1 {
 		t.Fatalf("effectiveSlots with a configured cap of 1 = %d, want 1", got)
+	}
+}
+
+func TestNextArrivalSaturatesAtTheMaximum(t *testing.T) {
+	now := int64(1_700_000_000_000_000_000)
+	dir := t.TempDir()
+	write := func(nano int64) {
+		name := fmt.Sprintf("%020d-1.ticket", nano)
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(now)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nextArrival(now, entries); got != now+1 {
+		t.Fatalf("nextArrival = %d, want one past %d", got, now)
+	}
+	write(math.MaxInt64)
+	entries, err = os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nextArrival(now, entries); got != math.MaxInt64 {
+		t.Fatalf("nextArrival = %d, want the maximum stamp, not a wrapped one", got)
+	}
+}
+
+func TestEffectiveSlotsIgnoresAnUnreadableTicket(t *testing.T) {
+	// An unreadable payload has no width to vote; letting its zero value
+	// floor the lane at one would idle the slots of a wider unconfigured
+	// queue, while the barrier it already is stops everything behind it.
+	live := []Entry{
+		{Ticket: Ticket{Slots: 4}},
+		{PayloadError: "parse: unexpected end of JSON input"},
+	}
+	if got := effectiveSlots(live, 0); got != 4 {
+		t.Fatalf("an unreadable ticket narrowed the lane to %d, want 4", got)
+	}
+	if got := effectiveSlots([]Entry{{PayloadError: "parse"}}, 0); got != 1 {
+		t.Fatalf("an unreadable-only set still floors at one slot, got %d", got)
+	}
+	if got := effectiveSlots(live, 2); got != 2 {
+		t.Fatalf("the configured clamp still applies, got %d, want 2", got)
 	}
 }
 

@@ -83,9 +83,13 @@ Fail-safe bias: a ticket that cannot be opened or parsed is treated as *live*
 instead of hiding it. It counts as a holder and a barrier and never starts on
 that payload; the process that owns it substitutes the ticket it holds in
 memory, so only its own run can proceed and everyone else waits until it leaves
-or is force-released. An unreadable payload is never fatal to correctness,
-which depends only on the OS lock, but a silently unreadable payload would
-make every queue look like a one-slot queue.
+or is force-released. Its width is unknown, so it does not vote on the
+effective slot count: the barrier it already is stops everything behind it, so
+a vote could only idle slots ahead of it. `status` prints it as `UNREADABLE`
+and names it next to the started-holder fraction, because it counts against
+the lane without having started. An unreadable payload is never fatal to
+correctness, which depends only on the OS lock; leaving it silent would hide
+which ticket the lane waits for.
 
 ## Ordering: FIFO, and it is tested
 
@@ -97,7 +101,10 @@ arrival stamp is taken while holding the registry lock and moved past every
 name already in the lane, so a clock that repeats or steps back cannot put a
 fresh ticket ahead of one already queued; the bump reads the filenames because
 that is what the order reads. A name already at the maximum stamp saturates
-the next arrival there instead of wrapping negative.
+the next arrival there instead of wrapping negative; that keeps the name valid
+but loses arrival order lane-wide, because every later arrival ties at the
+maximum and the pid decides. Only a writer other than this binary can put such
+a name there; remove it to restore FIFO.
 
 A participant holds a slot when its ticket is among the N lowest-ordered *live*
 tickets. Waiters poll (500 ms by default) instead of waiting on a signal: no
@@ -185,7 +192,13 @@ tickets ahead of it are holding or admitted, or when it is exclusive and
 nothing ahead of it is. A ticket that cannot start stops the walk: that is
 FIFO, and for an exclusive ticket it is the barrier that leaves the machine
 empty. A participant that already acquired is never revoked, so a ticket
-count change cannot unseat a running job.
+count change cannot unseat a running job. The set-wide rule that keeps a
+running exclusive alone reads readable payloads only: an unreadable payload
+cannot assert the exclusive bit, so a torn one covers the lane from its
+position onward, not from the front. The rule also binds only participants
+running this version; during a rolling upgrade an older incoda's process can
+still start beside a running exclusive when a clock step sorted its ticket
+ahead, because that process never asks the rule.
 
 The effective slot count does not change for an exclusive ticket. It used to
 narrow to 1, which paused the jobs ahead of it for no reason and let their

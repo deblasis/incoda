@@ -171,7 +171,47 @@ func (e *Entry) fill(now time.Time) {
 	}
 	if e.Ticket.AcquireNano > 0 {
 		e.HeldSeconds = now.Sub(time.Unix(0, e.Ticket.AcquireNano)).Seconds()
+		if e.HeldSeconds < 0 {
+			// Same rule as WaitingSeconds: a stamp ahead of the wall
+			// clock is zero seconds held, never a negative duration.
+			e.HeldSeconds = 0
+		}
 	}
+}
+
+// Unreadable reports that the ticket payload could not be read. The process
+// that owns the file may still be alive, but its fields, including the
+// exclusive bit and the acquisition time, are unknown.
+func (e Entry) Unreadable() bool { return e.PayloadError != "" }
+
+// CountsAsHolder reports whether the entry counts against the lane's width.
+// An acquired ticket does; so does an unreadable one, because admission must
+// count what it cannot rule out. The report shelves and the wait line use
+// this one rule so they cannot split on the same entry.
+func (e Entry) CountsAsHolder() bool { return e.Holding || e.Unreadable() }
+
+// StartedHolders counts the entries that acquired a slot, over any set of
+// holders. Unreadable tickets count against the lane without starting, so a
+// display that names both must not use len(holders) for the started count.
+func StartedHolders(es []Entry) int {
+	n := 0
+	for _, e := range es {
+		if e.Holding {
+			n++
+		}
+	}
+	return n
+}
+
+// UnreadableCount counts holders whose payload could not be read.
+func UnreadableCount(es []Entry) int {
+	n := 0
+	for _, e := range es {
+		if e.Unreadable() {
+			n++
+		}
+	}
+	return n
 }
 
 // CommandString renders the recorded command for human output.

@@ -510,3 +510,23 @@ func TestSingleQueueModeQuitsOnQ(t *testing.T) {
 		t.Fatal("q in single mode should produce QuitMsg")
 	}
 }
+
+func TestQueueScreenNamesAnUnreadableHolder(t *testing.T) {
+	rep := sampleReport()
+	rep.Queues[0].Holders = append(rep.Queues[0].Holders, lane.Entry{
+		File:         "00000000000000000003-3.ticket",
+		PayloadError: "parse: unexpected end of JSON input",
+		Ticket:       lane.Ticket{PID: 333},
+	})
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m = press(m, "enter")
+	v := view(m)
+	for _, want := range []string{"1/2 slot(s), 1 unreadable", "pid 333", "unreadable", "ticket unreadable: parse: unexpected end of JSON input"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("queue screen missing %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "held 0.0s") {
+		t.Fatalf("an unreadable ticket must not claim a held duration:\n%s", v)
+	}
+}

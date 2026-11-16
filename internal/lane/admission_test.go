@@ -97,8 +97,11 @@ func TestUnreadablePayloadFailsClosed(t *testing.T) {
 }
 
 // TestAdmissionBlocksBesideARunningExclusive: an acquired exclusive holds the
-// whole lane, including a ticket that sorts ahead of it. The per-index barrier
-// cannot see that ticket, so admission checks for a running exclusive first.
+// whole lane, including a ticket that sorts ahead of it. Enrollment stamps
+// strictly after every live name, so this set is not what a running version
+// produces; a hand-edited lane or a torn/foreign ticket can. The per-index
+// barrier cannot see such a ticket, so admission checks for a running
+// exclusive first.
 func TestAdmissionBlocksBesideARunningExclusive(t *testing.T) {
 	live := []Entry{
 		{File: "a.ticket", Ticket: Ticket{Slots: 4}},

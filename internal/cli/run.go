@@ -386,7 +386,7 @@ func cmdRun(args []string, _, stderr io.Writer) error {
 					p.Yellow(fmt.Sprintf("queue %q busy (%s%d slot(s), %d ahead of you), waited %s%s",
 						key, rolePart, effSlots, ahead, waited.Round(time.Second), waitBudget(wait.d))))
 				for _, e := range live {
-					if !e.Holding {
+					if !e.CountsAsHolder() {
 						continue
 					}
 					if e.File == en.Name() {
@@ -1107,6 +1107,9 @@ func viaText(via []string) string {
 // holderLine renders one holder of the wait line. The marker says the holder
 // asked for the queue alone, so a free slot beside it is not capacity.
 func holderLine(e lane.Entry) string {
+	if e.Unreadable() {
+		return fmt.Sprintf("holder pid %d: ticket unreadable (%s)", e.Ticket.PID, textsafe.Escape(e.PayloadError))
+	}
 	line := fmt.Sprintf("holder pid %d in %s: %s%s", e.Ticket.PID, textsafe.Escape(e.Ticket.Dir), textsafe.Escape(e.Ticket.CommandString()), viaText(e.Ticket.Via))
 	if e.Ticket.Exclusive {
 		line += " (exclusive)"

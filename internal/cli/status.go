@@ -305,7 +305,10 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 	if qr.Free {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+"  "+p.Dim(fmt.Sprintf("(%d slot(s))", qr.EffectiveSlots)))
 	} else {
-		held := fmt.Sprintf("%d/%d slot(s) held", len(qr.Holders), qr.EffectiveSlots)
+		held := fmt.Sprintf("%d/%d slot(s) held", lane.StartedHolders(qr.Holders), qr.EffectiveSlots)
+		if n := lane.UnreadableCount(qr.Holders); n > 0 {
+			held += fmt.Sprintf(", %d unreadable", n)
+		}
 		if qr.ExclusiveHolder {
 			held += " (exclusive)"
 		}
@@ -326,9 +329,21 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 		if has {
 			rp = &rec
 		}
-		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), statusSuffix(p, rec))
-		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+		label := p.BoldCyan("HOLDER")
+		state := fmt.Sprintf("held %s", p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))))
+		command := e.Ticket.CommandString()
+		if e.Unreadable() {
+			// It counts against the lane and blocks what is behind it,
+			// but it did not start through the payload on disk.
+			label = p.BoldYellow("UNREADABLE")
+			state = "not started"
+			command = ""
+		}
+		fmt.Fprintf(w, "  %s%s  pid %s %s %s%s%s\n",
+			label, ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), state, exclusiveTag(p, e), command, statusSuffix(p, rec))
+		if !e.Unreadable() {
+			fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+		}
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
 		}
