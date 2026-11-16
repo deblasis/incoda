@@ -422,6 +422,15 @@ selection; mouse is off while the kill prompt is open. On a pipe, or with
 `--once` or `--plain`, `watch` repaints the old plain text, so nothing that
 scraped it breaks.
 
+The view is bounded, not just painted: on a short terminal the body height is
+the rows between the frame and the help line, the overview and queue panes
+scroll only while the cursor is outside that window, and hit testing reads the
+same window, so a click can only land on a row that is actually painted. The
+pty pane derives its height from the same body height. A kill prompt taller
+than the body anchors on its target and reason field, dropping the box border
+when the body cannot hold both; nothing the operator must read or type is
+pushed off screen.
+
 ## Exit codes
 
 `run` passes the child's own exit status through unchanged. Lane-level

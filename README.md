@@ -322,6 +322,11 @@ adapts to light and dark terminals, honours `NO_COLOR`, and supports the
 mouse: click to select a row, double-click a queue to open it, scroll wheel
 to move selection.
 
+On a terminal shorter than the list, the overview and queue views scroll
+just enough to keep the selected row visible, and a click lands only on a row
+that is actually painted. A kill prompt taller than the view drops its border
+rather than push the reason field off screen.
+
 ### OSC 7501 status in watch
 
 Programs that report what they are doing over the OSC 7501 program-status
