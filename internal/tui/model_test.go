@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -575,4 +577,114 @@ func lineWith(s, want string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// A short terminal cannot show every queue, but the viewport must follow the
+// cursor: the selected row stays on screen, the rows above it scroll away,
+// and the help line keeps the last row. Clicking a scrolled row resolves to
+// the queue actually painted there, not to its position in the full list.
+func TestOverviewScrollsToKeepTheSelectionOnScreen(t *testing.T) {
+	rep := &report.Report{Schema: 1, Version: "t", Host: "box", StateDirSource: "platform default"}
+	for i := 0; i < 20; i++ {
+		rep.Queues = append(rep.Queues, report.Queue{
+			Key: fmt.Sprintf("lane-%02d", i), Exists: true, EffectiveSlots: 1, Free: true,
+		})
+	}
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 12
+	for i := 0; i < 15; i++ {
+		m = press(m, "down")
+	}
+	if m.qsel != 15 {
+		t.Fatalf("cursor should be on queue 15, got %d", m.qsel)
+	}
+	v := view(m)
+	if !strings.Contains(v, "lane-15") {
+		t.Fatalf("the selected queue must be on screen:\n%s", v)
+	}
+	if strings.Contains(v, "lane-00") {
+		t.Fatalf("the first queue should have scrolled off a 12-row screen:\n%s", v)
+	}
+	if !strings.Contains(v, "q quit") {
+		t.Fatalf("the help line must stay on the last row:\n%s", v)
+	}
+	if got := strings.Count(v, "\n") + 1; got > m.height {
+		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", got, m.height, v)
+	}
+	y := m.overviewQueueRow(m.qsel)
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.qsel != 15 {
+		t.Fatalf("clicking the painted row should select queue 15, got %d", m.qsel)
+	}
+}
+
+// The queue screen has the same contract: a participant block is three rows,
+// the selection scrolls the pane, and the rows that scrolled off are gone.
+func TestQueueScrollsToKeepTheSelectionOnScreen(t *testing.T) {
+	holders := make([]lane.Entry, 0, 6)
+	for i := 0; i < 6; i++ {
+		holders = append(holders, lane.Entry{
+			Holding: true, HeldSeconds: 10,
+			Ticket: lane.Ticket{
+				PID: 100 + i, Slots: 6, Owner: "owner-" + strconv.Itoa(i),
+				Command: []string{"sleep", "300"}, Dir: "C:/wt/" + strconv.Itoa(i),
+			},
+		})
+	}
+	rep := &report.Report{
+		Schema: 1, Version: "t", Host: "box", StateDirSource: "platform default",
+		Queues: []report.Queue{{
+			Key: "many", Exists: true, EffectiveSlots: 6,
+			Config:  lane.Config{Slots: 6, Pools: []string{"builds"}},
+			Holders: holders,
+		}},
+	}
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 15
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	if m.psel != 5 {
+		t.Fatalf("cursor should be on participant 5, got %d", m.psel)
+	}
+	v := view(m)
+	if !strings.Contains(v, "pid 105") {
+		t.Fatalf("the selected participant must be on screen:\n%s", v)
+	}
+	if strings.Contains(v, "pid 100") {
+		t.Fatalf("the first participant should have scrolled off a 15-row screen:\n%s", v)
+	}
+	if !strings.Contains(v, "esc back") {
+		t.Fatalf("the help line must stay on the last row:\n%s", v)
+	}
+	if got := strings.Count(v, "\n") + 1; got > m.height {
+		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", got, m.height, v)
+	}
+	// A click on a visible block selects the participant painted there.
+	hits := m.participantRowsAt()
+	if hits[3].y < m.bodyStartRow() || hits[3].y >= m.bodyStartRow()+m.bodyRows() {
+		t.Fatalf("participant 3 should be visible, its row is %d", hits[3].y)
+	}
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: hits[3].y, Button: tea.MouseLeft})
+	m = mm.(Model)
+	if m.psel != 3 {
+		t.Fatalf("clicking participant 3's painted row should select it, got %d", m.psel)
+	}
+
+	// The kill prompt is a multi-line block at the end of the body. It must be
+	// split into display lines before the viewport slices it, or the slice cuts
+	// it after its top border.
+	m = press(m, "k")
+	pv := view(m)
+	if !strings.Contains(pv, "kill pid 103") || !strings.Contains(pv, "enter confirm") {
+		t.Fatalf("the kill prompt must be fully visible on a 15-row screen:\n%s", pv)
+	}
+	if !strings.Contains(pv, "esc cancel") {
+		t.Fatalf("the prompt help must stay on the last row:\n%s", pv)
+	}
+	if got := strings.Count(pv, "\n") + 1; got > m.height {
+		t.Fatalf("the prompt view is %d rows on a %d-row terminal:\n%s", got, m.height, pv)
+	}
 }

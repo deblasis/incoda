@@ -17,10 +17,10 @@ func (m Model) layoutWidth() int {
 	return w
 }
 
-// bodyStartRow is the terminal row where the overview/queue body begins,
+// frameTopRows is the terminal row where the overview/queue body begins,
 // derived from the same header, banner and gauge strings render() uses so
 // hit testing stays aligned if any of them wraps.
-func (m Model) bodyStartRow() int {
+func (m Model) frameTopRows() int {
 	w := m.layoutWidth()
 	rows := lipgloss.Height(m.renderHeader(w)) + lipgloss.Height(m.renderGauge(w)) + 1
 	if b := m.renderBanner(w); b != "" {
@@ -29,12 +29,125 @@ func (m Model) bodyStartRow() int {
 	return rows
 }
 
-// overviewQueueAt maps a terminal row to a queue index in the overview.
-// The walk is the same one renderOverview draws, so a click lands on the
-// queue whose row the eye sees, headers included.
+func (m Model) bodyStartRow() int { return m.frameTopRows() }
+
+// bodyRows is how many lines the body may draw: the terminal minus the fixed
+// frame above it, the blank line that separates it from the bottom block, and
+// the toast/help block itself. A viewport that ignores this is how a selection
+// ends up below the last visible row.
+func (m Model) bodyRows() int {
+	rows := m.height - m.frameTopRows() - 1 - lipgloss.Height(m.renderBottom(m.layoutWidth()))
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+// windowTop keeps the selected span visible in a viewport top rows tall.
+// top is the caller's current scroll position; it only moves when the
+// selection would leave the window, so the view does not jump a full page
+// on every step.
+func windowTop(total, rows, top, selStart, selEnd int) int {
+	if rows < 1 {
+		rows = 1
+	}
+	maxTop := total - rows
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	if top < 0 {
+		top = 0
+	} else if top > maxTop {
+		top = maxTop
+	}
+	if selStart < 0 {
+		selStart = 0
+	}
+	if selStart > total {
+		selStart = total
+	}
+	if selEnd > total {
+		selEnd = total
+	}
+	if selEnd < selStart {
+		selEnd = selStart
+	}
+	if selStart < top {
+		top = selStart
+	}
+	if selEnd > top+rows {
+		top = selEnd - rows
+	}
+	if top > maxTop {
+		top = maxTop
+	}
+	if top < 0 {
+		top = 0
+	}
+	return top
+}
+
+// overviewLineOfQueue is the full-body line the queue's row occupies. Line
+// zero is the column header; grouped sections add their blank and header.
+func (m Model) overviewLineOfQueue(qidx int) int {
+	if m.rep == nil {
+		return 0
+	}
+	line := 1 // the column header
+	grouped := poolsGrouped(m.rep)
+	prevPool := false
+	for n, idx := range overviewOrder(m.rep) {
+		q := &m.rep.Queues[idx]
+		if grouped && (n == 0 || q.IsPool != prevPool) {
+			line += 2
+		}
+		prevPool = q.IsPool
+		if idx == qidx {
+			return line
+		}
+		line++
+	}
+	return line
+}
+
+// overviewTotalLines is the height of the full overview before the viewport
+// clips it: the column header, section transitions, queue rows and the
+// selected queue's summary (a blank and one line).
+func (m Model) overviewTotalLines() int {
+	if m.rep == nil || len(m.rep.Queues) == 0 {
+		return 0
+	}
+	line := 1
+	grouped := poolsGrouped(m.rep)
+	prevPool := false
+	for n, idx := range overviewOrder(m.rep) {
+		if grouped && (n == 0 || m.rep.Queues[idx].IsPool != prevPool) {
+			line += 2
+		}
+		prevPool = m.rep.Queues[idx].IsPool
+		line++
+	}
+	if m.queueAt(m.qsel) != nil {
+		line += 2
+	}
+	return line
+}
+
+// overviewTop is the first overview line the viewport draws. The stored
+// qtop is only a preference; the selected queue always wins.
+func (m Model) overviewTop() int {
+	total := m.overviewTotalLines()
+	if total == 0 {
+		return 0
+	}
+	sel := m.overviewLineOfQueue(m.qsel)
+	return windowTop(total, m.bodyRows(), m.qtop, sel, sel+1)
+}
+
 func (m Model) overviewQueueAt(y int) (idx int, ok bool) {
+	top := m.overviewTop()
 	for _, r := range m.overviewLayout() {
-		if r.y == y {
+		if r.y-top == y {
 			return r.idx, true
 		}
 	}
@@ -43,12 +156,13 @@ func (m Model) overviewQueueAt(y int) (idx int, ok bool) {
 
 // overviewQueueRow is the terminal row for queue index i in the overview.
 func (m Model) overviewQueueRow(i int) int {
+	top := m.overviewTop()
 	for _, r := range m.overviewLayout() {
 		if r.idx == i {
-			return r.y
+			return r.y - top
 		}
 	}
-	return m.bodyStartRow() + 1 + i
+	return m.bodyStartRow() + 1 + i - top
 }
 
 // overviewRow is one queue's place on screen: the terminal row its line
@@ -133,49 +247,15 @@ type rowHit struct {
 }
 
 // participantRowsAt returns the terminal row of each selectable participant.
+// It reads the same block list renderQueue draws, so the kind line, section
+// headers and any extra description cannot drift the hit test by a row.
 func (m Model) participantRowsAt() []rowHit {
-	q := m.current()
-	if q == nil {
-		return nil
-	}
-	y := m.bodyStartRow()
-	y++ // title
-	if q.Config.Description != "" {
-		y++
-	}
-	if q.Config.Closed != "" {
-		y++
-	}
-	if q.ConfigError != "" {
-		y++
-	}
-	y++ // blank before sections
-
-	var hits []rowHit
-	idx := 0
-
-	y++ // HOLDING header
-	if len(q.Holders) == 0 {
-		y++ // "nobody"
-	} else {
-		for range q.Holders {
-			hits = append(hits, rowHit{y: y, idx: idx})
-			y += 3
-			idx++
-		}
-	}
-
-	y++ // blank between sections
-
-	y++ // WAITING header
-	if len(q.Waiting) == 0 {
-		y++
-	} else {
-		for range q.Waiting {
-			hits = append(hits, rowHit{y: y, idx: idx})
-			y += 3
-			idx++
-		}
+	b := m.queueBody(m.layoutWidth())
+	top := m.queueTop(b)
+	y0 := m.bodyStartRow()
+	hits := make([]rowHit, 0, len(b.starts))
+	for idx, start := range b.starts {
+		hits = append(hits, rowHit{y: y0 + start - top, idx: idx})
 	}
 	return hits
 }

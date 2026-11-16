@@ -43,15 +43,29 @@ func (m Model) render() string {
 	if b := m.renderBanner(w); b != "" {
 		rows = append(rows, b)
 	}
-	rows = append(rows, m.renderGauge(w), "", body)
+	rows = append(rows, m.renderGauge(w), "", clipLines(body, m.bodyRows()))
 	top := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	bottom := m.renderBottom(w)
-	// Fill so the help line sits on the last row whatever the body height.
+	// One newline is structural: without it the help text would be appended to
+	// the body's last line. bodyRows already reserved that row.
 	gap := m.height - lipgloss.Height(top) - lipgloss.Height(bottom)
 	if gap < 1 {
 		gap = 1
 	}
 	return top + strings.Repeat("\n", gap) + bottom
+}
+
+// clipLines keeps at most rows lines, in order. The body is joined with \n
+// already, so cutting whole lines never leaves half an ANSI sequence.
+func clipLines(s string, rows int) string {
+	if rows < 1 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= rows {
+		return s
+	}
+	return strings.Join(lines[:rows], "\n")
 }
 
 func (m Model) renderHeader(w int) string {
@@ -174,8 +188,11 @@ func (m Model) renderOverview(w int) string {
 		return ""
 	}
 	if len(m.rep.Queues) == 0 {
-		return st.dim.Render("no queues have state on this machine yet") + "\n" +
-			st.dim.Render("run something: incoda run --queue builds --reason \"first\" -- <cmd>")
+		lines := []string{
+			st.dim.Render("no queues have state on this machine yet"),
+			st.dim.Render("run something: incoda run --queue builds --reason \"first\" -- <cmd>"),
+		}
+		return strings.Join(lines[:min(len(lines), m.bodyRows())], "\n")
 	}
 	keyW := 5
 	for _, q := range m.rep.Queues {
@@ -225,7 +242,12 @@ func (m Model) renderOverview(w int) string {
 	if q := m.queueAt(m.qsel); q != nil {
 		lines = append(lines, "", m.renderQueueSummary(q, w))
 	}
-	return strings.Join(lines, "\n")
+	top := m.overviewTop()
+	end := min(len(lines), top+m.bodyRows())
+	if top >= end {
+		return ""
+	}
+	return strings.Join(lines[top:end], "\n")
 }
 
 // guards is what the WHAT IT GUARDS column shows: a pool guards itself, a
@@ -285,14 +307,53 @@ func (m Model) renderQueueSummary(q *report.Queue, w int) string {
 	return "  " + st.dim.Render("holding: ") + strings.Join(parts, st.dim.Render(" · "))
 }
 
+type queueBody struct {
+	lines    []string
+	starts   []int // first line of each participant block, in psel order
+	promptAt int   // first prompt line, or -1 outside the modal screens
+}
+
 func (m Model) renderQueue(w int) string {
+	b := m.queueBody(w)
+	top := m.queueTop(b)
+	end := min(len(b.lines), top+m.bodyRows())
+	if top >= end {
+		return ""
+	}
+	return strings.Join(b.lines[top:end], "\n")
+}
+
+// queueTop is the first queue-body line the viewport draws. The selection
+// span is the whole three-line participant block; a kill prompt wins over it
+// so the reason field cannot be clipped off a short terminal.
+func (m Model) queueTop(b queueBody) int {
+	total := len(b.lines)
+	if total == 0 {
+		return 0
+	}
+	if b.promptAt >= 0 {
+		return windowTop(total, m.bodyRows(), m.ptop, b.promptAt, total)
+	}
+	start, end := 0, 0
+	if m.psel >= 0 && m.psel < len(b.starts) {
+		start = b.starts[m.psel]
+		// A block taller than the viewport keeps its first line (the pid), not
+		// its last, so a one- or two-row body still names the selected job.
+		end = min(start+3, start+m.bodyRows(), total)
+	}
+	return windowTop(total, m.bodyRows(), m.ptop, start, end)
+}
+
+func (m Model) queueBody(w int) queueBody {
+	b := queueBody{promptAt: -1}
 	st := m.st
 	q := m.current()
 	if q == nil {
 		if m.rep == nil {
-			return ""
+			return b
 		}
-		return st.dim.Render(fmt.Sprintf("queue %q has no state on this machine; it is free", m.key))
+		b.lines = []string{st.dim.Render(fmt.Sprintf("queue %q has no state on this machine; it is free", m.key))}
+		return b
 	}
 	lines := []string{}
 	title := st.title.Render(q.Key) + "  " + m.badge(*q, true) + "  " +
@@ -335,6 +396,7 @@ func (m Model) renderQueue(w int) string {
 		if !p.holding {
 			continue
 		}
+		b.starts = append(b.starts, len(lines))
 		lines = append(lines, m.renderParticipant(p, idx == m.psel, w)...)
 		idx++
 	}
@@ -347,6 +409,7 @@ func (m Model) renderQueue(w int) string {
 		if p.holding {
 			continue
 		}
+		b.starts = append(b.starts, len(lines))
 		lines = append(lines, m.renderParticipant(p, idx == m.psel, w)...)
 		idx++
 	}
@@ -358,11 +421,16 @@ func (m Model) renderQueue(w int) string {
 	}
 	switch m.screen {
 	case screenKillPrompt:
-		lines = append(lines, "", m.renderPrompt(w))
+		lines = append(lines, "")
+		b.promptAt = len(lines)
+		lines = append(lines, strings.Split(m.renderPrompt(w), "\n")...)
 	case screenKillPending:
-		lines = append(lines, "", m.renderPending(w))
+		lines = append(lines, "")
+		b.promptAt = len(lines)
+		lines = append(lines, strings.Split(m.renderPending(w), "\n")...)
 	}
-	return strings.Join(lines, "\n")
+	b.lines = lines
+	return b
 }
 
 // statusStyle colors a record by its state: working in the accent, done
@@ -516,7 +584,7 @@ func (m Model) ptyRows() int {
 			n++
 		}
 	}
-	rows := m.height - n - 4
+	rows := m.bodyRows() - n
 	if rows < 1 {
 		rows = 1
 	}

@@ -292,8 +292,10 @@ type Model struct {
 	height  int
 
 	qsel      int    // selected row in the overview
+	qtop      int    // first overview line on screen
 	key       string // queue open in the queue screen
 	psel      int    // selected participant in the queue screen
+	ptop      int    // first queue-body line on screen
 	pty       *ptyView
 	input     textinput.Model
 	pending   *pendingKill
@@ -429,6 +431,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.SetWidth(max(20, m.width-14))
+		m.clamp()
 		return m, nil
 	case tea.BackgroundColorMsg:
 		m.st = newStyles(msg.IsDark())
@@ -470,6 +473,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.opt.Now().Sub(m.pending.since) > ackGrace {
 			m.pending.unacked = true
 		}
+		m.clampScroll()
 		return m, m.load()
 	case killRequestedMsg:
 		if m.pending == nil || m.pending.seq != msg.seq {
@@ -770,6 +774,7 @@ func (m Model) force(seq int, key string, pid int, reason string) tea.Cmd {
 
 func (m *Model) say(text string, bad bool) {
 	m.toast = toast{text: text, bad: bad, until: m.opt.Now().Add(8 * time.Second)}
+	m.clampScroll()
 }
 
 func (m *Model) clamp() {
@@ -779,6 +784,20 @@ func (m *Model) clamp() {
 	}
 	m.qsel = clampInt(m.qsel, n)
 	m.psel = clampInt(m.psel, len(m.participants()))
+	m.clampScroll()
+}
+
+// clampScroll pins each viewport to its selection. Render derives the same
+// window, so a resize or a refresh that reorders rows cannot leave the
+// stored offset pointing past the content.
+func (m *Model) clampScroll() {
+	switch m.screen {
+	case screenOverview:
+		m.qtop = m.overviewTop()
+	case screenQueue, screenKillPrompt, screenKillPending:
+		b := m.queueBody(m.layoutWidth())
+		m.ptop = m.queueTop(b)
+	}
 }
 
 func clampInt(i, n int) int {

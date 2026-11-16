@@ -223,7 +223,7 @@ func TestPtyScrollsBackAndFreezes(t *testing.T) {
 
 	m = press(m, "pgup")
 	body := m.renderPty(m.width)
-	if !strings.Contains(body, "line 033") {
+	if !strings.Contains(body, "line 035") {
 		t.Fatalf("PgUp must page back to older lines, got:\n%s", body)
 	}
 	if strings.Contains(body, "line 100") {
@@ -233,7 +233,7 @@ func TestPtyScrollsBackAndFreezes(t *testing.T) {
 	fp.chunks = append(fp.chunks, []byte("line 101\nline 102\nline 103\n"))
 	mm, _ = m.Update(ptyTickMsg{})
 	m = mm.(Model)
-	if body2 := m.renderPty(m.width); !strings.Contains(body2, "line 033") {
+	if body2 := m.renderPty(m.width); !strings.Contains(body2, "line 035") {
 		t.Fatalf("new output must not drag a scrolled window away, got:\n%s", body2)
 	}
 
