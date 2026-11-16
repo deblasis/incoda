@@ -209,6 +209,25 @@ func TestPtyWindowIsFixed(t *testing.T) {
 	}
 }
 
+func TestPtyWindowFillsTheBodyAt40x9(t *testing.T) {
+	fp := &fakePty{chunks: [][]byte{[]byte("alpha\n")}, alive: true}
+	m := press(newPtyModel(fp), "enter")
+	mm, _ := m.Update(ptyTickMsg{})
+	m = mm.(Model)
+	m.width, m.height = 40, 9
+	m.pty.capped = true // the note takes a body row and pushes the content down
+	if got := strings.Count(view(m), "\n") + 1; got != m.height {
+		t.Fatalf("the pty view is %d rows on a %d-row terminal", got, m.height)
+	}
+	y := m.bodyStartRow() + m.bodyRows()
+	if m.ptyContentTop() < y {
+		t.Fatalf("content starts at %d, inside the %d-row body ending at %d", m.ptyContentTop(), m.bodyRows(), y)
+	}
+	if _, ok := m.ptyCellAt(2, y); ok {
+		t.Fatal("a click below the painted body must not start a pty selection")
+	}
+}
+
 // Scrolling reads back through the bounded tail, and new output does not
 // drag the window away from the reader; End follows the tail again.
 func TestPtyScrollsBackAndFreezes(t *testing.T) {

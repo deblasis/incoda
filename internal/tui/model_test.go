@@ -605,13 +605,17 @@ func TestOverviewScrollsToKeepTheSelectionOnScreen(t *testing.T) {
 	if strings.Contains(v, "lane-00") {
 		t.Fatalf("the first queue should have scrolled off a 12-row screen:\n%s", v)
 	}
-	if !strings.Contains(v, "q quit") {
-		t.Fatalf("the help line must stay on the last row:\n%s", v)
+	lines := strings.Split(v, "\n")
+	if !strings.Contains(lines[len(lines)-1], "q quit") {
+		t.Fatalf("the help line must be the terminal's last row:\n%s", v)
 	}
-	if got := strings.Count(v, "\n") + 1; got > m.height {
+	if got := len(lines); got != m.height {
 		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", got, m.height, v)
 	}
 	y := m.overviewQueueRow(m.qsel)
+	if y < 0 || y >= len(lines) || !strings.Contains(lines[y], "lane-15") {
+		t.Fatalf("the selected queue is not painted at the row the hit test maps (%d):\n%s", y, v)
+	}
 	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
 	m = mm.(Model)
 	if m.qsel != 15 {
@@ -659,15 +663,25 @@ func TestQueueScrollsToKeepTheSelectionOnScreen(t *testing.T) {
 	if !strings.Contains(v, "esc back") {
 		t.Fatalf("the help line must stay on the last row:\n%s", v)
 	}
-	if got := strings.Count(v, "\n") + 1; got > m.height {
+	lines := strings.Split(v, "\n")
+	if !strings.Contains(lines[len(lines)-1], "esc back") {
+		t.Fatalf("the help line must be the terminal's last row:\n%s", v)
+	}
+	if got := len(lines); got != m.height {
 		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", got, m.height, v)
 	}
 	// A click on a visible block selects the participant painted there.
-	hits := m.participantRowsAt()
-	if hits[3].y < m.bodyStartRow() || hits[3].y >= m.bodyStartRow()+m.bodyRows() {
-		t.Fatalf("participant 3 should be visible, its row is %d", hits[3].y)
+	y := -1
+	for i, line := range strings.Split(v, "\n") {
+		if strings.Contains(line, "pid 103") {
+			y = i
+			break
+		}
 	}
-	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: hits[3].y, Button: tea.MouseLeft})
+	if y < 0 {
+		t.Fatalf("participant 3 is not painted:\n%s", v)
+	}
+	mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
 	m = mm.(Model)
 	if m.psel != 3 {
 		t.Fatalf("clicking participant 3's painted row should select it, got %d", m.psel)
@@ -684,7 +698,171 @@ func TestQueueScrollsToKeepTheSelectionOnScreen(t *testing.T) {
 	if !strings.Contains(pv, "esc cancel") {
 		t.Fatalf("the prompt help must stay on the last row:\n%s", pv)
 	}
-	if got := strings.Count(pv, "\n") + 1; got > m.height {
+	lines = strings.Split(pv, "\n")
+	if !strings.Contains(lines[len(lines)-1], "esc cancel") {
+		t.Fatalf("the prompt help must be the terminal's last row:\n%s", pv)
+	}
+	if got := len(lines); got != m.height {
 		t.Fatalf("the prompt view is %d rows on a %d-row terminal:\n%s", got, m.height, pv)
+	}
+}
+
+func queueWithHolders(n int, key string) *report.Report {
+	holders := make([]lane.Entry, 0, n)
+	for i := 0; i < n; i++ {
+		holders = append(holders, lane.Entry{
+			Holding: true, HeldSeconds: 10,
+			Ticket: lane.Ticket{
+				PID: 100 + i, Slots: n, Owner: "owner-" + strconv.Itoa(i),
+				Command: []string{"sleep", "300"}, Dir: "C:/wt/" + strconv.Itoa(i),
+			},
+		})
+	}
+	return &report.Report{
+		Schema: 1, Version: "t", Host: "box", StateDirSource: "platform default",
+		Queues: []report.Queue{{
+			Key: key, Exists: true, EffectiveSlots: n,
+			Config:  lane.Config{Slots: n, Pools: []string{"builds"}},
+			Holders: holders,
+		}},
+	}
+}
+
+func TestReenteringAQueueStartsAtItsHead(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 15
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	m = press(m, "esc")
+	m = press(m, "enter")
+	v := view(m)
+	if !strings.Contains(v, "many") || !strings.Contains(v, "HOLDING (6)") {
+		t.Fatalf("re-entering the queue must start at its title and header:\n%s", v)
+	}
+}
+
+func TestTickOnKillPromptKeepsQueueScroll(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 15
+	m = press(m, "enter")
+	for i := 0; i < 3; i++ {
+		m = press(m, "down")
+	}
+	before := view(m)
+	m = press(m, "k")
+	mm, _ := m.Update(tickMsg(time.Date(2026, 9, 5, 10, 0, 1, 0, time.UTC)))
+	m = mm.(Model)
+	m = press(m, "esc")
+	if after := view(m); after != before {
+		t.Fatalf("a tick on the prompt moved the queue behind it:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestKillPromptShowsItsHeadAt40x9(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 40, 9
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	m = press(m, "k")
+	m = typeText(m, "why")
+	v := view(m)
+	if !strings.Contains(v, "kill pid 105") {
+		t.Fatalf("the prompt head must survive a 3-row body:\n%s", v)
+	}
+	if !strings.Contains(v, "why") {
+		t.Fatalf("the reason input must survive a 3-row body:\n%s", v)
+	}
+}
+
+func TestKillPromptShowsItsHeadUnderAToast(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 9
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	m = press(m, "k", "enter") // empty reason: the toast costs the body a row
+	if v := view(m); !strings.Contains(v, "kill pid 105") {
+		t.Fatalf("the prompt head must survive a toast on a 9-row terminal:\n%s", v)
+	}
+}
+
+func TestClicksOutsideTheBodyDoNotSelect(t *testing.T) {
+	rep := &report.Report{Schema: 1, Version: "t", Host: "box", StateDirSource: "platform default"}
+	for i := 0; i < 20; i++ {
+		rep.Queues = append(rep.Queues, report.Queue{
+			Key: fmt.Sprintf("lane-%02d", i), Exists: true, EffectiveSlots: 1, Free: true,
+		})
+	}
+	m := newTestModelRep(&fakeKiller{}, rep, time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 12
+	for i := 0; i < 15; i++ {
+		m = press(m, "down")
+	}
+	before := m.qsel
+	for _, y := range []int{0, 1, 2, m.height - 1} {
+		mm, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+		m = mm.(Model)
+		if m.qsel != before {
+			t.Fatalf("a click at row %d outside the body selected queue %d, want %d", y, m.qsel, before)
+		}
+	}
+
+	q := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	q.width, q.height = 80, 15
+	q = press(q, "enter")
+	for i := 0; i < 5; i++ {
+		q = press(q, "down")
+	}
+	want := q.psel
+	for _, y := range []int{0, 1, 2, q.height - 1} {
+		mm, _ := q.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+		q = mm.(Model)
+		if q.psel != want {
+			t.Fatalf("a click at row %d outside the body selected participant %d, want %d", y, q.psel, want)
+		}
+	}
+}
+
+func TestWindowResizeKeepsSelectionAndHelpLine(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(10, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 40
+	m = press(m, "enter")
+	for i := 0; i < 9; i++ {
+		m = press(m, "down")
+	}
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+	v := view(m)
+	if !strings.Contains(v, "pid 109") {
+		t.Fatalf("the selected participant must stay on screen after a resize:\n%s", v)
+	}
+	lines := strings.Split(v, "\n")
+	if !strings.Contains(lines[len(lines)-1], "esc back") {
+		t.Fatalf("the help line must stay on the last row after a resize:\n%s", v)
+	}
+	if len(lines) != m.height {
+		t.Fatalf("the view is %d rows on a %d-row terminal:\n%s", len(lines), m.height, v)
+	}
+}
+
+func TestWheelAtQueueOffsetMovesSelection(t *testing.T) {
+	m := newTestModelRep(&fakeKiller{}, queueWithHolders(6, "many"), time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 15
+	m = press(m, "enter")
+	for i := 0; i < 5; i++ {
+		m = press(m, "down")
+	}
+	mm, _ := m.Update(tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelUp})
+	m = mm.(Model)
+	if m.psel != 4 {
+		t.Fatalf("wheel up at a scroll offset should select participant 4, got %d", m.psel)
+	}
+	if !strings.Contains(view(m), "pid 104") {
+		t.Fatalf("the wheel-selected participant must be painted:\n%s", view(m))
 	}
 }

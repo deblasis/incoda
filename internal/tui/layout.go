@@ -43,6 +43,14 @@ func (m Model) bodyRows() int {
 	return rows
 }
 
+// inBody reports whether y is a terminal row the body actually paints. A
+// hit test that only compares rows can otherwise find a queue or participant
+// scrolled out of the window, or a row on the help line, and select it.
+func (m Model) inBody(y int) bool {
+	start := m.bodyStartRow()
+	return y >= start && y < start+m.bodyRows()
+}
+
 // windowTop keeps the selected span visible in a viewport top rows tall.
 // top is the caller's current scroll position; it only moves when the
 // selection would leave the window, so the view does not jump a full page
@@ -145,6 +153,9 @@ func (m Model) overviewTop() int {
 }
 
 func (m Model) overviewQueueAt(y int) (idx int, ok bool) {
+	if !m.inBody(y) {
+		return 0, false
+	}
 	top := m.overviewTop()
 	for _, r := range m.overviewLayout() {
 		if r.y-top == y {
@@ -233,6 +244,9 @@ func poolsGrouped(rep *report.Report) bool {
 // participantHit maps a terminal row to a participant index on the queue
 // screen. All three lines of each block count as the same row.
 func (m Model) participantHit(y int) (idx int, ok bool) {
+	if !m.inBody(y) {
+		return 0, false
+	}
 	for _, h := range m.participantRowsAt() {
 		if y >= h.y && y < h.y+3 {
 			return h.idx, true
@@ -341,6 +355,7 @@ func (m Model) clickAt(y int) (Model, tea.Cmd) {
 				if q := m.queueAt(m.qsel); q != nil {
 					m.key = q.Key
 					m.psel = 0
+					m.ptop = 0
 					m.screen = screenQueue
 				}
 			}

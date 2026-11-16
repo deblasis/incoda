@@ -46,9 +46,10 @@ func (m Model) render() string {
 	rows = append(rows, m.renderGauge(w), "", clipLines(body, m.bodyRows()))
 	top := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	bottom := m.renderBottom(w)
-	// One newline is structural: without it the help text would be appended to
-	// the body's last line. bodyRows already reserved that row.
-	gap := m.height - lipgloss.Height(top) - lipgloss.Height(bottom)
+	// bodyRows reserves one blank separator row above the bottom block. The
+	// join needs that row plus the structural newline before the help, so the
+	// help is painted on the terminal's last row instead of one row above it.
+	gap := m.height - lipgloss.Height(top) - lipgloss.Height(bottom) + 1
 	if gap < 1 {
 		gap = 1
 	}
@@ -332,7 +333,10 @@ func (m Model) queueTop(b queueBody) int {
 		return 0
 	}
 	if b.promptAt >= 0 {
-		return windowTop(total, m.bodyRows(), m.ptop, b.promptAt, total)
+		// The prompt owns the viewport. Anchor it at its first line while it
+		// is taller than the body, so the kill target and the reason field
+		// stay visible; a prompt that fits keeps its place above the help.
+		return windowTop(total, m.bodyRows(), m.ptop, b.promptAt, min(total, b.promptAt+m.bodyRows()))
 	}
 	start, end := 0, 0
 	if m.psel >= 0 && m.psel < len(b.starts) {

@@ -47,7 +47,7 @@ func (m Model) ptyContentTop() int {
 // ptyCellAt maps a terminal cell to the pane's own coordinates; false when
 // the point is outside the content or on the padding under a short stream.
 func (m Model) ptyCellAt(x, y int) (ptyCell, bool) {
-	if m.pty == nil {
+	if m.pty == nil || !m.inBody(y) {
 		return ptyCell{}, false
 	}
 	w, rows := m.layoutWidth(), m.ptyRows()

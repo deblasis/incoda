@@ -592,6 +592,7 @@ func (m Model) key_(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if q := m.queueAt(m.qsel); q != nil {
 				m.key = q.Key
 				m.psel = 0
+				m.ptop = 0
 				m.screen = screenQueue
 			}
 		case "r":
@@ -794,9 +795,14 @@ func (m *Model) clampScroll() {
 	switch m.screen {
 	case screenOverview:
 		m.qtop = m.overviewTop()
-	case screenQueue, screenKillPrompt, screenKillPending:
+	case screenQueue:
 		b := m.queueBody(m.layoutWidth())
 		m.ptop = m.queueTop(b)
+	case screenKillPrompt, screenKillPending:
+		// The prompt is pinned by queueTop when it renders, against the same
+		// queue offset that was current before the modal opened. Storing a
+		// prompt-sized offset here would move the queue behind the user's
+		// back on the next tick, and leave it displaced after the modal.
 	}
 }
 
