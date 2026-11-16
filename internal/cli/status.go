@@ -305,7 +305,14 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 	if qr.Free {
 		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldGreen("FREE")+"  "+p.Dim(fmt.Sprintf("(%d slot(s))", qr.EffectiveSlots)))
 	} else {
-		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(fmt.Sprintf("%d/%d slot(s) held", len(qr.Holders), qr.EffectiveSlots)))
+		held := fmt.Sprintf("%d/%d slot(s) held", lane.StartedHolders(qr.Holders), qr.EffectiveSlots)
+		if qr.ExclusiveHolder {
+			held += " (exclusive)"
+		}
+		if n := lane.UnreadableCount(qr.Holders); n > 0 {
+			held += fmt.Sprintf(", %d unreadable", n)
+		}
+		fmt.Fprintf(w, "queue %q: %s\n", qr.Key, p.BoldYellow(held))
 	}
 	if qr.Config.Description != "" {
 		fmt.Fprintf(w, "  %s\n", p.Dim(qr.Config.Description))
@@ -322,9 +329,21 @@ func renderQueue(w io.Writer, p colorize.Palette, qr QueueReport, follow *status
 		if has {
 			rp = &rec
 		}
-		fmt.Fprintf(w, "  %s%s  pid %s held %s %s%s%s\n",
-			p.BoldCyan("HOLDER"), ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))), exclusiveTag(p, e), e.Ticket.CommandString(), statusSuffix(p, rec))
-		fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+		label := p.BoldCyan("HOLDER")
+		state := fmt.Sprintf("held %s", p.Dim(fmt.Sprintf("%-10s", dur(e.HeldSeconds))))
+		command := e.Ticket.CommandString()
+		if e.Unreadable() {
+			// It counts against the lane and blocks what is behind it,
+			// but the payload cannot say whether the job started.
+			label = p.BoldYellow("UNREADABLE")
+			state = "state unknown"
+			command = ""
+		}
+		fmt.Fprintf(w, "  %s%s  pid %s %s %s%s%s\n",
+			label, ptyTag(e, rp), p.Bold(fmt.Sprintf("%-7d", e.Ticket.PID)), state, exclusiveTag(p, e), command, statusSuffix(p, rec))
+		if !e.Unreadable() {
+			fmt.Fprintf(w, "          %s %s\n", p.Dim("in"), orNone(e.Ticket.Dir))
+		}
 		if e.Ticket.Owner != "" {
 			fmt.Fprintf(w, "          %s %s\n", p.Dim("owner:"), e.Ticket.Owner)
 		}
@@ -434,10 +453,10 @@ func gateText(t lane.Ticket) string {
 	return s
 }
 
-// exclusiveTag marks a participant that asked for the queue alone, so a
-// reader can see why a two-slot queue is admitting nobody.
+// exclusiveTag marks a participant whose readable ticket asked for the queue
+// alone, so a reader can see why a two-slot queue is admitting nobody.
 func exclusiveTag(p colorize.Palette, e lane.Entry) string {
-	if !e.Ticket.Exclusive {
+	if e.Unreadable() || !e.Ticket.Exclusive {
 		return ""
 	}
 	return p.BoldRed("EXCLUSIVE") + " "

@@ -14,17 +14,21 @@ import (
 
 const ticketExt = ".ticket"
 
-// Ticket is the JSON payload written inside a ticket file. It exists purely so
-// that `incoda status` can describe who is in the queue; correctness never
-// depends on it, only on the OS lock the file carries.
+// Ticket is the JSON payload written inside a ticket file. It exists so that
+// `incoda status` can describe who is in the queue and so that admission can
+// read the exclusive ask and the acquisition time; liveness and ownership
+// never depend on it, only on the OS lock the file carries. An unreadable
+// payload fails closed: admission counts that ticket as a holder and a
+// barrier rather than guessing.
 type Ticket struct {
 	PID   int    `json:"pid"`
 	Queue string `json:"queue"`
 	Slots int    `json:"slots"`
-	// Exclusive asks for the queue alone: while this ticket is live the
-	// effective slot count is 1, whatever the queue or anyone else asked
-	// for. It is for jobs whose result is a duration, which a neighbour
-	// would falsify without failing anything.
+	// Exclusive asks for the queue alone: it starts only when no ticket
+	// ahead of it is holding or admitted, nothing starts while it runs, and
+	// nothing behind it starts until it releases. It is for jobs whose
+	// result is a duration, which a neighbour would falsify without failing
+	// anything.
 	Exclusive   bool     `json:"exclusive,omitempty"`
 	ArrivalNano int64    `json:"arrival_nano"`
 	Arrival     string   `json:"arrival"`
@@ -158,10 +162,77 @@ type Entry struct {
 func (e *Entry) fill(now time.Time) {
 	if e.Ticket.ArrivalNano > 0 {
 		e.WaitingSeconds = now.Sub(time.Unix(0, e.Ticket.ArrivalNano)).Seconds()
+		if e.WaitingSeconds < 0 {
+			// A ticket stamped past the wall clock (a backwards step, or
+			// an arrival bumped past one) is not waiting a negative
+			// time; it is waiting zero.
+			e.WaitingSeconds = 0
+		}
 	}
 	if e.Ticket.AcquireNano > 0 {
 		e.HeldSeconds = now.Sub(time.Unix(0, e.Ticket.AcquireNano)).Seconds()
+		if e.HeldSeconds < 0 {
+			// Same rule as WaitingSeconds: a stamp ahead of the wall
+			// clock is zero seconds held, never a negative duration.
+			e.HeldSeconds = 0
+		}
 	}
+}
+
+// Unreadable reports that the ticket payload could not be read. The process
+// that owns the file may still be alive, but its fields, including the
+// exclusive bit and the acquisition time, are unknown.
+func (e Entry) Unreadable() bool { return e.PayloadError != "" }
+
+// CountsAsHolder reports whether the entry counts against the lane's width.
+// An acquired ticket does; so does an unreadable one, because admission must
+// count what it cannot rule out. The report shelves and the wait line use
+// this one rule so they cannot split on the same entry.
+func (e Entry) CountsAsHolder() bool { return e.Holding || e.Unreadable() }
+
+// ExclusiveHolder reports whether the entry is a started holder that asked
+// for the queue alone. An unreadable payload cannot assert the bit: it may
+// have decoded more fields than it could verify, and whether it started is
+// not knowable from the file.
+func (e Entry) ExclusiveHolder() bool {
+	return e.Holding && !e.Unreadable() && e.Ticket.Exclusive
+}
+
+// HasExclusiveHolder reports whether any started holder asked for the queue
+// alone. It is the one rule behind the status header, the JSON field, the
+// queues marker and the watch badge.
+func HasExclusiveHolder(es []Entry) bool {
+	for _, e := range es {
+		if e.ExclusiveHolder() {
+			return true
+		}
+	}
+	return false
+}
+
+// StartedHolders counts the entries that acquired a slot, over any set of
+// holders. Unreadable tickets count against the lane but cannot say whether
+// they started, so a display that names both must not use len(holders) for
+// the started count.
+func StartedHolders(es []Entry) int {
+	n := 0
+	for _, e := range es {
+		if e.Holding {
+			n++
+		}
+	}
+	return n
+}
+
+// UnreadableCount counts holders whose payload could not be read.
+func UnreadableCount(es []Entry) int {
+	n := 0
+	for _, e := range es {
+		if e.Unreadable() {
+			n++
+		}
+	}
+	return n
 }
 
 // CommandString renders the recorded command for human output.

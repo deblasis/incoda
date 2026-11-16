@@ -54,7 +54,11 @@ type Queue struct {
 	ConfigError    string       `json:"config_error,omitempty"`
 	Holders        []lane.Entry `json:"holders"`
 	Waiting        []lane.Entry `json:"waiting"`
-	RecentEvents   []string     `json:"recent_events"`
+	// ExclusiveHolder marks a queue whose holder asked for the queue
+	// alone: nothing new starts until it releases, so the width minus the
+	// holder count is not free capacity.
+	ExclusiveHolder bool     `json:"exclusive_holder,omitempty"`
+	RecentEvents    []string `json:"recent_events"`
 	// IsPool says the key is a machine-wide pool rather than a project
 	// lane: it comes from machine.json, never from the lane's own config,
 	// because kind is a fact about the machine. watch groups on it.
@@ -170,6 +174,7 @@ func Build(stateDir, version string, keys []string, all bool, events int) (*Repo
 		qr.ConfigError = snap.ConfigError
 		qr.Holders = snap.Holders
 		qr.Waiting = snap.Waiting
+		qr.ExclusiveHolder = lane.HasExclusiveHolder(snap.Holders)
 		qr.RecentEvents = snap.RecentEvents
 		qr.Lockless = snap.Lockless
 		qr.Free = len(snap.Holders) == 0

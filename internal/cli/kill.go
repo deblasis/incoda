@@ -95,10 +95,17 @@ func cmdKill(args []string, stdout, stderr io.Writer) error {
 		return exitWith(ExitState, "cannot request the kill: %v", err)
 	}
 	role := "waiter"
-	if entry.Holding {
+	desc := entry.Ticket.CommandString()
+	switch {
+	case entry.Unreadable():
+		// It counts against the lane, but its payload cannot say whether
+		// it started, so neither label is honest.
+		role = "unreadable"
+		desc = "ticket unreadable: " + entry.PayloadError
+	case entry.Holding:
 		role = "holder"
 	}
-	fmt.Fprintf(stdout, "%s pid %d (%s) on queue %q: %s\n", p.Yellow("kill requested:"), *pid, role, key, entry.Ticket.CommandString())
+	fmt.Fprintf(stdout, "%s pid %d (%s) on queue %q: %s\n", p.Yellow("kill requested:"), *pid, role, key, desc)
 
 	gone, err := q.WaitGone(*pid, *wait, 100*time.Millisecond)
 	if err != nil {

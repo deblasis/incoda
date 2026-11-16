@@ -40,11 +40,13 @@ type AcquireOptions struct {
 // Acquire blocks until this enrollment holds a slot, the wait budget runs out,
 // or ctx is cancelled.
 //
-// A participant holds a slot when its ticket is among the N lowest-ordered LIVE
-// tickets, where N is the effective slot count. Because ticket order is fixed at
-// enrollment and every participant computes it from the same filenames, service
-// is first-in-first-out: a later arrival can never overtake an earlier one that
-// is still waiting.
+// A participant holds a slot when admission says so under the effective slot
+// count: it is ordinary and fewer than N tickets ahead of it are holding or
+// admitted, or it is exclusive and nothing ahead of it is. Because ticket order
+// is fixed at enrollment and every participant computes it from the same
+// filenames, service is first-in-first-out: a later arrival can never overtake
+// an earlier one that is still waiting, and an exclusive ticket is a barrier at
+// its turn rather than a queue-wide pause.
 //
 // The cost of that fairness is that a freed slot can sit idle for up to one poll
 // interval, because the next-in-line has to notice. That is the deliberate
@@ -85,13 +87,20 @@ func (e *Enrollment) Acquire(ctx context.Context, opt AcquireOptions) error {
 		if err != nil {
 			return err
 		}
+		if idx >= 0 && live[idx].PayloadError != "" {
+			// This process owns the ticket: the in-memory copy is
+			// authoritative when the payload on disk is torn or gone.
+			// Everyone else still reads the entry as fail closed.
+			live[idx].Ticket = e.ticket
+			live[idx].PayloadError = ""
+		}
 		extra := 0
 		if opt.Unpooled != nil {
 			if extra, err = opt.Unpooled(); err != nil {
 				return err
 			}
 		}
-		if idx >= 0 && idx+extra < slots {
+		if idx >= 0 && admission(live, slots, extra)[idx] {
 			e.MarkAcquired()
 			return nil
 		}

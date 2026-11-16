@@ -87,10 +87,13 @@ configured number, a run that passes a disagreeing `--slots` is refused
 rather than silently clamped (one stray `--slots 1` used to drag a five-slot
 queue down to one for everyone), and a ticket left by an older `incoda` can
 neither narrow the queue nor widen it. `--exclusive` asks for the queue
-alone: while that run is live the count is 1, whatever the queue says, which
-is what a timing-sensitive test needs. `--queue a,b` holds several queues
-for one command, taken in sorted order so two such runs can never deadlock
-each other.
+alone: it starts only once nothing ahead of it is holding or admitted,
+nothing joins it while it waits or runs, and the jobs queued behind it wait
+for it to leave. The jobs that arrived before it still take every free
+slot: an exclusive request is a barrier at its turn, not a queue-wide
+pause, which is what a timing-sensitive test needs. `--queue a,b` holds
+several queues for one command, taken in sorted order so two such runs can
+never deadlock each other.
 
 **Config, not convention.** A queue can carry a description, require a
 `--reason` on every run, or be closed with a message that names its
@@ -122,9 +125,9 @@ Linux) and nothing is ever resolved from the working directory.
 |---|---|
 | `incoda run --queue KEY[,KEY...] [--pool P,P] [--slots N] [--exclusive] [--max-cpu PCT] [--idle-for DUR] [--max-run DUR] [--stall DUR] [--wait DUR] [--reason TEXT] [--owner WHO] [--pty=false] -- <cmd...>` | Acquire a slot on every key named, run the command, release on every exit path. `--pool` takes a subset of the key's linked pools for this run only. `--wait` takes a Go duration (`30m`) or bare seconds (`1800`); `0` fails fast, negative waits forever, default `30m`, and one budget covers the whole list. `--owner` (or `INCODA_OWNER`) names the session or worktree that queued the job. `--pty`/`--pty=false` choose console or pipes per job; on Windows the default is a pseudo-console (see [PTY jobs](#pty-jobs)). A gated run starts only after whole-machine CPU% stays below `PCT` for `DUR` (advisory, shares `--wait`, exit `121` on expiry; runs without the flags bypass the gate). `--max-run DUR` kills the job once it has held the lane for `DUR`, and `--stall DUR` kills it when its whole process tree has used no CPU time for `DUR` (see [Run limits](#run-limits)). |
 | `incoda config KEY [--slots N] [--description TEXT] [--require-reason] [--close MSG \| --open] [--pool P,P [--replace] \| --add-pool P,P \| --remove-pool P,P \| --unlink] [--quiet-machine[=false]] [--max-run DUR] [--stall DUR] [--wait DUR]` | Show or set a queue's standing configuration: default slots, a description for `status` and `watch`, whether a run must carry `--reason`, a closing message that refuses every run, the link to the machine-wide pools the key's jobs take, and the default `--max-run` and `--stall` its runs take (`0` clears one). |
-| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line — except `done`, which is believed only once the run's process is gone. `--json` is a stable, versioned schema for scripts. |
+| `incoda status [--queue KEY] [--all] [--json]` | Holders and waiters in arrival order, with pid, elapsed time, command, working directory and reason. A `🖥️` marks every pty-mode job; a job's own OSC 7501 status badges that mark with its state as a glyph and its progress (`🖥️ 🔄 40%`), its message ending the line — except `done`, which is believed only once the run's process is gone. A holder that asked for the queue alone and whose ticket is readable shows `(exclusive)`, and `--json` carries `exclusive_holder: true` for that queue; the field is absent when false, and `effective_slots` is still the queue's width. A ticket whose payload cannot be read is listed under `holders` with `holding: false` and its `payload_error`, printed as `UNREADABLE` and counted against the lane without a started slot; the header counts started holders and names unreadable tickets next to the fraction. `--json` is a stable, versioned schema for scripts. |
 | `incoda watch [--queue KEY] [--interval 2s] [--once \| --plain]` | The live screen. With no key, an overview of every queue: state, holders, waiters, oldest wait, what each guards, and the memory gauge; click or enter opens a queue, `k` kills the selected job after asking for a reason, `K` forces. Pty jobs carry a `🖥️`; `enter` on one streams its captured output live in a fixed window (scroll with the arrows, PgUp/PgDn and Home; End follows the tail), ends by itself when the job does and shows the exit code it recorded — viewing is open to everyone. Mouse: click to select, double-click to open, wheel to move. `--queue` opens one queue directly. On a pipe, or with `--once` or `--plain`, it repaints the plain `status` text instead. |
-| `incoda queues` | Every queue with state on this machine, and whether it is busy. |
+| `incoda queues` | Every queue with state on this machine, and whether it is busy. A holder that asked for the queue alone and whose ticket is readable is marked `(exclusive)`; an unreadable payload cannot carry the bit. Unreadable tickets are counted against the lane and named next to the fraction; the counts are counts, and `status` is where the barrier and its waiters are visible. |
 | `incoda kill --queue KEY --pid N --reason TEXT [--wait 5s] [--force]` | Ask a holder or waiter to stop. Its own `incoda` notices within a poll, prints who killed it and why on its stderr, takes its job tree down and exits `124`. `--force` terminates a participant that does not answer. |
 | `incoda attach --queue KEY --pid N` | Stream a pty job's output live, from its start, read-only, until the job's run process is gone. Viewing is open to everyone; typing at the job is `answer`'s business and stays owner-gated. |
 | `incoda answer --queue KEY --pid N --text TEXT [--owner WHO] [--raw] [--wait 10s]` | Type a reply at a pty job that reported itself `blocked` over OSC 7501 (kind `question`, `permission` or `auth`): the text is delivered to the job's console input, echo-free, and a carriage return completes it unless `--raw`. Only the job's own owner may answer, and only while the job's own record says blocked — the run enforces both against the live ticket and refuses with a named reason. Delivered exits `0`, a refusal `120`, an answer no run took in time `126`. The job's log never shows what was typed. |
@@ -459,7 +462,7 @@ memory limits or cgroups, per-project state directories, distributed locks.
 - **A configured queue refuses a disagreeing `--slots`; an unconfigured one
   settles disagreements on the minimum.** A participant already running is
   never revoked, and that includes the moment an `--exclusive` run arrives: it
-  waits for the holders to leave rather than evicting them.
+  waits for the queue to drain rather than evicting anyone.
 - **A multi-key run holds its first keys while it waits for the rest.** That
   is what makes it deadlock-free, and it also means a job on `a,b` can keep
   `a` busy while it queues on `b`. Use lists for jobs that need everything

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -527,12 +528,9 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 	}
 	sortTickets(live)
 	slots := q.effectiveSlotsLocked(live)
+	admitted := admission(live, slots, 0)
 	for i := range live {
-		// A participant that already acquired is holding whatever the count
-		// says now: an exclusive arrival or a smaller --slots narrows the
-		// queue for newcomers but never revokes a running job, and status
-		// must not show that job as waiting.
-		live[i].Holding = i < slots || live[i].Ticket.AcquireNano != 0
+		live[i].Holding = admitted[i]
 		live[i].fill(now)
 	}
 	if reap && !q.readOnly {
@@ -556,15 +554,27 @@ func (q *Queue) scan(now time.Time, reap bool) ([]Entry, int, error) {
 // there is a configuration error; the minimum is the safe direction, and
 // `incoda run` warns when it sees a disagreement.
 //
-// An exclusive participant overrides both: while one is live the count is 1,
-// whatever the queue or anyone else asked for. That is the one narrowing that
-// survives, because it is the ticket's explicit ask for the machine alone, and
-// it is not counted as a disagreement.
+// An exclusive participant never votes on the count. Its ask is to run with
+// the queue empty, which admission enforces at its turn; narrowing the count
+// as well would pause the jobs ahead of it for no reason. A pool ticket
+// records the pool's count, which that queue's config already sets.
 func effectiveSlots(live []Entry, cfgSlots int) int {
 	slots := 0
 	for _, e := range live {
+		if e.Unreadable() {
+			// Its width is unknown; the zero value would vote one and
+			// idle the slots of a wider unconfigured lane. It already
+			// blocks everything behind it as a barrier, so skipping the
+			// vote protects nothing that is still free.
+			continue
+		}
 		if e.Ticket.Exclusive {
-			return 1
+			// An exclusive ticket asks for the queue alone, not for a
+			// width; it never votes on the count. The barrier is its ask.
+			// (A pool ticket carries the pool's count, which its config
+			// already says; on a queue with no configured count the
+			// minimum of the ordinary tickets, floored at 1, rules.)
+			continue
 		}
 		s := e.Ticket.Slots
 		if s < 1 {
@@ -589,6 +599,95 @@ func effectiveSlots(live []Entry, cfgSlots int) int {
 		}
 	}
 	return slots
+}
+
+// admission reports, in live (arrival) order, which tickets may start now.
+// The wait loop and status both read this one rule, so the two cannot disagree
+// about a given participant set. They feed it different sets: the wait loop
+// adds the slots unpooled runs hold, which it scans; `status` and `queues`
+// read the lane's tickets and cannot see a run with no ticket there.
+//
+// A ticket starts when it is ordinary and fewer than slots tickets ahead of
+// it are holding or admitted, or when it is exclusive and no ticket ahead of
+// it is holding or admitted. Nothing behind a ticket that is not admitted
+// starts either: that is the FIFO property, and for an exclusive ticket it is
+// also the barrier that keeps the queue empty while it runs. An exclusive that
+// already acquired blocks every other ticket that has not, wherever it sorts,
+// so a slow poll cannot start work beside it; that set-wide rule can only read
+// a readable payload, so a torn payload on the exclusive itself is a barrier
+// from its position onward but cannot assert the exclusive bit. A ticket whose
+// payload cannot be read counts as a holder and a barrier and does not start
+// on that payload; its own process substitutes the ticket it holds in memory.
+// extra counts slots already held by runs with no ticket on this lane (unpooled
+// holders); they hold ahead of every waiter.
+func admission(live []Entry, slots, extra int) []bool {
+	ok := make([]bool, len(live))
+	// An exclusive that already acquired holds the whole lane alone, not just
+	// the tickets behind it in this scan. Enrollment stamps strictly after
+	// every live name, so this version cannot place a live ordinary ticket
+	// ahead of an acquired exclusive; an older incoda's ticket (a clock step
+	// before its enrollment) or a torn payload can. The per-index barrier
+	// cannot see that case because "ahead" is not "behind". A torn payload
+	// cannot assert the exclusive bit, so it covers the lane from its
+	// position onward only.
+	heldExclusive := false
+	for i := range live {
+		if live[i].PayloadError == "" && live[i].Ticket.Exclusive && live[i].Ticket.AcquireNano != 0 {
+			heldExclusive = true
+			break
+		}
+	}
+	used := extra
+	barrier := false
+	for i := range live {
+		e := &live[i]
+		if e.PayloadError != "" {
+			// The payload is unreadable, so the exclusive bit and the
+			// acquisition time are unknown. Fail closed: count it as a
+			// holder and a barrier, and do not start it on a payload its
+			// own process could not read. The process that owns it
+			// substitutes its in-memory ticket in Acquire, so it still
+			// starts on data it knows; everyone else waits behind the
+			// barrier.
+			used++
+			barrier = true
+			continue
+		}
+		if e.Ticket.AcquireNano != 0 {
+			// A participant that already acquired is holding whatever the
+			// count says now: nothing revokes a running job.
+			ok[i] = true
+			used++
+			if e.Ticket.Exclusive {
+				barrier = true
+			}
+			continue
+		}
+		if heldExclusive {
+			// Not acquired, and an exclusive is running somewhere in this
+			// set: it may be ahead of this ticket in the scan, but the
+			// lane is held alone.
+			continue
+		}
+		if barrier {
+			continue
+		}
+		if e.Ticket.Exclusive {
+			if used == 0 {
+				ok[i] = true
+				used++
+			}
+			barrier = true
+			continue
+		}
+		if used < slots {
+			ok[i] = true
+			used++
+		} else {
+			barrier = true
+		}
+	}
+	return ok
 }
 
 // effectiveSlotsLocked is effectiveSlots with the queue's own config applied.
@@ -725,7 +824,12 @@ func (q *Queue) snapshot(live []Entry, slots int, cfg Config, cfgErr error, logL
 		s.ConfigError = cfgErr.Error()
 	}
 	for _, e := range live {
-		if e.Holding {
+		// An unreadable payload counts as a holder: admission treats the
+		// ticket as a barrier, even though it does not start through that
+		// payload. The report marks it unreadable and does not count it as
+		// a started holder; the error on the row says why the details are
+		// missing.
+		if e.CountsAsHolder() {
 			s.Holders = append(s.Holders, e)
 		} else {
 			s.Waiting = append(s.Waiting, e)
@@ -795,25 +899,59 @@ func (q *Queue) EnrollContext(ctx context.Context, t Ticket, busy func()) (*Enro
 	return en, nil
 }
 
+// nextArrival returns a stamp strictly greater than every ticket already in
+// the lane directory, taken from the filenames: ticketOrder sorts by the name,
+// so that is the total order admission trusts. The wall clock can repeat a
+// value (its steps are coarse) or step back after an NTP correction, and a
+// ticket that sorted ahead of one already live could start beside a running
+// exclusive, because a ticket that already acquired is never revoked. Reading
+// names costs one ReadDir under the registry hold; reading payloads would mean
+// a file per ticket. A name carrying the maximum stamp (only a writer other
+// than this binary can put one there) saturates the next arrival instead of
+// wrapping negative. Saturation loses arrival order: every later arrival ties
+// at the maximum and the pid decides, so remove such a name to restore FIFO.
+func nextArrival(stamp int64, entries []os.DirEntry) int64 {
+	for _, de := range entries {
+		ord, ok := parseTicketName(de.Name())
+		if !ok || ord.arrivalNano < stamp {
+			continue
+		}
+		if ord.arrivalNano == math.MaxInt64 {
+			stamp = math.MaxInt64
+			continue
+		}
+		stamp = ord.arrivalNano + 1
+	}
+	return stamp
+}
+
 // enrollLocked writes this process's ticket. The caller holds the registry
 // lock.
 func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	// The stamp is taken while holding the registry lock so that stamp
-	// order and file-visibility order cannot disagree.
+	// order and file-visibility order cannot disagree, and moved past
+	// every live ticket so that no arrival can sort ahead of one already
+	// queued.
 	now := time.Now()
+	stamp := now.UnixNano()
+	entries, err := os.ReadDir(q.Dir)
+	if err != nil {
+		return nil, err
+	}
+	stamp = nextArrival(stamp, entries)
 	t.Queue = q.Key
 	t.PID = os.Getpid()
-	t.ArrivalNano = now.UnixNano()
-	t.Arrival = now.Format(time.RFC3339Nano)
+	t.ArrivalNano = stamp
+	t.Arrival = time.Unix(0, stamp).Format(time.RFC3339Nano)
 	// The configured count is the queue's width, in full. A ticket that
 	// does not ask is stamped with it; a ticket that asks for a
 	// different number is refused rather than silently clamped in either
 	// direction. Narrowing used to be allowed through the minimum rule
 	// and one stray "--slots 1" dragged a five-slot queue down to one
 	// for everyone; a job that genuinely needs the queue alone says
-	// --exclusive, which is explicit, visible in status, and still
-	// narrows to 1 on purpose. A missing or broken config leaves an
-	// unset count at 1, the safe direction.
+	// --exclusive, which is explicit, visible in status, and holds the
+	// queue empty at its turn without changing the count. A missing or
+	// broken config leaves an unset count at 1, the safe direction.
 	//
 	// The rules are checked here, under the registry lock, as well as
 	// before: a lane closed, or made to require a reason, after the
@@ -833,6 +971,11 @@ func (q *Queue) enrollLocked(t Ticket) (*Enrollment, error) {
 	switch {
 	case cfgErr == nil && cfg.Slots > 0 && t.Slots >= 1 && t.Slots != cfg.Slots:
 		return nil, NewSlotsDisagreement(q.Key, cfg.Slots, t.Slots, t.Exclusive)
+	case t.Slots < 1 && t.Exclusive:
+		// An exclusive ticket without --slots keeps its zero: it asked for
+		// the queue alone, not for a width, and the ticket should record
+		// no more than that. The configured count, when there is one, is
+		// the queue's, and this ticket never votes on it.
 	case t.Slots < 1 && cfgErr == nil && cfg.Slots > 0:
 		t.Slots = cfg.Slots
 	case t.Slots < 1:

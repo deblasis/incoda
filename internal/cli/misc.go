@@ -149,10 +149,7 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "  %s %s\n", fmt.Sprintf("%-24s", k), p.Red(fmt.Sprintf("(unreadable: %v)", err)))
 			continue
 		}
-		state := p.BoldGreen("free")
-		if len(snap.Holders) > 0 {
-			state = p.BoldYellow(fmt.Sprintf("%d/%d held, %d waiting", len(snap.Holders), snap.EffectiveSlots, len(snap.Waiting)))
-		}
+		state := queueStateLine(p, snap)
 		for _, u := range upstream[k] {
 			state += p.Dim(fmt.Sprintf(", %d upstream (%s)", u.Waiting, u.Lane))
 		}
@@ -166,6 +163,26 @@ func cmdQueues(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  %s %s%s\n", fmt.Sprintf("%-24s", k), state, desc)
 	}
 	return nil
+}
+
+// queueStateLine is the compact one-line state `queues` prints for a lane.
+// The fraction counts started holders; unreadable tickets count against the
+// lane and are named next to the fraction instead of inflating it.
+func queueStateLine(p colorize.Palette, snap *lane.Snapshot) string {
+	if len(snap.Holders) == 0 {
+		return p.BoldGreen("free")
+	}
+	held := fmt.Sprintf("%d/%d held", lane.StartedHolders(snap.Holders), snap.EffectiveSlots)
+	if lane.HasExclusiveHolder(snap.Holders) {
+		// A holder asking for the queue alone admits nobody, so the
+		// fraction alone would imply free capacity. The marker stays
+		// beside the fraction; unreadable tickets are named after it.
+		held += " (exclusive)"
+	}
+	if n := lane.UnreadableCount(snap.Holders); n > 0 {
+		held += fmt.Sprintf(", %d unreadable", n)
+	}
+	return p.BoldYellow(fmt.Sprintf("%s, %d waiting", held, len(snap.Waiting)))
 }
 
 func cmdForceRelease(args []string, stdout, stderr io.Writer) error {

@@ -207,7 +207,7 @@ func (m Model) renderOverview(w int) string {
 		row := fmt.Sprintf("  %-*s  %-*s  %*s  %*s  %*s  %s",
 			keyW, q.Key,
 			stateW, plainState(*q),
-			heldW, fmt.Sprintf("%d/%d", len(q.Holders), q.EffectiveSlots),
+			heldW, fmt.Sprintf("%d/%d", lane.StartedHolders(q.Holders), q.EffectiveSlots),
 			waitW, orDot(len(q.Waiting)),
 			oldW, oldestWait(*q),
 			trunc(guards(*q), descW))
@@ -296,7 +296,7 @@ func (m Model) renderQueue(w int) string {
 	}
 	lines := []string{}
 	title := st.title.Render(q.Key) + "  " + m.badge(*q, true) + "  " +
-		st.dim.Render(fmt.Sprintf("%d/%d slot(s)", len(q.Holders), q.EffectiveSlots))
+		st.dim.Render(slotsText(*q))
 	if q.Config.RequireReason {
 		title += "  " + st.dim.Render("reason required")
 	}
@@ -390,7 +390,9 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	st := m.st
 	t := p.entry.Ticket
 	when := "held " + fmtSeconds(p.entry.HeldSeconds)
-	if !p.holding {
+	if p.entry.Unreadable() {
+		when = "unreadable"
+	} else if !p.holding {
 		when = "waited " + fmtSeconds(p.entry.WaitingSeconds)
 	}
 	idpart := fmt.Sprintf("  pid %-7d %-16s", t.PID, when)
@@ -429,7 +431,7 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 	} else {
 		first = trunc(idpart, budget-lipgloss.Width(mark)-1) + " " + mark
 	}
-	if t.Exclusive {
+	if t.Exclusive && !p.entry.Unreadable() {
 		first += " EXCLUSIVE"
 	}
 	if t.Owner != "" {
@@ -453,7 +455,10 @@ func (m Model) renderParticipant(p participant, selected bool, w int) []string {
 			first += "  " + m.statusStyle(rec.State).Render(status)
 		}
 	}
-	second := st.dim.Render("    " + trunc(t.CommandString(), w-4))
+	second := ""
+	if !p.entry.Unreadable() {
+		second = st.dim.Render("    " + trunc(t.CommandString(), w-4))
+	}
 	third := st.dim.Render("    in " + trunc(orUnknown(t.Dir), w-7))
 	if p.entry.PayloadError != "" {
 		third = st.evBad.Render("    ticket unreadable: " + p.entry.PayloadError)
@@ -654,6 +659,17 @@ func (m Model) badge(q report.Queue, wide bool) string {
 	}
 }
 
+// slotsText is the queue title's width line: started holders over the
+// effective width, with unreadable tickets named because they count against
+// the lane but cannot say whether they started.
+func slotsText(q report.Queue) string {
+	text := fmt.Sprintf("%d/%d slot(s)", lane.StartedHolders(q.Holders), q.EffectiveSlots)
+	if n := lane.UnreadableCount(q.Holders); n > 0 {
+		text += fmt.Sprintf(", %d unreadable", n)
+	}
+	return text
+}
+
 // plainState is the unpainted state word, the same text the badge paints,
 // so a row can be laid out by width before color is applied.
 func plainState(q report.Queue) string {
@@ -664,18 +680,17 @@ func plainState(q report.Queue) string {
 		return "EXCLUSIVE"
 	case q.Free:
 		return "FREE"
+	case lane.StartedHolders(q.Holders) == 0 && lane.UnreadableCount(q.Holders) > 0:
+		// No readable start, but the lane is not free: the ticket is a
+		// barrier whose payload cannot say what it is.
+		return "UNREADABLE"
 	default:
-		return fmt.Sprintf("%d/%d HELD", len(q.Holders), q.EffectiveSlots)
+		return fmt.Sprintf("%d/%d HELD", lane.StartedHolders(q.Holders), q.EffectiveSlots)
 	}
 }
 
 func hasExclusive(q report.Queue) bool {
-	for _, e := range q.Holders {
-		if e.Ticket.Exclusive {
-			return true
-		}
-	}
-	return false
+	return lane.HasExclusiveHolder(q.Holders)
 }
 
 func oldestWait(q report.Queue) string {
