@@ -83,20 +83,22 @@ func TestConsoleFactsSummaryNamesTheDecision(t *testing.T) {
 	}
 }
 
-func TestSettleStateHoldsTheWindow(t *testing.T) {
+func TestSettleStateRestartsTheQuietWindow(t *testing.T) {
 	for i, tc := range []struct {
-		visible  bool
-		elapsed  time.Duration
-		needHide bool
-		done     bool
+		visible       bool
+		sinceLastHide time.Duration
+		sinceFirst    time.Duration
+		needHide      bool
+		done          bool
 	}{
-		{true, 100 * time.Millisecond, true, false}, // remapped early: hide again
-		{true, 2 * time.Second, true, false},        // remapped late: hide again
-		{false, 2 * time.Second, false, false},      // still inside the window
-		{false, hideRetryWindow, false, true},       // window held to the end
-		{true, hideRetryWindow, true, true},         // still visible at the end
+		{true, 100 * time.Millisecond, 100 * time.Millisecond, true, false},
+		{true, 2 * time.Second, 2 * time.Second, true, false},
+		{false, 2 * time.Second, 2 * time.Second, false, false},          // quiet window not over
+		{false, hideRetryWindow, hideRetryWindow, false, true},           // quiet to the end
+		{true, hideRetryWindow, hideRetryWindow, true, true},             // visible at the end
+		{false, 10 * time.Millisecond, 2 * hideRetryWindow, false, true}, // cap
 	} {
-		needHide, done := settleState(tc.visible, tc.elapsed)
+		needHide, done := settleState(tc.visible, tc.sinceLastHide, tc.sinceFirst)
 		if needHide != tc.needHide || done != tc.done {
 			t.Fatalf("case %d: got (%v,%v), want (%v,%v)", i, needHide, done, tc.needHide, tc.done)
 		}

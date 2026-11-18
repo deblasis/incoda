@@ -122,11 +122,15 @@ func consoleFactsSummary() string {
 		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, hidden, would)
 }
 
-// settleState is the post-hide decision: hold the settle window for conhost's
-// remaps (measured at 1.0-1.8 s, so the window is hideRetryWindow long) and
-// re-hide whenever the window is visible. done is the end of that window.
-func settleState(visible bool, elapsed time.Duration) (needHide bool, done bool) {
-	return visible, elapsed >= hideRetryWindow
+// settleState is the post-hide decision: every hide restarts a quiet
+// window, so the verdict is due only after hideRetryWindow with no remap
+// (measured at 1.0-1.8 s). The overall cap bounds a console that keeps
+// remapping.
+func settleState(visible bool, sinceLastHide, sinceFirstHide time.Duration) (needHide bool, done bool) {
+	if sinceFirstHide >= 2*hideRetryWindow {
+		return visible, true
+	}
+	return visible, sinceLastHide >= hideRetryWindow
 }
 
 // maybeHideConsole hides incoda's own console window when the predicate
@@ -145,8 +149,8 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 	started := time.Now()
 	deadline := started.Add(hideRetryWindow)
 	spawnerHidden := startupWantsHidden()
-	settleUntil := time.Time{}
 	settling := false
+	var firstHide, lastHide time.Time
 	for {
 		f := gatherConsoleFacts()
 		// The stable clauses: nobody else attached, output captured, and a
@@ -156,21 +160,28 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 		}
 		if shouldHide(f, cmd) {
 			procShowWindow.Call(f.Window, swHide)
+			now := time.Now()
+			if firstHide.IsZero() {
+				firstHide = now
+			}
+			// Every hide restarts the quiet window: conhost remaps a fresh
+			// console 1.0-1.8 s later, so a verdict right after a hide has
+			// seen nothing. The overall cap stops a console that keeps
+			// remapping from holding the run.
+			lastHide = now
 			fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1\n")
-			// conhost can map the window again up to ~1.8 s after the first
-			// hide; sampling twice at 50 ms proved nothing. Keep re-hiding
-			// for a full settle window, then judge the end state.
 			settling = true
-			settleUntil = time.Now().Add(hideRetryWindow)
-		} else if settling {
-			elapsed := time.Since(settleUntil) + hideRetryWindow
-			needHide, done := settleState(f.Visible, elapsed)
+		}
+		if settling {
+			now := time.Now()
+			needHide, done := settleState(f.Visible, now.Sub(lastHide), now.Sub(firstHide))
 			if needHide {
 				procShowWindow.Call(f.Window, swHide)
+				lastHide = now
 			}
 			if done {
 				verdict := "hidden"
-				if f.Visible {
+				if f.Visible || needHide {
 					verdict = "timeout"
 				}
 				fmt.Fprintf(stderr, "event=console-hide clause=captured-stdio-attached1 settle=%s\n", verdict)
