@@ -5,6 +5,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -67,6 +68,19 @@ func gatherConsoleFacts() consoleFacts {
 	return f
 }
 
+// consoleFactsSummary is the doctor's one-line view of the same facts the
+// hide decision uses: a run whose console looks like a hide candidate and
+// then does not get hidden is a bug report, and this line says why.
+func consoleFactsSummary() string {
+	f := gatherConsoleFacts()
+	cmd := ""
+	if args := os.Args[1:]; len(args) > 0 {
+		cmd = args[0]
+	}
+	return fmt.Sprintf("window=%v visible=%v attached=%d stdout-console=%v stderr-console=%v hide-would-fire=%v",
+		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, shouldHide(f, cmd))
+}
+
 // maybeHideConsole hides incoda's own console window when the predicate
 // holds. A fresh console can be mapped up to ~2 s after CreateProcess under
 // Windows Terminal, so a failing visibility sample retries while every other
@@ -80,7 +94,8 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 	if !hidableCommand(cmd) {
 		return
 	}
-	deadline := time.Now().Add(hideRetryWindow)
+	started := time.Now()
+	deadline := started.Add(hideRetryWindow)
 	for {
 		f := gatherConsoleFacts()
 		if shouldHide(f, cmd) {
@@ -88,10 +103,22 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 			fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1\n")
 			return
 		}
-		// Retry only while every stable clause still holds and the window
-		// simply has not been shown yet. Anything else is a final no.
-		stable := f.HasWindow && !f.Visible && f.Attached == 1 && !f.StdoutCon && !f.StderrCon && hidableCommand(cmd)
-		if !stable || time.Now().After(deadline) {
+		// The stable clauses: nobody else attached, output captured, and a
+		// command we may hide. When they fail, this is a final no.
+		if f.Attached != 1 || f.StdoutCon || f.StderrCon || !hidableCommand(cmd) {
+			return
+		}
+		if f.HasWindow {
+			// A console that exists but is not visible was created hidden by
+			// the spawner (Start-Process -WindowStyle Hidden): it will never
+			// be shown, so hiding it now is the end of the matter and the
+			// 3 s retry would only delay the run. A fresh default-terminal
+			// console is mapped ~0.5-2 s after CreateProcess and reads as
+			// no-window until then, so the wait below is for that case.
+			procShowWindow.Call(f.Window, swHide)
+			return
+		}
+		if time.Since(started) > hideRetryWindow || time.Now().After(deadline) {
 			return
 		}
 		time.Sleep(hideRetryStep)
