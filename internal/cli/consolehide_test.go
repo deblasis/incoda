@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Console self-hide: incoda hides its OWN console window only when nobody
@@ -78,6 +79,26 @@ func TestConsoleFactsSummaryNamesTheDecision(t *testing.T) {
 	for _, want := range []string{"window=", "attached=", "hide-would-fire="} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("doctor console line lacks %q: %s", want, line)
+		}
+	}
+}
+
+func TestSettleStateHoldsTheWindow(t *testing.T) {
+	for i, tc := range []struct {
+		visible  bool
+		elapsed  time.Duration
+		needHide bool
+		done     bool
+	}{
+		{true, 100 * time.Millisecond, true, false}, // remapped early: hide again
+		{true, 2 * time.Second, true, false},        // remapped late: hide again
+		{false, 2 * time.Second, false, false},      // still inside the window
+		{false, hideRetryWindow, false, true},       // window held to the end
+		{true, hideRetryWindow, true, true},         // still visible at the end
+	} {
+		needHide, done := settleState(tc.visible, tc.elapsed)
+		if needHide != tc.needHide || done != tc.done {
+			t.Fatalf("case %d: got (%v,%v), want (%v,%v)", i, needHide, done, tc.needHide, tc.done)
 		}
 	}
 }

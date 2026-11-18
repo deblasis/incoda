@@ -37,25 +37,25 @@ const (
 // startupInfo is STARTUPINFOW. The explicit pad keeps the pointer fields
 // 8-aligned after Cb.
 type startupInfo struct {
-	Cb            uint32
-	_             uint32
-	LpReserved    *uint16
-	LpDesktop     *uint16
-	LpTitle       *uint16
-	Dx            uint32
-	Dy            uint32
-	DxSize        uint32
-	DySize        uint32
-	DxCountChars  uint32
-	DyCountChars  uint32
-	DwFill        uint32
-	DwFlags       uint32
-	WShowWindow   uint16
-	CbReserved2   uint16
-	LpReserved2   *byte
-	HStdInput     syscall.Handle
-	HStdOutput    syscall.Handle
-	HStdError     syscall.Handle
+	Cb           uint32
+	_            uint32
+	LpReserved   *uint16
+	LpDesktop    *uint16
+	LpTitle      *uint16
+	Dx           uint32
+	Dy           uint32
+	DxSize       uint32
+	DySize       uint32
+	DxCountChars uint32
+	DyCountChars uint32
+	DwFill       uint32
+	DwFlags      uint32
+	WShowWindow  uint16
+	CbReserved2  uint16
+	LpReserved2  *byte
+	HStdInput    syscall.Handle
+	HStdOutput   syscall.Handle
+	HStdError    syscall.Handle
 }
 
 // startupWantsHidden reports that the parent asked for SW_HIDE in this
@@ -122,6 +122,13 @@ func consoleFactsSummary() string {
 		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, hidden, would)
 }
 
+// settleState is the post-hide decision: hold the settle window for conhost's
+// remaps (measured at 1.0-1.8 s, so the window is hideRetryWindow long) and
+// re-hide whenever the window is visible. done is the end of that window.
+func settleState(visible bool, elapsed time.Duration) (needHide bool, done bool) {
+	return visible, elapsed >= hideRetryWindow
+}
+
 // maybeHideConsole hides incoda's own console window when the predicate
 // holds. A fresh console can be mapped up to ~2 s after CreateProcess under
 // Windows Terminal, so a failing visibility sample retries while every other
@@ -138,8 +145,8 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 	started := time.Now()
 	deadline := started.Add(hideRetryWindow)
 	spawnerHidden := startupWantsHidden()
+	settleUntil := time.Time{}
 	settling := false
-	hiddenStreak := 0
 	for {
 		f := gatherConsoleFacts()
 		// The stable clauses: nobody else attached, output captured, and a
@@ -150,21 +157,24 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 		if shouldHide(f, cmd) {
 			procShowWindow.Call(f.Window, swHide)
 			fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1\n")
-			// conhost can map the window again a few hundred ms after the
-			// first hide (measured: visible again at 1.0-1.8 s). Settle on
-			// two consecutive hidden samples before declaring it done.
+			// conhost can map the window again up to ~1.8 s after the first
+			// hide; sampling twice at 50 ms proved nothing. Keep re-hiding
+			// for a full settle window, then judge the end state.
 			settling = true
-			hiddenStreak = 0
+			settleUntil = time.Now().Add(hideRetryWindow)
 		} else if settling {
-			if f.Visible {
+			elapsed := time.Since(settleUntil) + hideRetryWindow
+			needHide, done := settleState(f.Visible, elapsed)
+			if needHide {
 				procShowWindow.Call(f.Window, swHide)
-				hiddenStreak = 0
-			} else {
-				hiddenStreak++
-				if hiddenStreak >= 2 {
-					fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1 settle=hidden\n")
-					return
+			}
+			if done {
+				verdict := "hidden"
+				if f.Visible {
+					verdict = "timeout"
 				}
+				fmt.Fprintf(stderr, "event=console-hide clause=captured-stdio-attached1 settle=%s\n", verdict)
+				return
 			}
 		} else if f.HasWindow && !f.Visible && spawnerHidden {
 			// The parent asked for a hidden window (shard-runner's shape):
