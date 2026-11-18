@@ -116,8 +116,10 @@ func consoleFactsSummary() string {
 	if args := os.Args[1:]; len(args) > 0 {
 		cmd = args[0]
 	}
+	hidden := startupWantsHidden()
+	would := shouldHide(f, cmd) || (hidden && f.HasWindow && !f.Visible && f.Attached == 1 && !f.StdoutCon && !f.StderrCon && hidableCommand(cmd))
 	return fmt.Sprintf("window=%v visible=%v attached=%d stdout-console=%v stderr-console=%v startup-hidden=%v hide-would-fire=%v",
-		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, startupWantsHidden(), shouldHide(f, cmd))
+		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, hidden, would)
 }
 
 // maybeHideConsole hides incoda's own console window when the predicate
@@ -136,19 +138,35 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 	started := time.Now()
 	deadline := started.Add(hideRetryWindow)
 	spawnerHidden := startupWantsHidden()
+	settling := false
+	hiddenStreak := 0
 	for {
 		f := gatherConsoleFacts()
-		if shouldHide(f, cmd) {
-			procShowWindow.Call(f.Window, swHide)
-			fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1\n")
-			return
-		}
 		// The stable clauses: nobody else attached, output captured, and a
 		// command we may hide. When they fail, this is a final no.
 		if f.Attached != 1 || f.StdoutCon || f.StderrCon || !hidableCommand(cmd) {
 			return
 		}
-		if f.HasWindow && !f.Visible && spawnerHidden {
+		if shouldHide(f, cmd) {
+			procShowWindow.Call(f.Window, swHide)
+			fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1\n")
+			// conhost can map the window again a few hundred ms after the
+			// first hide (measured: visible again at 1.0-1.8 s). Settle on
+			// two consecutive hidden samples before declaring it done.
+			settling = true
+			hiddenStreak = 0
+		} else if settling {
+			if f.Visible {
+				procShowWindow.Call(f.Window, swHide)
+				hiddenStreak = 0
+			} else {
+				hiddenStreak++
+				if hiddenStreak >= 2 {
+					fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1 settle=hidden\n")
+					return
+				}
+			}
+		} else if f.HasWindow && !f.Visible && spawnerHidden {
 			// The parent asked for a hidden window (shard-runner's shape):
 			// this console will not be shown by us or by conhost, so hiding
 			// it now is the end of the matter. Without that fact a console
@@ -160,6 +178,9 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 			return
 		}
 		if time.Since(started) > hideRetryWindow || time.Now().After(deadline) {
+			if settling {
+				fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1 settle=timeout\n")
+			}
 			return
 		}
 		time.Sleep(hideRetryStep)
