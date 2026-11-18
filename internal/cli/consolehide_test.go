@@ -95,8 +95,9 @@ func TestSettleStateRestartsTheQuietWindow(t *testing.T) {
 		{true, 2 * time.Second, 2 * time.Second, true, false},
 		{false, 2 * time.Second, 2 * time.Second, false, false},          // quiet window not over
 		{false, hideRetryWindow, hideRetryWindow, false, true},           // quiet to the end
-		{true, hideRetryWindow, hideRetryWindow, true, true},             // visible at the end
-		{false, 10 * time.Millisecond, 2 * hideRetryWindow, false, true}, // cap
+		{true, hideRetryWindow, hideRetryWindow, true, false},            // visible: window restarts
+		{false, 10 * time.Millisecond, 2 * hideRetryWindow, false, true}, // cap, quiet
+		{true, 10 * time.Millisecond, 2 * hideRetryWindow, true, true},   // cap, still visible
 	} {
 		needHide, done := settleState(tc.visible, tc.sinceLastHide, tc.sinceFirst)
 		if needHide != tc.needHide || done != tc.done {

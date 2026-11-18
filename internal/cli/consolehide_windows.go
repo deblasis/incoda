@@ -127,10 +127,11 @@ func consoleFactsSummary() string {
 // (measured at 1.0-1.8 s). The overall cap bounds a console that keeps
 // remapping.
 func settleState(visible bool, sinceLastHide, sinceFirstHide time.Duration) (needHide bool, done bool) {
-	if sinceFirstHide >= 2*hideRetryWindow {
-		return visible, true
+	if visible {
+		// A remap restarts the quiet window; only the overall cap ends it.
+		return true, sinceFirstHide >= 2*hideRetryWindow
 	}
-	return visible, sinceLastHide >= hideRetryWindow
+	return false, sinceLastHide >= hideRetryWindow || sinceFirstHide >= 2*hideRetryWindow
 }
 
 // maybeHideConsole hides incoda's own console window when the predicate
@@ -181,7 +182,7 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 			}
 			if done {
 				verdict := "hidden"
-				if f.Visible || needHide {
+				if needHide || now.Sub(lastHide) < hideRetryWindow {
 					verdict = "timeout"
 				}
 				fmt.Fprintf(stderr, "event=console-hide clause=captured-stdio-attached1 settle=%s\n", verdict)
@@ -198,10 +199,7 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 			fmt.Fprint(stderr, "event=console-hide clause=spawner-hidden\n")
 			return
 		}
-		if time.Since(started) > hideRetryWindow || time.Now().After(deadline) {
-			if settling {
-				fmt.Fprint(stderr, "event=console-hide clause=captured-stdio-attached1 settle=timeout\n")
-			}
+		if !settling && (time.Since(started) > hideRetryWindow || time.Now().After(deadline)) {
 			return
 		}
 		time.Sleep(hideRetryStep)
