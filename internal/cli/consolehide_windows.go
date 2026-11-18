@@ -19,6 +19,7 @@ var (
 	procGetConsoleProcessList = kernel32.NewProc("GetConsoleProcessList")
 	procGetStdHandle          = kernel32.NewProc("GetStdHandle")
 	procGetConsoleMode        = kernel32.NewProc("GetConsoleMode")
+	procGetStartupInfoW       = kernel32.NewProc("GetStartupInfoW")
 	procIsWindowVisible       = user32.NewProc("IsWindowVisible")
 	procShowWindow            = user32.NewProc("ShowWindow")
 )
@@ -29,7 +30,45 @@ const (
 	stdErrorHandle  = ^uintptr(11) // -12
 
 	swHide = 0
+
+	startfUseShowWindow = 0x1
 )
+
+// startupInfo is STARTUPINFOW. The explicit pad keeps the pointer fields
+// 8-aligned after Cb.
+type startupInfo struct {
+	Cb            uint32
+	_             uint32
+	LpReserved    *uint16
+	LpDesktop     *uint16
+	LpTitle       *uint16
+	Dx            uint32
+	Dy            uint32
+	DxSize        uint32
+	DySize        uint32
+	DxCountChars  uint32
+	DyCountChars  uint32
+	DwFill        uint32
+	DwFlags       uint32
+	WShowWindow   uint16
+	CbReserved2   uint16
+	LpReserved2   *byte
+	HStdInput     syscall.Handle
+	HStdOutput    syscall.Handle
+	HStdError     syscall.Handle
+}
+
+// startupWantsHidden reports that the parent asked for SW_HIDE in this
+// process's STARTUPINFO - Start-Process -WindowStyle Hidden and the
+// shard-runner shape. Only then may a not-yet-visible console be treated as
+// finally hidden: a fresh default-terminal console also reads that way for
+// a moment before its window is mapped.
+func startupWantsHidden() bool {
+	var si startupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	procGetStartupInfoW.Call(uintptr(unsafe.Pointer(&si)))
+	return si.DwFlags&startfUseShowWindow != 0 && si.WShowWindow == swHide
+}
 
 // isConsole reports whether h is a console handle. GetConsoleMode fails for
 // pipes, files and the NUL device (which GetFileType would call
@@ -77,8 +116,8 @@ func consoleFactsSummary() string {
 	if args := os.Args[1:]; len(args) > 0 {
 		cmd = args[0]
 	}
-	return fmt.Sprintf("window=%v visible=%v attached=%d stdout-console=%v stderr-console=%v hide-would-fire=%v",
-		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, shouldHide(f, cmd))
+	return fmt.Sprintf("window=%v visible=%v attached=%d stdout-console=%v stderr-console=%v startup-hidden=%v hide-would-fire=%v",
+		f.HasWindow, f.Visible, f.Attached, f.StdoutCon, f.StderrCon, startupWantsHidden(), shouldHide(f, cmd))
 }
 
 // maybeHideConsole hides incoda's own console window when the predicate
@@ -96,6 +135,7 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 	}
 	started := time.Now()
 	deadline := started.Add(hideRetryWindow)
+	spawnerHidden := startupWantsHidden()
 	for {
 		f := gatherConsoleFacts()
 		if shouldHide(f, cmd) {
@@ -108,14 +148,15 @@ func maybeHideConsole(args []string, stderr io.Writer) {
 		if f.Attached != 1 || f.StdoutCon || f.StderrCon || !hidableCommand(cmd) {
 			return
 		}
-		if f.HasWindow {
-			// A console that exists but is not visible was created hidden by
-			// the spawner (Start-Process -WindowStyle Hidden): it will never
-			// be shown, so hiding it now is the end of the matter and the
-			// 3 s retry would only delay the run. A fresh default-terminal
-			// console is mapped ~0.5-2 s after CreateProcess and reads as
-			// no-window until then, so the wait below is for that case.
+		if f.HasWindow && !f.Visible && spawnerHidden {
+			// The parent asked for a hidden window (shard-runner's shape):
+			// this console will not be shown by us or by conhost, so hiding
+			// it now is the end of the matter. Without that fact a console
+			// can read as "exists but invisible" for ~100-300 ms before its
+			// window is mapped; hiding it then and returning leaves the
+			// mapped window visible (measured: vis=1 after 94/203 ms).
 			procShowWindow.Call(f.Window, swHide)
+			fmt.Fprint(stderr, "event=console-hide clause=spawner-hidden\n")
 			return
 		}
 		if time.Since(started) > hideRetryWindow || time.Now().After(deadline) {
