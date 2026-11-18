@@ -282,6 +282,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "%s %s  %s/%s\n", p.Dim("go:       "), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	host, _ := os.Hostname()
 	fmt.Fprintf(stdout, "%s %s\n", p.Dim("host:     "), host)
+	fmt.Fprintf(stdout, "%s %s\n", p.Dim("console:  "), consoleFactsSummary())
 
 	dir, err := lane.StateDir()
 	if err != nil {
