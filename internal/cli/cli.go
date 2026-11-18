@@ -106,6 +106,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	cmd, rest := args[0], args[1:]
+	// A console-less parent gives us a fresh visible console window; hide it
+	// when nobody is attached and the output is captured (see consolehide.go).
+	maybeHideConsole(args, stderr)
 
 	var err error
 	switch cmd {
