@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Console self-hide: incoda hides its OWN console window only when nobody
 // else is attached and its output is captured, so no human can be reading
@@ -67,5 +70,14 @@ func TestConsoleHidePredicate(t *testing.T) {
 				t.Fatalf("shouldHide(%+v, %q) = %v, want %v", c.f, c.cmd, got, c.want)
 			}
 		})
+	}
+}
+
+func TestConsoleFactsSummaryNamesTheDecision(t *testing.T) {
+	line := consoleFactsSummary()
+	for _, want := range []string{"window=", "attached=", "hide-would-fire="} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("doctor console line lacks %q: %s", want, line)
+		}
 	}
 }
